@@ -2,6 +2,9 @@
 .timeline-scroll {
   flex: 1;
   overflow-y: auto;
+  /* Prevent the browser from "helpfully" anchoring to mid-content nodes when
+     the right panel reflows. We own stick-to-bottom ourselves. */
+  overflow-anchor: none;
   padding: 4px 0 0;
   /* Extend the scroll box into the container's side gutters so the scrollbar
      sits flush against the right-panel divider instead of leaving a gap.
@@ -11,6 +14,11 @@
   padding-left: var(--center-panel-gutter, 0px);
   padding-right: var(--center-panel-gutter, 0px);
   background: var(--app-bg);
+}
+
+.timeline-scroll,
+.timeline-scroll * {
+  overflow-anchor: none;
 }
 
 .timeline-items {

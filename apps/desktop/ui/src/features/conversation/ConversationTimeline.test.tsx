@@ -1696,11 +1696,6 @@ describe("ThinkingIndicator", () => {
   });
 
   it("follows streaming chunks when already near bottom", async () => {
-    const scrollIntoView = vi.fn();
-    Object.defineProperty(HTMLElement.prototype, "scrollIntoView", {
-      configurable: true,
-      value: scrollIntoView,
-    });
     const snapshot = makeSnapshot({
       timeline: [{ Message: "streaming-msg" }],
       messages: [{ id: "streaming-msg", role: "Assistant", body: "hello" }],
@@ -1711,30 +1706,31 @@ describe("ThinkingIndicator", () => {
     );
 
     await new Promise((resolve) => requestAnimationFrame(resolve));
-    scrollIntoView.mockClear();
 
     const scroller = container.querySelector(".timeline-scroll") as HTMLDivElement;
+    let scrollTop = 790;
     Object.defineProperty(scroller, "scrollHeight", { configurable: true, value: 1000 });
     Object.defineProperty(scroller, "clientHeight", { configurable: true, value: 200 });
-    Object.defineProperty(scroller, "scrollTop", { configurable: true, value: 790 });
+    Object.defineProperty(scroller, "scrollTop", {
+      configurable: true,
+      get: () => scrollTop,
+      set: (value: number) => {
+        scrollTop = value;
+      },
+    });
 
     appendStreamingMessageDelta("streaming-msg", " **world**");
     await new Promise((resolve) => window.setTimeout(resolve, 100));
     await new Promise((resolve) => requestAnimationFrame(resolve));
+    await new Promise((resolve) => requestAnimationFrame(resolve));
 
-    expect(scrollIntoView).toHaveBeenCalled();
+    expect(scrollTop).toBe(1000);
     expect(container.querySelector(".msg-streaming-markdown .md-bold")?.textContent).toBe(
       "world",
     );
-    delete (HTMLElement.prototype as Partial<HTMLElement>).scrollIntoView;
   });
 
   it("keeps manual scroll position instead of forcing bottom follow", async () => {
-    const scrollIntoView = vi.fn();
-    Object.defineProperty(HTMLElement.prototype, "scrollIntoView", {
-      configurable: true,
-      value: scrollIntoView,
-    });
     const snapshot = makeSnapshot({
       timeline: [{ Message: "msg-1" }],
       messages: [{ id: "msg-1", role: "Assistant", body: "hello" }],
@@ -1745,14 +1741,23 @@ describe("ThinkingIndicator", () => {
     );
 
     await new Promise((resolve) => requestAnimationFrame(resolve));
-    scrollIntoView.mockClear();
 
     const scroller = container.querySelector(".timeline-scroll") as HTMLDivElement;
+    let scrollTop = 100;
+    let scrollTopWrites = 0;
     Object.defineProperty(scroller, "scrollHeight", { configurable: true, value: 1000 });
     Object.defineProperty(scroller, "clientHeight", { configurable: true, value: 200 });
-    Object.defineProperty(scroller, "scrollTop", { configurable: true, value: 100 });
-    fireEvent.wheel(scroller);
+    Object.defineProperty(scroller, "scrollTop", {
+      configurable: true,
+      get: () => scrollTop,
+      set: (value: number) => {
+        scrollTopWrites += 1;
+        scrollTop = value;
+      },
+    });
+    fireEvent.wheel(scroller, { deltaY: -40 });
     fireEvent.scroll(scroller);
+    const writesAfterManualScroll = scrollTopWrites;
 
     rerender(
       <ConversationTimeline
@@ -1761,17 +1766,54 @@ describe("ThinkingIndicator", () => {
       />,
     );
     await new Promise((resolve) => requestAnimationFrame(resolve));
+    await new Promise((resolve) => requestAnimationFrame(resolve));
 
-    expect(scrollIntoView).not.toHaveBeenCalled();
-    delete (HTMLElement.prototype as Partial<HTMLElement>).scrollIntoView;
+    expect(scrollTopWrites).toBe(writesAfterManualScroll);
+    expect(scrollTop).toBe(100);
+  });
+
+  it("stays pinned to bottom across unrelated parent re-renders", async () => {
+    const snapshot = makeSnapshot({
+      timeline: [{ Message: "msg-1" }],
+      messages: [{ id: "msg-1", role: "Assistant", body: "hello" }],
+    });
+
+    const { container, rerender } = render(
+      <ConversationTimeline snapshot={snapshot} onPermissionSelect={() => {}} />,
+    );
+
+    await new Promise((resolve) => requestAnimationFrame(resolve));
+
+    const scroller = container.querySelector(".timeline-scroll") as HTMLDivElement;
+    let scrollTop = 1000;
+    Object.defineProperty(scroller, "scrollHeight", { configurable: true, value: 1000 });
+    Object.defineProperty(scroller, "clientHeight", { configurable: true, value: 200 });
+    Object.defineProperty(scroller, "scrollTop", {
+      configurable: true,
+      get: () => scrollTop,
+      set: (value: number) => {
+        scrollTop = value;
+      },
+    });
+
+    // Simulate a layout nudge away from the true bottom (what Git/Files clicks
+    // often leave behind), then an unrelated parent re-render.
+    scrollTop = 820;
+    fireEvent.scroll(scroller);
+
+    rerender(
+      <ConversationTimeline
+        snapshot={{ ...snapshot, repository: { ...snapshot.repository, branch: "feature" } }}
+        onPermissionSelect={() => {}}
+      />,
+    );
+    await new Promise((resolve) => requestAnimationFrame(resolve));
+    await new Promise((resolve) => requestAnimationFrame(resolve));
+
+    expect(scrollTop).toBe(1000);
   });
 
   it("keeps following after programmatic scroll events and content resize", async () => {
-    const scrollIntoView = vi.fn();
-    Object.defineProperty(HTMLElement.prototype, "scrollIntoView", {
-      configurable: true,
-      value: scrollIntoView,
-    });
     let triggerResize = () => {};
     const OriginalResizeObserver = globalThis.ResizeObserver;
     class TestResizeObserver implements ResizeObserver {
@@ -1793,19 +1835,26 @@ describe("ThinkingIndicator", () => {
     );
 
     await new Promise((resolve) => requestAnimationFrame(resolve));
-    scrollIntoView.mockClear();
 
     const scroller = container.querySelector(".timeline-scroll") as HTMLDivElement;
+    let scrollTop = 100;
     Object.defineProperty(scroller, "scrollHeight", { configurable: true, value: 1000 });
     Object.defineProperty(scroller, "clientHeight", { configurable: true, value: 200 });
-    Object.defineProperty(scroller, "scrollTop", { configurable: true, value: 100 });
+    Object.defineProperty(scroller, "scrollTop", {
+      configurable: true,
+      get: () => scrollTop,
+      set: (value: number) => {
+        scrollTop = value;
+      },
+    });
+    // Programmatic scroll events must not unpin sticky follow.
     fireEvent.scroll(scroller);
 
     triggerResize();
     await new Promise((resolve) => requestAnimationFrame(resolve));
+    await new Promise((resolve) => requestAnimationFrame(resolve));
 
-    expect(scrollIntoView).toHaveBeenCalled();
+    expect(scrollTop).toBe(1000);
     globalThis.ResizeObserver = OriginalResizeObserver;
-    delete (HTMLElement.prototype as Partial<HTMLElement>).scrollIntoView;
   });
 });

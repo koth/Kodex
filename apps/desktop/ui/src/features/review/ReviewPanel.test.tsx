@@ -1100,6 +1100,52 @@ describe("ReviewPanel scoped change sets", () => {
     expect(onRefresh).toHaveBeenCalled();
   });
 
+  it("shows a hover commit action only when staged changes exist", async () => {
+    const { rerender } = render(
+      <ReviewPanel
+        snapshot={makeSnapshot({
+          repository: {
+            branch: "main",
+            head: "abc",
+            changed_files: [makeChangedFile("src/a.ts", "Unstaged")],
+          },
+        })}
+        refreshing={false}
+        hydrated
+        onRefresh={() => {}}
+        onFileSelect={() => {}}
+        onFileOpen={() => {}}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: /Git/ }));
+    await screen.findByText(/^未暂存/);
+    expect(screen.queryByRole("button", { name: "提交已暂存变更 (1)" })).toBeNull();
+    expect(screen.queryByPlaceholderText("feat: 简要描述本次改动")).toBeNull();
+
+    rerender(
+      <ReviewPanel
+        snapshot={makeSnapshot({
+          repository: {
+            branch: "main",
+            head: "abc",
+            changed_files: [makeChangedFile("src/a.ts", "Staged")],
+          },
+        })}
+        refreshing={false}
+        hydrated
+        onRefresh={() => {}}
+        onFileSelect={() => {}}
+        onFileOpen={() => {}}
+      />,
+    );
+
+    fireEvent.click(await screen.findByRole("button", { name: "提交已暂存变更 (1)" }));
+    expect(await screen.findByRole("dialog", { name: "提交已暂存变更" })).toBeTruthy();
+    expect(screen.getByPlaceholderText("feat: 简要描述本次改动")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "AI" })).toBeTruthy();
+  });
+
   it("opens a commit dialog from the Staged group header context menu", async () => {
     render(
       <ReviewPanel
@@ -1123,8 +1169,8 @@ describe("ReviewPanel scoped change sets", () => {
     fireEvent.click(await screen.findByRole("menuitem", { name: "提交 (1)" }));
 
     expect(await screen.findByRole("dialog", { name: "提交已暂存变更" })).toBeTruthy();
-    expect(screen.getAllByPlaceholderText("提交信息...").length).toBeGreaterThan(0);
-    expect(screen.getByRole("button", { name: "AI 生成" })).toBeTruthy();
+    expect(screen.getByPlaceholderText("feat: 简要描述本次改动")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "AI" })).toBeTruthy();
   });
 
   it("sends files to context from right-side file tree context menus", async () => {

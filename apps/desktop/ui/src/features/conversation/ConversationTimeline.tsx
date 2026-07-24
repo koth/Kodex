@@ -1,4 +1,4 @@
-import { Fragment, useRef, useEffect, useMemo, useState, memo } from "react";
+import { Fragment, useRef, useEffect, useLayoutEffect, useMemo, useState, memo } from "react";
 import type { FormEvent } from "react";
 import { createPortal } from "react-dom";
 import { convertFileSrc, isTauri } from "@tauri-apps/api/core";
@@ -26,10 +26,35 @@ let visibleChangedFiles: string[] = [];
 
 const INITIAL_TIMELINE_WINDOW = 80;
 const TIMELINE_WINDOW_STEP = 80;
+/** Distance from the bottom that still counts as "following" the stream. */
+const STICKY_BOTTOM_THRESHOLD_PX = 96;
 
-function scrollElementIntoView(element: HTMLElement | null) {
-  if (typeof element?.scrollIntoView !== "function") return;
-  element.scrollIntoView({ block: "end" });
+/**
+ * Timeline stick-to-bottom controller. Owned by `ConversationTimeline` and
+ * read by streaming message renders so chunk flushes share the same sticky
+ * decision instead of each guessing from a one-shot layout snapshot.
+ */
+let timelineScrollController: {
+  isSticky: () => boolean;
+  stickToBottom: () => void;
+} | null = null;
+
+function distanceFromBottom(element: HTMLElement): number {
+  return element.scrollHeight - element.scrollTop - element.clientHeight;
+}
+
+function isNearBottom(
+  element: HTMLElement,
+  threshold = STICKY_BOTTOM_THRESHOLD_PX,
+): boolean {
+  return distanceFromBottom(element) <= threshold;
+}
+
+function forceScrollToBottom(element: HTMLElement | null) {
+  if (!element) return;
+  // Direct scrollTop is more reliable than scrollIntoView here: the sentinel
+  // can land slightly above the true bottom while markdown/layout is settling.
+  element.scrollTop = element.scrollHeight;
 }
 
 interface Props {
@@ -123,28 +148,17 @@ const StreamingMarkdown = memo(function StreamingMarkdown({ id, body, onFilePath
     setContent(currentBody);
 
     return subscribeStreamingMessage(id, (event) => {
-      const node = hostRef.current;
-      if (!node) {
-        setContent((previous) =>
-          event.type === "replace" ? event.text : `${previous}${event.text}`,
-        );
-        return;
-      }
-      const scrollEl = node.closest(".timeline-scroll") as HTMLDivElement | null;
-      const wasAtBottom = scrollEl
-        ? scrollEl.scrollHeight - scrollEl.scrollTop - scrollEl.clientHeight < 80
-        : false;
+      const shouldFollow = timelineScrollController?.isSticky() ?? false;
       setContent((previous) =>
         event.type === "replace" ? event.text : `${previous}${event.text}`,
       );
-      if (scrollEl && wasAtBottom) {
+      if (!shouldFollow) return;
+      // Wait for React commit + layout so the new markdown height is included.
+      requestAnimationFrame(() => {
         requestAnimationFrame(() => {
-          const sentinel = scrollEl.querySelector(".timeline-bottom-sentinel") as
-            | HTMLDivElement
-            | null;
-          scrollElementIntoView(sentinel);
+          timelineScrollController?.stickToBottom();
         });
-      }
+      });
     });
   }, [id, body]);
 
@@ -769,12 +783,12 @@ export function ConversationTimeline({
   onFilePathClick,
 }: Props) {
   visibleWorkspaceRoot = snapshot.workspace.root;
-  visibleChangedFiles = snapshot.repository?.changed_files?.map((file) => file.path) ?? [];
   const scrollRef = useRef<HTMLDivElement>(null);
   const itemsRef = useRef<HTMLDivElement>(null);
   const bottomSentinelRef = useRef<HTMLDivElement>(null);
   const userScrolledUp = useRef(false);
   const manualScrollIntent = useRef(false);
+  const stickCorrectionActive = useRef(false);
   const visibleSessionId = useRef(snapshot.session.id);
   const [visibleCount, setVisibleCount] = useState(INITIAL_TIMELINE_WINDOW);
   const [expandedCollapseGroups, setExpandedCollapseGroups] = useState<Set<string>>(
@@ -784,7 +798,19 @@ export function ConversationTimeline({
   const [durationNowMs, setDurationNowMs] = useState(() => Date.now());
 
   const scrollToBottom = () => {
-    scrollElementIntoView(bottomSentinelRef.current);
+    const el = scrollRef.current;
+    if (!el || userScrolledUp.current) return;
+    stickCorrectionActive.current = true;
+    forceScrollToBottom(el);
+    // Markdown / right-panel layout can settle a frame or two later. Keep the
+    // pin alive across those commits so Git/Files clicks don't leave us mid-list.
+    requestAnimationFrame(() => {
+      if (!userScrolledUp.current) forceScrollToBottom(el);
+      requestAnimationFrame(() => {
+        if (!userScrolledUp.current) forceScrollToBottom(el);
+        stickCorrectionActive.current = false;
+      });
+    });
   };
 
   const turnChangesSignature = useMemo(
@@ -804,49 +830,96 @@ export function ConversationTimeline({
     [turnChangeSetsByMessageId],
   );
 
+  // Stable identity for changed-file path list so right-panel-only re-renders
+  // (Git/Files tab clicks) don't thrash every markdown row.
+  const changedFilePathsSignature = (snapshot.repository?.changed_files ?? [])
+    .map((file) => file.path)
+    .join(" ");
+  const stableChangedFilePaths = useMemo(
+    () => snapshot.repository?.changed_files?.map((file) => file.path) ?? [],
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [changedFilePathsSignature],
+  );
+  visibleChangedFiles = stableChangedFilePaths;
+
   useEffect(() => {
     const el = scrollRef.current;
     if (!el) return;
 
-    const markManualScrollIntent = () => {
-      manualScrollIntent.current = true;
+    timelineScrollController = {
+      isSticky: () => !userScrolledUp.current,
+      stickToBottom: scrollToBottom,
     };
-    const markManualKeyboardScrollIntent = (event: KeyboardEvent) => {
+
+    // Only real user "scroll up" gestures can unpin sticky follow. Programmatic
+    // stick-to-bottom writes, layout reflow, and pointer clicks must not.
+    // Unpin immediately on the gesture (not on the later scroll event) so a
+    // concurrent parent re-render cannot snap us back mid-gesture.
+    const unpinFromUser = () => {
+      manualScrollIntent.current = true;
+      userScrolledUp.current = true;
+    };
+    const markWheelIntent = (event: WheelEvent) => {
+      if (event.deltaY < 0) unpinFromUser();
+    };
+    let touchStartY: number | null = null;
+    const markTouchStart = (event: TouchEvent) => {
+      touchStartY = event.touches[0]?.clientY ?? null;
+    };
+    const markTouchMove = (event: TouchEvent) => {
+      const currentY = event.touches[0]?.clientY;
+      if (touchStartY == null || currentY == null) return;
+      // Finger moving down => content scrolling up.
+      if (currentY - touchStartY > 8) unpinFromUser();
+    };
+    const markKeyboardIntent = (event: KeyboardEvent) => {
       if (
         event.key === "ArrowUp" ||
-        event.key === "ArrowDown" ||
         event.key === "PageUp" ||
-        event.key === "PageDown" ||
         event.key === "Home" ||
-        event.key === "End" ||
-        event.key === " "
+        (event.key === " " && event.shiftKey)
       ) {
-        manualScrollIntent.current = true;
+        unpinFromUser();
       }
     };
+    const markScrollbarDragIntent = (event: PointerEvent) => {
+      // Clicking the scrollbar track/thumb is a user scroll gesture. Content
+      // clicks should not unpin follow mode.
+      if (event.target === el) unpinFromUser();
+    };
     const handleScroll = () => {
-      const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 40;
-      if (atBottom) {
+      if (isNearBottom(el)) {
         userScrolledUp.current = false;
         manualScrollIntent.current = false;
         return;
       }
-      if (manualScrollIntent.current) {
+      if (manualScrollIntent.current || userScrolledUp.current) {
         userScrolledUp.current = true;
+        return;
+      }
+      // Still sticky, but layout/overflow-anchor/right-panel work nudged us off
+      // the bottom. Snap back instead of leaving the transcript stranded.
+      if (!stickCorrectionActive.current) {
+        scrollToBottom();
       }
     };
 
-    el.addEventListener("wheel", markManualScrollIntent, { passive: true });
-    el.addEventListener("touchstart", markManualScrollIntent, { passive: true });
-    el.addEventListener("pointerdown", markManualScrollIntent);
-    el.addEventListener("keydown", markManualKeyboardScrollIntent);
-    el.addEventListener("scroll", handleScroll);
+    el.addEventListener("wheel", markWheelIntent, { passive: true });
+    el.addEventListener("touchstart", markTouchStart, { passive: true });
+    el.addEventListener("touchmove", markTouchMove, { passive: true });
+    el.addEventListener("pointerdown", markScrollbarDragIntent);
+    el.addEventListener("keydown", markKeyboardIntent);
+    el.addEventListener("scroll", handleScroll, { passive: true });
     return () => {
-      el.removeEventListener("wheel", markManualScrollIntent);
-      el.removeEventListener("touchstart", markManualScrollIntent);
-      el.removeEventListener("pointerdown", markManualScrollIntent);
-      el.removeEventListener("keydown", markManualKeyboardScrollIntent);
+      el.removeEventListener("wheel", markWheelIntent);
+      el.removeEventListener("touchstart", markTouchStart);
+      el.removeEventListener("touchmove", markTouchMove);
+      el.removeEventListener("pointerdown", markScrollbarDragIntent);
+      el.removeEventListener("keydown", markKeyboardIntent);
       el.removeEventListener("scroll", handleScroll);
+      if (timelineScrollController?.stickToBottom === scrollToBottom) {
+        timelineScrollController = null;
+      }
     };
   }, []);
 
@@ -863,18 +936,43 @@ export function ConversationTimeline({
     snapshot.thinking_status,
   ]);
 
+  // Parent workbench re-renders (right-panel Git/Files clicks, git status
+  // refresh) can reflow the center column without bumping timeline revision.
+  // While sticky, re-pin after commit/layout so we don't stay stranded.
+  useLayoutEffect(() => {
+    if (userScrolledUp.current) return;
+    scrollToBottom();
+  });
+
   useEffect(() => {
+    const scroller = scrollRef.current;
     const items = itemsRef.current;
-    if (!items || typeof ResizeObserver === "undefined") return;
+    if (!scroller || !items || typeof ResizeObserver === "undefined") return;
     let frame = 0;
-    const observer = new ResizeObserver(() => {
+    let timeout = 0;
+    const scheduleStick = () => {
       if (userScrolledUp.current) return;
       cancelAnimationFrame(frame);
-      frame = requestAnimationFrame(scrollToBottom);
-    });
+      window.clearTimeout(timeout);
+      // Wait for the workbench split/right-panel layout to settle. Clicking
+      // Git/Files can reflow the center column after React commit.
+      frame = requestAnimationFrame(() => {
+        frame = requestAnimationFrame(scrollToBottom);
+      });
+      // One trailing pass for async right-panel mounts (FileTree/Git status).
+      timeout = window.setTimeout(() => {
+        if (!userScrolledUp.current) scrollToBottom();
+      }, 50);
+    };
+    const observer = new ResizeObserver(scheduleStick);
+    // Observe both:
+    // - items: streaming markdown / tool cards growing
+    // - scroller: center panel width/height changes when the right rail toggles
     observer.observe(items);
+    observer.observe(scroller);
     return () => {
       cancelAnimationFrame(frame);
+      window.clearTimeout(timeout);
       observer.disconnect();
     };
   }, []);
@@ -884,6 +982,8 @@ export function ConversationTimeline({
     setVisibleCount(INITIAL_TIMELINE_WINDOW);
     setExpandedCollapseGroups(new Set());
     userScrolledUp.current = false;
+    manualScrollIntent.current = false;
+    stickCorrectionActive.current = false;
   }, [snapshot.session.id]);
 
   const effectiveVisibleCount =

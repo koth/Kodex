@@ -3,6 +3,7 @@ import type { Dispatch, ReactNode, SetStateAction } from "react";
 import { MultiFileDiff } from "@pierre/diffs/react";
 import type { FileContents } from "@pierre/diffs/react";
 import { confirm } from "@tauri-apps/plugin-dialog";
+import { GitCommitHorizontal, Sparkles } from "lucide-react";
 import type { UiSnapshot, ChangedFile, ChangeSection, DiffStats, FileEntry, ChangeSetSummary, FileChangeSummary, FileChangeRecord, DiffQuality, AppTheme } from "../../types";
 import { fsListDir, gitStage, gitUnstage, gitCommit, gitGenerateCommitMessage, reviewRejectPatch, sessionListChangeSets, sessionListChangeSetFiles, sessionGetChangeSetFileDiff } from "../../lib/tauri";
 import { onCommitProgress } from "../../lib/events";
@@ -1133,6 +1134,12 @@ function GitChangesTree({
           onFileSelect={onFileSelect}
           activePath={activePath}
           compact
+          headerAction={{
+            label: "提交",
+            ariaLabel: `提交已暂存变更 (${grouped.Staged.length})`,
+            title: "提交已暂存变更",
+            onClick: handleOpenCommitDialog,
+          }}
           onHeaderContextMenu={(x, y) => openGroupMenu("commit", x, y)}
           onFileContextMenu={(path, x, y) => handleFileContextMenu(path, x, y, false, "unstage")}
         />
@@ -1203,7 +1210,6 @@ function GitChangesTree({
           onCommitted={onRefresh}
         />
       )}
-      <CommitBar onRefresh={onRefresh} />
     </div>
   );
 }
@@ -1302,56 +1308,6 @@ function ReviewFileContextMenu({
   );
 }
 
-function CommitBar({ onRefresh }: { onRefresh: () => void | Promise<void> }) {
-  const [message, setMessage] = useState("");
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-
-  const handleCommit = useCallback(async () => {
-    const trimmed = message.trim();
-    if (!trimmed || busy) return;
-    setBusy(true);
-    setError(null);
-    try {
-      await gitCommit(trimmed);
-      setMessage("");
-      await onRefresh();
-    } catch (e) {
-      setError(String(e));
-    } finally {
-      setBusy(false);
-    }
-  }, [message, busy, onRefresh]);
-
-  return (
-    <div className="review-commit-bar">
-      <input
-        type="text"
-        className="review-commit-message-input"
-        placeholder="提交信息..."
-        value={message}
-        onChange={(event) => setMessage(event.target.value)}
-        onKeyDown={(event) => {
-          if (event.key === "Enter" && !event.shiftKey) {
-            event.preventDefault();
-            handleCommit();
-          }
-        }}
-        disabled={busy}
-      />
-      <button
-        type="button"
-        className="review-commit-button"
-        onClick={handleCommit}
-        disabled={busy || !message.trim()}
-      >
-        {busy ? "提交中..." : "提交"}
-      </button>
-      {error && <div className="review-tree-error">{error}</div>}
-    </div>
-  );
-}
-
 function CommitDialog({
   stagedCount,
   onClose,
@@ -1367,6 +1323,7 @@ function CommitDialog({
   const [progress, setProgress] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const busy = committing || generating;
+  const canCommit = message.trim().length > 0 && !busy;
 
   useEffect(() => {
     if (!generating) return;
@@ -1434,37 +1391,54 @@ function CommitDialog({
       }}
     >
       <div className="review-commit-dialog" role="dialog" aria-modal="true" aria-label="提交已暂存变更">
-        <div className="review-commit-dialog-title">提交 {stagedCount} 个已暂存文件</div>
-        <div className="review-commit-dialog-input-row">
-          <input
-            type="text"
-            className="review-commit-message-input"
-            placeholder="提交信息..."
-            value={message}
-            autoFocus
-            onChange={(event) => setMessage(event.target.value)}
-            onKeyDown={(event) => {
-              if (event.key === "Enter" && !event.shiftKey) {
-                event.preventDefault();
-                handleCommit();
-              }
-            }}
-            disabled={busy}
-          />
-          <button
-            type="button"
-            className="review-commit-ai-button"
-            title="用当前模型生成提交信息"
-            onClick={handleGenerate}
-            disabled={busy}
-          >
-            {generating ? (
-              <span className="review-menu-spinner" aria-hidden="true" />
-            ) : (
-              "AI 生成"
-            )}
-          </button>
+        <div className="review-commit-dialog-header">
+          <div className="review-commit-dialog-icon" aria-hidden="true">
+            <GitCommitHorizontal size={16} strokeWidth={2.1} />
+          </div>
+          <div className="review-commit-dialog-copy">
+            <div className="review-commit-dialog-title">提交已暂存变更</div>
+            <div className="review-commit-dialog-subtitle">
+              {stagedCount} 个文件 · 约定式提交，单行不超过 72 字符
+            </div>
+          </div>
         </div>
+
+        <label className="review-commit-dialog-field">
+          <span className="review-commit-dialog-label">提交信息</span>
+          <div className="review-commit-dialog-input-row">
+            <input
+              type="text"
+              className="review-commit-message-input"
+              placeholder="feat: 简要描述本次改动"
+              value={message}
+              autoFocus
+              maxLength={72}
+              onChange={(event) => setMessage(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === "Enter" && !event.shiftKey) {
+                  event.preventDefault();
+                  void handleCommit();
+                }
+              }}
+              disabled={busy}
+            />
+            <button
+              type="button"
+              className="review-commit-ai-button"
+              title="用当前模型生成提交信息"
+              onClick={() => void handleGenerate()}
+              disabled={busy}
+            >
+              {generating ? (
+                <span className="review-menu-spinner" aria-hidden="true" />
+              ) : (
+                <Sparkles size={14} strokeWidth={2.1} aria-hidden="true" />
+              )}
+              <span>{generating ? "生成中" : "AI"}</span>
+            </button>
+          </div>
+        </label>
+
         {generating && progress && (
           <div className="review-commit-progress" role="status" aria-live="polite">
             <span className="review-menu-spinner" aria-hidden="true" />
@@ -1472,23 +1446,27 @@ function CommitDialog({
           </div>
         )}
         {error && <div className="review-tree-error">{error}</div>}
-        <div className="review-commit-dialog-actions">
-          <button
-            type="button"
-            className="review-commit-dialog-cancel"
-            onClick={onClose}
-            disabled={busy}
-          >
-            取消
-          </button>
-          <button
-            type="button"
-            className="review-commit-button"
-            onClick={handleCommit}
-            disabled={busy || !message.trim()}
-          >
-            {committing ? "提交中..." : "提交"}
-          </button>
+
+        <div className="review-commit-dialog-footer">
+          <span className="review-commit-dialog-hint">Enter 提交 · Esc 取消</span>
+          <div className="review-commit-dialog-actions">
+            <button
+              type="button"
+              className="review-commit-dialog-cancel"
+              onClick={onClose}
+              disabled={busy}
+            >
+              取消
+            </button>
+            <button
+              type="button"
+              className="review-commit-button"
+              onClick={() => void handleCommit()}
+              disabled={!canCommit}
+            >
+              {committing ? "提交中..." : "提交"}
+            </button>
+          </div>
         </div>
       </div>
     </div>
@@ -2517,6 +2495,7 @@ function FileGroup({
   composerReferenceEnabled = false,
   onFileContextMenu,
   onHeaderContextMenu,
+  headerAction,
   activePath,
   compact = false,
 }: {
@@ -2528,6 +2507,12 @@ function FileGroup({
   composerReferenceEnabled?: boolean;
   onFileContextMenu?: (path: string, x: number, y: number, isDir?: boolean) => void;
   onHeaderContextMenu?: (x: number, y: number) => void;
+  headerAction?: {
+    label: string;
+    ariaLabel: string;
+    title?: string;
+    onClick: () => void;
+  };
   activePath?: string;
   compact?: boolean;
 }) {
@@ -2614,11 +2599,27 @@ function FileGroup({
         }}
       >
         <span className="review-group-arrow">
-          {collapsed ? "\u25b6" : "\u25bc"}
+          {collapsed ? "▶" : "▼"}
         </span>
         <span className="review-group-title">
           {title} ({files.length})
         </span>
+        {headerAction && (
+          <button
+            type="button"
+            className="review-group-header-action"
+            aria-label={headerAction.ariaLabel}
+            title={headerAction.title ?? headerAction.label}
+            onClick={(event) => {
+              event.preventDefault();
+              event.stopPropagation();
+              headerAction.onClick();
+            }}
+          >
+            <GitCommitHorizontal size={13} strokeWidth={2.2} aria-hidden="true" />
+            <span>{headerAction.label}</span>
+          </button>
+        )}
       </div>
 
       {!collapsed && (
