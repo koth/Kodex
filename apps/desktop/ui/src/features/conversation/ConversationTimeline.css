@@ -154,8 +154,13 @@
   margin: 14px 0 4px auto;
   padding: 10px 16px 10px 12px;
   border: 1px solid var(--border-subtle);
-  border-radius: 16px;
-  background: var(--surface-bg);
+  border-radius: var(--radius-lg);
+  background:
+    linear-gradient(
+      180deg,
+      color-mix(in srgb, var(--surface-bg) 88%, var(--accent-soft)),
+      var(--surface-bg)
+    );
   box-shadow: none;
 }
 
@@ -169,7 +174,7 @@
   align-items: flex-start;
   gap: 8px;
   padding: 6px 10px 6px 11px;
-  border-radius: 10px;
+  border-radius: var(--radius-md);
   border: 1px solid var(--border-subtle);
   border-left: 3px solid var(--accent-hover);
   background: var(--surface-muted-bg);

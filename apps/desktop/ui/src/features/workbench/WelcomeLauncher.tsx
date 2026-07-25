@@ -274,7 +274,7 @@ export function WelcomeLauncher({ onWorkspaceOpened, onOpenSettings }: Props) {
 ██   ██ ██  ██   █████   █████ 
                                `}
           </pre>
-          <p className="welcome-subtitle">码具——码农的趁手好工具</p>
+          <p className="welcome-subtitle">码具，码农的趁手好工具</p>
         </div>
 
         {showByokOnboarding && (
