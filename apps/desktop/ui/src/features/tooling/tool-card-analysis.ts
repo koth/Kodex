@@ -1049,6 +1049,9 @@ export function diffPreviewFromUnifiedDiff(path: string, unifiedDiff: string): T
 }
 
 export function commandWritePaths(command: string): string[] {
+  // Keep redirection / PowerShell detection on the shell surface after stripping
+  // here-doc bodies, but still scan the full command text for scripted writes
+  // that live inside python/node heredocs (Path.write_text, open(..., "w"), etc.).
   const stripped = stripShellHereDocuments(stripPowerShellHereStrings(command));
   const paths: string[] = [];
   for (const segment of stripped.split(/[;\n]/)) {
@@ -1065,7 +1068,83 @@ export function commandWritePaths(command: string): string[] {
     }
   }
   collectShellRedirectionPaths(stripped, paths);
+  collectPythonWritePaths(command, paths);
+  collectNodeWritePaths(command, paths);
   return uniqueStrings(paths.filter(isUsableWritePath));
+}
+
+function collectPythonWritePaths(command: string, paths: string[]) {
+  if (
+    !command.includes("write_text(") &&
+    !command.includes("write_bytes(") &&
+    !command.includes("open(") &&
+    !command.includes("io.open(")
+  ) {
+    return;
+  }
+
+  // Path('x').write_text(...) / pathlib.Path("x").write_bytes(...)
+  const chainedPathWrite =
+    /(?:pathlib\.)?Path\(\s*(['"])([^'"]+)\1\s*\)\s*\.\s*write_(?:text|bytes)\s*\(/g;
+  for (const match of command.matchAll(chainedPathWrite)) {
+    if (match[2]) paths.push(match[2]);
+  }
+
+  // path = Path('x') ... path.write_text(...)
+  const assignments = new Map<string, string>();
+  const assignmentRe =
+    /^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(?:pathlib\.)?Path\(\s*(['"])([^'"]+)\2\s*\)\s*(?:#.*)?$/gm;
+  for (const match of command.matchAll(assignmentRe)) {
+    assignments.set(match[1], match[3]);
+  }
+  for (const [name, path] of assignments) {
+    const methodRe = new RegExp(
+      `(?<![A-Za-z0-9_])${escapeRegExp(name)}\\s*\\.\\s*write_(?:text|bytes)\\s*\\(`,
+    );
+    if (methodRe.test(command)) {
+      paths.push(path);
+    }
+  }
+
+  // open('x', 'w' / 'a' / 'x' / '+') and io.open(...)
+  const openWrite =
+    /(?:(?<![A-Za-z0-9_.])open|io\.open)\(\s*(['"])([^'"]+)\1\s*,\s*(['"])([^'"]*)\3/g;
+  for (const match of command.matchAll(openWrite)) {
+    const mode = match[4] ?? "";
+    if (/[wax+]/i.test(mode) && match[2]) {
+      paths.push(match[2]);
+    }
+  }
+}
+
+function collectNodeWritePaths(command: string, paths: string[]) {
+  if (
+    !command.includes("writeFile") &&
+    !command.includes("writeFileSync") &&
+    !command.includes("appendFile") &&
+    !command.includes("appendFileSync") &&
+    !command.includes("outputFile") &&
+    !command.includes("outputFileSync")
+  ) {
+    return;
+  }
+
+  const nodeWrite =
+    /(?:fs(?:\/promises)?|fsp|require\(\s*['"]fs(?:\/promises)?['"]\s*\))\s*\.\s*(?:writeFile|writeFileSync|appendFile|appendFileSync|outputFile|outputFileSync)\(\s*(['"])([^'"]+)\1/g;
+  for (const match of command.matchAll(nodeWrite)) {
+    if (match[2]) paths.push(match[2]);
+  }
+
+  // Bare imports after `const fs = require('fs')` / `import fs from 'fs'`
+  const bareWrite =
+    /(?<![A-Za-z0-9_])(?:fs|fsp)\s*\.\s*(?:writeFile|writeFileSync|appendFile|appendFileSync|outputFile|outputFileSync)\(\s*(['"])([^'"]+)\1/g;
+  for (const match of command.matchAll(bareWrite)) {
+    if (match[2]) paths.push(match[2]);
+  }
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 export function filterCompletedCommandEditPaths(
@@ -1589,9 +1668,6 @@ export function decodeJsonStringFragment(value: string): string {
   }
 }
 
-export function escapeRegExp(value: string): string {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
 
 export function looksLikeFragmentToWholeFile(oldText: string, newText: string): boolean {
   const oldLines = oldText.split(/\r?\n/).length;

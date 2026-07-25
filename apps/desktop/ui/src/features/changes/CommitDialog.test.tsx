@@ -23,7 +23,9 @@ describe("CommitDialog", () => {
   beforeEach(() => {
     vi.mocked(gitCommit).mockReset().mockResolvedValue(undefined);
     vi.mocked(gitCommitAndPush).mockReset().mockResolvedValue("pushed");
-    vi.mocked(gitGenerateCommitMessage).mockReset().mockResolvedValue("feat: draft");
+    vi.mocked(gitGenerateCommitMessage).mockReset().mockResolvedValue(
+      "feat: draft detailed message\n\n- cover the main change\n- explain why",
+    );
     vi.mocked(gitPush).mockReset().mockResolvedValue("pushed");
   });
 
@@ -45,13 +47,17 @@ describe("CommitDialog", () => {
       />,
     );
 
-    fireEvent.change(screen.getByPlaceholderText("feat: 简要描述本次改动"), {
-      target: { value: "feat: ship it" },
+    fireEvent.change(screen.getByLabelText("提交信息"), {
+      target: {
+        value: "feat: ship it\n\n- keep the dialog multi-line\n- preserve body text",
+      },
     });
     fireEvent.click(screen.getByRole("button", { name: "提交并推送" }));
 
     await waitFor(() => {
-      expect(gitCommitAndPush).toHaveBeenCalledWith("feat: ship it");
+      expect(gitCommitAndPush).toHaveBeenCalledWith(
+        "feat: ship it\n\n- keep the dialog multi-line\n- preserve body text",
+      );
     });
     expect(onCommitted).toHaveBeenCalled();
     expect(onClose).toHaveBeenCalled();
@@ -72,7 +78,7 @@ describe("CommitDialog", () => {
     );
 
     expect(screen.getByRole("dialog", { name: "推送" })).toBeTruthy();
-    expect(screen.queryByPlaceholderText("feat: 简要描述本次改动")).toBeNull();
+    expect(screen.queryByLabelText("提交信息")).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "推送" }));
 
     await waitFor(() => {
@@ -96,5 +102,27 @@ describe("CommitDialog", () => {
     expect(screen.getByText(/没有已暂存文件/)).toBeTruthy();
     expect(screen.getByRole("button", { name: "提交并推送" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "仅提交" })).toBeDisabled();
+  });
+
+  it("fills the multi-line textarea from AI generation", async () => {
+    render(
+      <CommitDialog
+        stagedCount={1}
+        unstagedCount={0}
+        aheadCount={0}
+        onClose={() => {}}
+        onCommitted={() => {}}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "AI 生成" }));
+
+    await waitFor(() => {
+      expect(gitGenerateCommitMessage).toHaveBeenCalled();
+    });
+    const textarea = screen.getByLabelText("提交信息") as HTMLTextAreaElement;
+    expect(textarea.tagName).toBe("TEXTAREA");
+    expect(textarea.value).toContain("feat: draft detailed message");
+    expect(textarea.value).toContain("- cover the main change");
   });
 });

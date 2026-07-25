@@ -13,7 +13,7 @@ pub enum AgentEditPolicy {
 
 impl Default for AgentEditPolicy {
     fn default() -> Self {
-        Self::None
+        Self::PreferApplyPatch
     }
 }
 
@@ -25,11 +25,18 @@ pub fn agent_edit_policy_for_command(agent_command: &str) -> AgentEditPolicy {
         .unwrap_or(&normalized)
         .trim_matches(['"', '\'', '`']);
 
-    if basename.contains("codex-acp") || basename.contains("kodex-acp") {
-        AgentEditPolicy::PreferApplyPatch
-    } else {
-        AgentEditPolicy::None
+    // Opt out for agents that frequently produce lockfiles / generated
+    // artifacts through tooling pipelines — these are expected to write
+    // files directly without going through a patch editor.
+    if basename.starts_with("claude-agent-acp")
+        || basename.starts_with("claude-acp")
+        || basename.starts_with("claude-ubuntu")
+        || basename.starts_with("ghe-codex")
+        || basename.starts_with("glm")
+    {
+        return AgentEditPolicy::None;
     }
+    AgentEditPolicy::PreferApplyPatch
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

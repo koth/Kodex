@@ -69,6 +69,8 @@ pub(super) fn decide_permission_with_edit_policy(
         return PermissionDecision::Ask;
     }
 
+    // Build / ReadOnly modes: shell writes that affect patchable workspace
+    // files should be guided toward apply_patch so changes stay reviewable.
     if mode != PermissionPolicyMode::FullAccess
         && edit_policy == AgentEditPolicy::PreferApplyPatch
         && request_should_retry_with_apply_patch(workspace_root, request)

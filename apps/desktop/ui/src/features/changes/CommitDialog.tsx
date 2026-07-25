@@ -60,7 +60,7 @@ export function CommitDialog({
     if (aheadCount > 0 && allowPush) {
       parts.push(aheadCount === 1 ? "另有 1 个提交待推送" : `另有 ${aheadCount} 个提交待推送`);
     }
-    parts.push("约定式提交，单行不超过 72 字符");
+    parts.push("约定式提交 · 支持多行详细说明");
     return parts;
   })();
 
@@ -183,7 +183,7 @@ export function CommitDialog({
     return committing ? "提交中..." : "提交";
   })();
 
-  const hint = pushOnly ? "Enter 推送 · Esc 取消" : "Enter 提交并推送 · Esc 取消";
+  const hint = pushOnly ? "Enter 推送 · Esc 取消" : "⌘/Ctrl+Enter 提交 · Esc 取消";
   const title = pushOnly ? "推送" : "提交";
 
   return (
@@ -206,29 +206,15 @@ export function CommitDialog({
         </div>
 
         {!pushOnly && (
-          <label className="commit-dialog-field">
-            <span className="commit-dialog-label">提交信息</span>
-            <div className="commit-dialog-input-row">
-              <input
-                type="text"
-                className="commit-message-input"
-                placeholder="feat: 简要描述本次改动"
-                value={message}
-                autoFocus
-                maxLength={72}
-                onChange={(event) => setMessage(event.target.value)}
-                onKeyDown={(event) => {
-                  if (event.key === "Enter" && !event.shiftKey) {
-                    event.preventDefault();
-                    handlePrimary();
-                  }
-                }}
-                disabled={busy || !hasStaged}
-              />
+          <div className="commit-dialog-field">
+            <div className="commit-dialog-label-row">
+              <span className="commit-dialog-label" id="commit-message-label">
+                提交信息
+              </span>
               <button
                 type="button"
                 className="commit-ai-button"
-                title="用当前模型生成提交信息"
+                title="用当前模型生成详细的多行提交信息"
                 onClick={() => void handleGenerate()}
                 disabled={busy || !hasStaged}
               >
@@ -237,10 +223,26 @@ export function CommitDialog({
                 ) : (
                   <Sparkles size={14} strokeWidth={2.1} aria-hidden="true" />
                 )}
-                <span>{generating ? "生成中" : "AI"}</span>
+                <span>{generating ? "生成中" : "AI 生成"}</span>
               </button>
             </div>
-          </label>
+            <textarea
+              className="commit-message-input"
+              placeholder={"feat: 概括本次改动的核心意图\n\n- 说明改了什么\n- 说明为什么改\n- 补充影响、风险或验证情况"}
+              value={message}
+              autoFocus
+              rows={8}
+              aria-labelledby="commit-message-label"
+              onChange={(event) => setMessage(event.target.value)}
+              onKeyDown={(event) => {
+                if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
+                  event.preventDefault();
+                  handlePrimary();
+                }
+              }}
+              disabled={busy || !hasStaged}
+            />
+          </div>
         )}
 
         {!hasStaged && !pushOnly && (

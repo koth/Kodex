@@ -651,11 +651,12 @@ fn claude_acp_commands_keep_default_edit_policy() {
 }
 
 #[test]
-fn non_acp_commands_keep_default_edit_policy() {
+fn most_agents_default_to_prefer_apply_patch() {
+    // Claude binaries opt out; everything else defaults to PreferApplyPatch.
     for command in ["codebuddy.exe --acp", "claude", "codex"] {
         assert_eq!(
             agent_edit_policy_for_command(command),
-            AgentEditPolicy::None,
+            AgentEditPolicy::PreferApplyPatch,
             "{command}",
         );
     }

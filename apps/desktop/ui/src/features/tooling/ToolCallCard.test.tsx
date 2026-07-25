@@ -600,6 +600,131 @@ describe("ToolCallCard tracker-confirmed diffs", () => {
     expect(container.querySelector(".tc-cmd")!.textContent).not.toContain("<label");
   });
 
+  it("classifies python heredoc write_text as an edit", () => {
+    const command =
+      "python3 - <<'PY'\n" +
+      "from pathlib import Path\n" +
+      "path = Path('crates/app-core/src/application/repository.rs')\n" +
+      "text = path.read_text()\n" +
+      "old_prompt = '''x'''\n" +
+      "text = text.replace(old_prompt, 'y', 1)\n" +
+      "path.write_text(text)\n" +
+      "print('repository.rs updated')\n" +
+      "PY";
+    const tool = makeTool({
+      status: "Succeeded",
+      kind: "execute",
+      name: "tool",
+      raw_input: JSON.stringify({ command }),
+      terminal_output: { exit_code: 0, output: "" },
+    });
+
+    const { container } = render(
+      <ToolCallCard tool={tool} nested={false} onPermissionSelect={() => {}} />,
+    );
+
+    expect(container.querySelector(".tc-verb")!.textContent).toBe("已编辑");
+    expect(container.querySelector(".tc-cmd")!.textContent).toBe(
+      "crates/app-core/src/application/repository.rs",
+    );
+    expect(container.querySelector(".tc-cmd")!.textContent).not.toContain("PY");
+    expect(container.querySelector(".tc-cmd")!.textContent).not.toContain("write_text");
+  });
+
+it("classifies python heredoc read-modify-write with markup in triple-quoted replace as an edit", () => {
+    const command =
+      "python3 - <<'PY'\n" +
+      "from pathlib import Path\n" +
+      "\n" +
+      "# Fix SessionList.test.tsx mock placement\n" +
+      "path = Path('apps/desktop/ui/src/features/session/SessionList.test.tsx')\n" +
+      "text = path.read_text()\n" +
+      "# fix broken plugin-dialog mock\n" +
+      "text = text.replace(\n" +
+      "'''vi.mock(\"@tauri-apps/plugin-dialog\", () => ({\n" +
+      "  open: vi.fn(),\n" +
+      "  }));\n" +
+      "''',\n" +
+      "'''vi.mock(\"@tauri-apps/plugin-dialog\", () => ({\n" +
+      "  open: vi.fn(),\n" +
+      "}));\n" +
+      "\n" +
+      "vi.mock(\"../../lib/confirm\", () => ({\n" +
+      "  appConfirm: vi.fn(),\n" +
+      "  archiveWorkspaceConfirmRequest: (label: string) => ({ label }),\n" +
+      "}));\n" +
+      "''',\n" +
+      "1,\n" +
+      ")\n" +
+      "path.write_text(text)\n" +
+      "print('done')\n" +
+      "PY";
+    const tool = makeTool({
+      status: "Succeeded",
+      kind: "execute",
+      name: "tool",
+      raw_input: JSON.stringify({ command }),
+      terminal_output: { exit_code: 0, output: "" },
+    });
+
+    const { container } = render(
+      <ToolCallCard tool={tool} nested={false} onPermissionSelect={() => {}} />,
+    );
+
+    expect(container.querySelector(".tc-verb")!.textContent).toBe("已编辑");
+    expect(container.querySelector(".tc-cmd")!.textContent).toBe(
+      "apps/desktop/ui/src/features/session/SessionList.test.tsx",
+    );
+    expect(container.querySelector(".tc-cmd")!.textContent).not.toContain("plugin-dialog");
+    expect(container.querySelector(".tc-cmd")!.textContent).not.toContain("lib/confirm");
+    expect(container.querySelector(".tc-cmd")!.textContent).not.toContain("write_text");
+  });
+
+  it("classifies node heredoc writeFile as an edit", () => {
+    const command =
+      "node - << 'EOF'\n" +
+      "const fs = require('fs')\n" +
+      "fs.writeFileSync('src/main.rs', 'fn main() {}')\n" +
+      "EOF";
+    const tool = makeTool({
+      status: "Succeeded",
+      kind: "execute",
+      name: "tool",
+      raw_input: JSON.stringify({ command }),
+      terminal_output: { exit_code: 0, output: "" },
+    });
+
+    const { container } = render(
+      <ToolCallCard tool={tool} nested={false} onPermissionSelect={() => {}} />,
+    );
+
+    expect(container.querySelector(".tc-verb")!.textContent).toBe("已编辑");
+    expect(container.querySelector(".tc-cmd")!.textContent).toBe("src/main.rs");
+    expect(container.querySelector(".tc-cmd")!.textContent).not.toContain("EOF");
+  });
+
+  it("still skips non-writing python heredocs", () => {
+    const command =
+      "python3 - << 'PY'\n" +
+      "print('hello world')\n" +
+      "from pathlib import Path\n" +
+      "Path('README.md').read_text()\n" +
+      "PY";
+    const tool = makeTool({
+      status: "Succeeded",
+      kind: "execute",
+      name: "tool",
+      raw_input: JSON.stringify({ command }),
+      terminal_output: { exit_code: 0, output: "hello world" },
+    });
+
+    const { container } = render(
+      <ToolCallCard tool={tool} nested={false} onPermissionSelect={() => {}} />,
+    );
+
+    expect(container.querySelector(".tc-verb")!.textContent).not.toBe("已编辑");
+  });
+
   it("does not classify non-writing shell heredocs with markup as edits", () => {
     const tool = makeTool({
       status: "Succeeded",

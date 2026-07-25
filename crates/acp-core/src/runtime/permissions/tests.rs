@@ -267,6 +267,27 @@ fn apply_patch_policy_rejects_patchable_direct_shell_writes_with_guidance() {
 }
 
 #[test]
+fn apply_patch_policy_rejects_python_read_modify_write_with_markup_in_replace_body() {
+    let root = temp_workspace("apply-patch-python-read-modify-write");
+    let request = execute_request(json!({
+        "command": "python3 - <<'PY'\nfrom pathlib import Path\n\n# Fix SessionList.test.tsx mock placement\npath = Path('apps/desktop/ui/src/features/session/SessionList.test.tsx')\ntext = path.read_text()\n# fix broken plugin-dialog mock\ntext = text.replace(\n'''vi.mock(\"@tauri-apps/plugin-dialog\", () => ({\n  open: vi.fn(),\n  }));\n''',\n'''vi.mock(\"@tauri-apps/plugin-dialog\", () => ({\n  open: vi.fn(),\n}));\n\nvi.mock(\"../../lib/confirm\", () => ({\n  appConfirm: vi.fn(),\n  archiveWorkspaceConfirmRequest: (label: string) => ({ label }),\n}));\n''',\n1,\n)\npath.write_text(text)\nprint('done')\nPY"
+    }));
+
+    assert_eq!(
+        decide_permission_with_edit_policy(
+            PermissionPolicyMode::Build,
+            AgentEditPolicy::PreferApplyPatch,
+            root.to_str().unwrap(),
+            &request,
+        ),
+        PermissionDecision::SelectWithGuidance(
+            "reject".to_string(),
+            apply_patch_retry_guidance().to_string(),
+        ),
+    );
+}
+
+#[test]
 fn apply_patch_policy_rejects_patchable_direct_edit_tools_with_guidance() {
     let root = temp_workspace("apply-patch-edit-policy");
     let request = edit_request(json!({
