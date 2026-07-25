@@ -225,6 +225,27 @@ fn switch_mode_permission_is_always_interactive() {
 }
 
 #[test]
+fn apply_patch_policy_rejects_python_pathlib_source_writes_with_guidance() {
+    let root = temp_workspace("apply-patch-python-policy");
+    let request = execute_request(json!({
+        "command": "python - <<'PY'\nfrom pathlib import Path\np=Path('packages/backend/src/service.ts')\np.write_text('ok', encoding='utf-8')\nPY"
+    }));
+
+    assert_eq!(
+        decide_permission_with_edit_policy(
+            PermissionPolicyMode::Build,
+            AgentEditPolicy::PreferApplyPatch,
+            root.to_str().unwrap(),
+            &request,
+        ),
+        PermissionDecision::SelectWithGuidance(
+            "reject".to_string(),
+            apply_patch_retry_guidance().to_string(),
+        ),
+    );
+}
+
+#[test]
 fn apply_patch_policy_rejects_patchable_direct_shell_writes_with_guidance() {
     let root = temp_workspace("apply-patch-policy");
     let request = execute_request(json!({

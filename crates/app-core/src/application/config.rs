@@ -324,9 +324,15 @@ impl Application {
         if let Some(raw_input) = tool.raw_input.as_deref() {
             paths.extend(permission_details_write_paths(raw_input));
             paths.extend(tool_event_hint_paths(Some(raw_input)));
+            paths.extend(tool_command_write_hint_paths(Some(raw_input)));
         }
         if !tool.detail_text.trim().is_empty() {
             paths.extend(permission_details_write_paths(&tool.detail_text));
+            // Permission cards often only expose the shell command in detail text
+            // (`Command:\npython - <<'PY' ...`). Parse write targets from that body
+            // so the tracker baseline is captured before the process mutates disk.
+            paths.extend(tool_event_hint_paths(Some(&tool.detail_text)));
+            paths.extend(tool_command_write_hint_paths(Some(&tool.detail_text)));
         }
         paths.sort();
         paths.dedup();
@@ -1022,7 +1028,26 @@ fn permission_tool_should_start_write_baseline(tool: &workspace_model::ToolInvoc
 }
 
 fn permission_tool_is_shell_command(value: &str) -> bool {
-    matches!(value.trim().to_ascii_lowercase().as_str(), "bash" | "shell")
+    let normalized = value.trim().to_ascii_lowercase();
+    matches!(
+        normalized.as_str(),
+        "bash"
+            | "shell"
+            | "execute"
+            | "exec"
+            | "terminal"
+            | "cmd"
+            | "powershell"
+            | "pwsh"
+            | "local_shell"
+            | "local-shell"
+            | "shell_command"
+            | "shell-command"
+            | "run_shell_command"
+            | "run-shell-command"
+            | "exec_command"
+            | "exec-command"
+    ) || normalized.contains("shell")
 }
 
 fn permission_path_is_trackable(path: &str, workspace_root: &std::path::Path) -> bool {

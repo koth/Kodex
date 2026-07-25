@@ -44,7 +44,8 @@ export interface AgentPlanEnvironmentInfo {
   locationLabel: string;
   branchLabel: string;
   actionLabel: string;
-  githubLabel: string;
+  /** When true, the commit/push action is interactive. */
+  actionEnabled?: boolean;
   usage?: SessionUsageSnapshot;
   /** True while a turn is active (Streaming / WaitingForTool). Used to mark
    *  the "已用上下文" figure as pending-refresh, since codex-core only emits
@@ -168,8 +169,10 @@ export function AgentPlanPanel({ entries }: Props) {
 
 export function AgentPlanEnvironment({
   environment,
+  onCommitAction,
 }: {
   environment: AgentPlanEnvironmentInfo;
+  onCommitAction?: () => void;
 }) {
   const hasLineChanges = environment.addedLines > 0 || environment.removedLines > 0;
   const addedLines = environment.addedLines.toLocaleString("en-US");
@@ -256,10 +259,21 @@ export function AgentPlanEnvironment({
         </span>
       </div>
       <div className="agent-plan-env-row">
-        <span className="agent-plan-env-label">
-          <GitCommitHorizontal size={16} strokeWidth={2.1} aria-hidden="true" />
-          <span>{environment.actionLabel}</span>
-        </span>
+        {environment.actionEnabled && onCommitAction ? (
+          <button
+            type="button"
+            className="agent-plan-env-action"
+            onClick={onCommitAction}
+          >
+            <GitCommitHorizontal size={16} strokeWidth={2.1} aria-hidden="true" />
+            <span>{environment.actionLabel}</span>
+          </button>
+        ) : (
+          <span className={`agent-plan-env-label ${environment.actionEnabled ? "" : "is-disabled"}`.trim()}>
+            <GitCommitHorizontal size={16} strokeWidth={2.1} aria-hidden="true" />
+            <span>{environment.actionLabel}</span>
+          </span>
+        )}
       </div>
       {usageLabel && (
         <div className="agent-plan-env-usage" aria-label="用量">
@@ -305,12 +319,6 @@ export function AgentPlanEnvironment({
           )}
         </div>
       )}
-      <div className="agent-plan-env-row is-muted">
-        <span className="agent-plan-env-label">
-          <GithubMark />
-          <span>{environment.githubLabel}</span>
-        </span>
-      </div>
     </div>
   );
 }
@@ -345,14 +353,6 @@ function formatTokenCount(value: number) {
   if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(value >= 10_000_000 ? 0 : 1)}M`;
   if (value >= 10_000) return `${Math.round(value / 1_000)}k`;
   return value.toLocaleString("en-US");
-}
-
-function GithubMark() {
-  return (
-    <svg className="agent-plan-env-github" viewBox="0 0 16 16" aria-hidden="true" focusable="false">
-      <path d="M8 .9a7.1 7.1 0 0 0-2.25 13.84c.36.07.49-.16.49-.35v-1.25c-2 .44-2.42-.86-2.42-.86-.33-.84-.8-1.06-.8-1.06-.66-.45.05-.44.05-.44.73.05 1.12.75 1.12.75.65 1.1 1.7.78 2.11.6.07-.47.25-.78.46-.96-1.59-.18-3.26-.79-3.26-3.54 0-.78.28-1.42.74-1.92-.07-.18-.32-.91.07-1.9 0 0 .6-.19 1.96.74A6.85 6.85 0 0 1 8 4.36c.6 0 1.2.08 1.76.24 1.36-.93 1.96-.74 1.96-.74.39.99.14 1.72.07 1.9.46.5.74 1.14.74 1.92 0 2.75-1.68 3.36-3.28 3.54.26.22.49.66.49 1.33v1.84c0 .19.13.42.5.35A7.1 7.1 0 0 0 8 .9Z" />
-    </svg>
-  );
 }
 
 export function shouldShowAgentPlanForSession(

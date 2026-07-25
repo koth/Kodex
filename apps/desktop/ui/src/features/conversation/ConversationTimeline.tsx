@@ -834,7 +834,7 @@ export function ConversationTimeline({
   // (Git/Files tab clicks) don't thrash every markdown row.
   const changedFilePathsSignature = (snapshot.repository?.changed_files ?? [])
     .map((file) => file.path)
-    .join(" ");
+    .join("|");
   const stableChangedFilePaths = useMemo(
     () => snapshot.repository?.changed_files?.map((file) => file.path) ?? [],
     // eslint-disable-next-line react-hooks/exhaustive-deps

@@ -18,18 +18,33 @@ pub async fn git_refresh(app: AppHandle) -> Result<RepositorySnapshot, String> {
 }
 
 #[tauri::command]
-pub fn git_stage(state: State<'_, AppState>, paths: Vec<String>) -> Result<(), String> {
-    state.with_app(|app| app.stage_files(&paths))
+pub async fn git_stage(app: AppHandle, paths: Vec<String>) -> Result<(), String> {
+    tokio::task::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        state.git_stage(paths)
+    })
+    .await
+    .map_err(|e| format!("Git stage task failed: {e}"))?
 }
 
 #[tauri::command]
-pub fn git_unstage(state: State<'_, AppState>, paths: Vec<String>) -> Result<(), String> {
-    state.with_app(|app| app.unstage_files(&paths))
+pub async fn git_unstage(app: AppHandle, paths: Vec<String>) -> Result<(), String> {
+    tokio::task::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        state.git_unstage(paths)
+    })
+    .await
+    .map_err(|e| format!("Git unstage task failed: {e}"))?
 }
 
 #[tauri::command]
-pub fn git_commit(state: State<'_, AppState>, message: String) -> Result<(), String> {
-    state.with_app(|app| app.commit_files(&message))
+pub async fn git_commit(app: AppHandle, message: String) -> Result<(), String> {
+    tokio::task::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        state.git_commit(message)
+    })
+    .await
+    .map_err(|e| format!("Git commit task failed: {e}"))?
 }
 
 #[tauri::command]
@@ -45,4 +60,24 @@ pub async fn git_generate_commit_message(app: AppHandle) -> Result<String, Strin
     })
     .await
     .map_err(|e| format!("Generate commit message task failed: {e}"))?
+}
+
+#[tauri::command]
+pub async fn git_push(app: AppHandle) -> Result<String, String> {
+    tokio::task::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        state.git_push()
+    })
+    .await
+    .map_err(|e| format!("Git push task failed: {e}"))?
+}
+
+#[tauri::command]
+pub async fn git_commit_and_push(app: AppHandle, message: String) -> Result<String, String> {
+    tokio::task::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        state.git_commit_and_push(message)
+    })
+    .await
+    .map_err(|e| format!("Git commit-and-push task failed: {e}"))?
 }

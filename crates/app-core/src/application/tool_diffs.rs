@@ -30,25 +30,34 @@ impl Application {
             return false;
         };
 
-        if !tool_command_write_hint_paths(tool.raw_input.as_deref()).is_empty() {
-            return self.is_codebuddy_shell_command_tool(tool);
+        // Shell/Python/Node filesystem mutations never emit ACP ToolDiff. Once the
+        // command text names a write target, keep retrying tracker verification so
+        // the tool card and review panel can still attach a real before/after diff.
+        if !tool_command_write_hint_paths(tool.raw_input.as_deref()).is_empty()
+            || !tool_command_write_hint_paths(Some(tool.detail_text.as_str())).is_empty()
+        {
+return Self::tool_looks_like_shell_command(tool)
+                || is_file_write_tool_identity(&tool.kind, &tool.name)
+                || self
+                    .ui
+                    .session
+                    .agent_cli
+                    .as_deref()
+                    .is_some_and(is_codebuddy_agent_label);
         }
 
         if !is_file_write_tool_identity(&tool.kind, &tool.name) {
             return false;
         }
         !tool_event_hint_paths(tool.raw_input.as_deref()).is_empty()
+            || !tool_event_hint_paths(Some(tool.detail_text.as_str())).is_empty()
     }
 
-    fn is_codebuddy_shell_command_tool(&self, tool: &workspace_model::ToolInvocation) -> bool {
-        self.ui
-            .session
-            .agent_cli
-            .as_deref()
-            .is_some_and(is_codebuddy_agent_label)
-            && [tool.kind.as_str(), tool.name.as_str()]
-                .iter()
-                .any(|value| is_shell_command_tool_label(value))
+    fn tool_looks_like_shell_command(tool: &workspace_model::ToolInvocation) -> bool {
+        [tool.kind.as_str(), tool.name.as_str()]
+            .iter()
+            .any(|value| is_shell_command_tool_label(value))
+            || tool_raw_input_looks_like_shell_command(tool.raw_input.as_deref())
     }
 
     /// Detect file writes from completed tool calls by examining tool summaries/titles.
@@ -923,6 +932,11 @@ impl Application {
             for path in tool_command_write_hint_paths(tool.raw_input.as_deref()) {
                 add_path(path);
             }
+            if !tool.detail_text.trim().is_empty() {
+                for path in tool_command_write_hint_paths(Some(tool.detail_text.as_str())) {
+                    add_path(path);
+                }
+            }
         }
         write_paths.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
         write_paths.dedup_by(|a, b| a.0 == b.0 && normalize_path(&a.1) == normalize_path(&b.1));
@@ -1159,7 +1173,64 @@ impl Application {
 }
 
 fn is_shell_command_tool_label(value: &str) -> bool {
-    matches!(value.trim().to_ascii_lowercase().as_str(), "bash" | "shell")
+    let normalized = value.trim().to_ascii_lowercase();
+    matches!(
+        normalized.as_str(),
+        "bash"
+            | "shell"
+            | "execute"
+            | "exec"
+            | "terminal"
+            | "cmd"
+            | "powershell"
+            | "pwsh"
+            | "local_shell"
+            | "local-shell"
+            | "shell_command"
+            | "shell-command"
+            | "run_shell_command"
+            | "run-shell-command"
+            | "exec_command"
+            | "exec-command"
+    ) || normalized.contains("shell")
+        || normalized.starts_with("bash ")
+        || normalized.starts_with("sh ")
+        || normalized.starts_with("zsh ")
+        || normalized.starts_with("pwsh")
+        || normalized.starts_with("powershell")
+}
+
+fn tool_raw_input_looks_like_shell_command(raw_input: Option<&str>) -> bool {
+    let Some(raw_input) = raw_input else {
+        return false;
+    };
+    if let Ok(value) = serde_json::from_str::<serde_json::Value>(raw_input) {
+        return json_has_shell_command_field(&value);
+    }
+    false
+}
+
+fn json_has_shell_command_field(value: &serde_json::Value) -> bool {
+    match value {
+        serde_json::Value::Object(object) => {
+            for (key, child) in object {
+                let key = key.trim_matches('"').to_ascii_lowercase();
+                if matches!(
+                    key.as_str(),
+                    "command" | "cmd" | "shell_command" | "shellcommand" | "script"
+                ) && !child.is_null()
+                {
+                    return true;
+                }
+                if json_has_shell_command_field(child) {
+                    return true;
+                }
+            }
+            false
+        }
+        serde_json::Value::Array(items) => items.iter().any(json_has_shell_command_field),
+        _ => false,
+    }
 }
 
 fn tool_has_diff_source_for_path(tool: &ToolInvocation, path: &str, workspace_root: &Path) -> bool {

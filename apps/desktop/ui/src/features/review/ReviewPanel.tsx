@@ -3,10 +3,10 @@ import type { Dispatch, ReactNode, SetStateAction } from "react";
 import { MultiFileDiff } from "@pierre/diffs/react";
 import type { FileContents } from "@pierre/diffs/react";
 import { confirm } from "@tauri-apps/plugin-dialog";
-import { GitCommitHorizontal, Sparkles } from "lucide-react";
+import { GitCommitHorizontal } from "lucide-react";
 import type { UiSnapshot, ChangedFile, ChangeSection, DiffStats, FileEntry, ChangeSetSummary, FileChangeSummary, FileChangeRecord, DiffQuality, AppTheme } from "../../types";
-import { fsListDir, gitStage, gitUnstage, gitCommit, gitGenerateCommitMessage, reviewRejectPatch, sessionListChangeSets, sessionListChangeSetFiles, sessionGetChangeSetFileDiff } from "../../lib/tauri";
-import { onCommitProgress } from "../../lib/events";
+import { fsListDir, gitStage, gitUnstage, reviewRejectPatch, sessionListChangeSets, sessionListChangeSetFiles, sessionGetChangeSetFileDiff } from "../../lib/tauri";
+import { CommitDialog } from "../changes/CommitDialog";
 import { DiffTab } from "../editor/DiffTab";
 import { disposeModel, isModelDirty } from "../editor/monaco-model-registry";
 import { FileTree } from "../filetree/FileTree";
@@ -725,6 +725,7 @@ export function ReviewPanel({
               onRefresh={onRefresh}
               onAddComposerReference={onAddComposerReference}
               composerReferenceEnabled={snapshot.prompt_capabilities?.embedded_context === true}
+              aheadCount={snapshot.repository.ahead_count ?? 0}
             />
           </>
         )}
@@ -779,6 +780,7 @@ export function ReviewPanel({
                 onRefresh={onRefresh}
                 onAddComposerReference={onAddComposerReference}
                 composerReferenceEnabled={snapshot.prompt_capabilities?.embedded_context === true}
+                aheadCount={snapshot.repository.ahead_count ?? 0}
               />
             </aside>
           )}
@@ -868,6 +870,7 @@ function GitChangesTree({
   onRefresh,
   onAddComposerReference,
   composerReferenceEnabled = false,
+  aheadCount = 0,
 }: {
   grouped: Record<ChangeSection, ChangedFile[]>;
   filter: string;
@@ -877,6 +880,7 @@ function GitChangesTree({
   onRefresh: () => void | Promise<void>;
   onAddComposerReference?: (path: string) => void;
   composerReferenceEnabled?: boolean;
+  aheadCount?: number;
 }) {
   const [contextMenu, setContextMenu] = useState<ReviewFileContextMenuState | null>(null);
   const [contextMenuError, setContextMenuError] = useState<string | null>(null);
@@ -1098,9 +1102,10 @@ function GitChangesTree({
   }, [groupBusy, grouped.Unstaged, onRefresh]);
 
   const handleOpenCommitDialog = useCallback(() => {
+    if (grouped.Staged.length <= 0) return;
     setGroupMenu(null);
     setCommitDialogOpen(true);
-  }, []);
+  }, [grouped.Staged.length]);
 
   return (
     <div className="review-git-filetree">
@@ -1134,12 +1139,16 @@ function GitChangesTree({
           onFileSelect={onFileSelect}
           activePath={activePath}
           compact
-          headerAction={{
-            label: "提交",
-            ariaLabel: `提交已暂存变更 (${grouped.Staged.length})`,
-            title: "提交已暂存变更",
-            onClick: handleOpenCommitDialog,
-          }}
+          headerAction={
+            grouped.Staged.length > 0
+              ? {
+                  label: "提交",
+                  ariaLabel: `提交已暂存变更 (${grouped.Staged.length})`,
+                  title: "提交已暂存变更",
+                  onClick: handleOpenCommitDialog,
+                }
+              : undefined
+          }
           onHeaderContextMenu={(x, y) => openGroupMenu("commit", x, y)}
           onFileContextMenu={(path, x, y) => handleFileContextMenu(path, x, y, false, "unstage")}
         />
@@ -1206,6 +1215,8 @@ function GitChangesTree({
       {commitDialogOpen && (
         <CommitDialog
           stagedCount={grouped.Staged.length}
+          unstagedCount={grouped.Unstaged.length + grouped.Untracked.length}
+          aheadCount={aheadCount}
           onClose={() => setCommitDialogOpen(false)}
           onCommitted={onRefresh}
         />
@@ -1304,171 +1315,6 @@ function ReviewFileContextMenu({
           撤销改动
         </button>
       )}
-    </div>
-  );
-}
-
-function CommitDialog({
-  stagedCount,
-  onClose,
-  onCommitted,
-}: {
-  stagedCount: number;
-  onClose: () => void;
-  onCommitted: () => void | Promise<void>;
-}) {
-  const [message, setMessage] = useState("");
-  const [committing, setCommitting] = useState(false);
-  const [generating, setGenerating] = useState(false);
-  const [progress, setProgress] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const busy = committing || generating;
-  const canCommit = message.trim().length > 0 && !busy;
-
-  useEffect(() => {
-    if (!generating) return;
-    let unlisten: (() => void) | undefined;
-    let disposed = false;
-    onCommitProgress((message) => setProgress(message)).then((fn) => {
-      if (disposed) {
-        fn();
-      } else {
-        unlisten = fn;
-      }
-    });
-    return () => {
-      disposed = true;
-      unlisten?.();
-    };
-  }, [generating]);
-
-  useEffect(() => {
-    const onKey = (event: KeyboardEvent) => {
-      if (event.key === "Escape" && !busy) onClose();
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [busy, onClose]);
-
-  const handleGenerate = useCallback(async () => {
-    if (busy) return;
-    setGenerating(true);
-    setProgress("正在启动 AI 会话…");
-    setError(null);
-    try {
-      const draft = await gitGenerateCommitMessage();
-      setMessage(draft);
-    } catch (e) {
-      setError(String(e));
-    } finally {
-      setGenerating(false);
-      setProgress(null);
-    }
-  }, [busy]);
-
-  const handleCommit = useCallback(async () => {
-    const trimmed = message.trim();
-    if (!trimmed || busy) return;
-    setCommitting(true);
-    setError(null);
-    try {
-      await gitCommit(trimmed);
-      await onCommitted();
-      onClose();
-    } catch (e) {
-      setError(String(e));
-    } finally {
-      setCommitting(false);
-    }
-  }, [message, busy, onCommitted, onClose]);
-
-  return (
-    <div
-      className="review-commit-dialog-backdrop"
-      role="presentation"
-      onMouseDown={(event) => {
-        if (event.target === event.currentTarget && !busy) onClose();
-      }}
-    >
-      <div className="review-commit-dialog" role="dialog" aria-modal="true" aria-label="提交已暂存变更">
-        <div className="review-commit-dialog-header">
-          <div className="review-commit-dialog-icon" aria-hidden="true">
-            <GitCommitHorizontal size={16} strokeWidth={2.1} />
-          </div>
-          <div className="review-commit-dialog-copy">
-            <div className="review-commit-dialog-title">提交已暂存变更</div>
-            <div className="review-commit-dialog-subtitle">
-              {stagedCount} 个文件 · 约定式提交，单行不超过 72 字符
-            </div>
-          </div>
-        </div>
-
-        <label className="review-commit-dialog-field">
-          <span className="review-commit-dialog-label">提交信息</span>
-          <div className="review-commit-dialog-input-row">
-            <input
-              type="text"
-              className="review-commit-message-input"
-              placeholder="feat: 简要描述本次改动"
-              value={message}
-              autoFocus
-              maxLength={72}
-              onChange={(event) => setMessage(event.target.value)}
-              onKeyDown={(event) => {
-                if (event.key === "Enter" && !event.shiftKey) {
-                  event.preventDefault();
-                  void handleCommit();
-                }
-              }}
-              disabled={busy}
-            />
-            <button
-              type="button"
-              className="review-commit-ai-button"
-              title="用当前模型生成提交信息"
-              onClick={() => void handleGenerate()}
-              disabled={busy}
-            >
-              {generating ? (
-                <span className="review-menu-spinner" aria-hidden="true" />
-              ) : (
-                <Sparkles size={14} strokeWidth={2.1} aria-hidden="true" />
-              )}
-              <span>{generating ? "生成中" : "AI"}</span>
-            </button>
-          </div>
-        </label>
-
-        {generating && progress && (
-          <div className="review-commit-progress" role="status" aria-live="polite">
-            <span className="review-menu-spinner" aria-hidden="true" />
-            <span>{progress}</span>
-          </div>
-        )}
-        {error && <div className="review-tree-error">{error}</div>}
-
-        <div className="review-commit-dialog-footer">
-          <span className="review-commit-dialog-hint">Enter 提交 · Esc 取消</span>
-          <div className="review-commit-dialog-actions">
-            <button
-              type="button"
-              className="review-commit-dialog-cancel"
-              onClick={onClose}
-              disabled={busy}
-            >
-              取消
-            </button>
-            <button
-              type="button"
-              className="review-commit-button"
-              onClick={() => void handleCommit()}
-              disabled={!canCommit}
-            >
-              {committing ? "提交中..." : "提交"}
-            </button>
-          </div>
-        </div>
-      </div>
     </div>
   );
 }

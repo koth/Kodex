@@ -657,24 +657,199 @@ impl AppState {
                         .ok_or("Remote workspace is missing SSH session config for git refresh")?,
                 ))
             } else {
-                app.refresh_repository();
-                return Ok(app.ui.repository.clone());
+                // Snapshot the local root under the lock, then release before
+                // talking to git so a slow status never freezes the UI.
+                None
             }
         };
 
-        let Some((workspace_key, config)) = remote_request else {
-            unreachable!("local workspace returns while holding the application lock")
+        if let Some((workspace_key, config)) = remote_request {
+            let snapshot = app_core::refresh_remote_git_status(&config)?;
+            let mut guard = self.workspaces.lock().map_err(|e| e.to_string())?;
+            if guard.active_workspace.as_deref() == Some(workspace_key.as_str())
+                && let Some(WorkspaceEntry::Connected(app)) = guard.workspaces.get_mut(&workspace_key)
+                && app.is_remote_workspace()
+            {
+                app.replace_repository_snapshot(snapshot.clone());
+            }
+            return Ok(snapshot);
+        }
+
+        let (workspace_key, root) = {
+            let guard = self.workspaces.lock().map_err(|e| e.to_string())?;
+            let active_key = guard.active_workspace.clone().ok_or("No workspace open")?;
+            let app = match guard.workspaces.get(&active_key) {
+                Some(WorkspaceEntry::Connected(app)) => app,
+                _ => return Err("No connected workspace open".into()),
+            };
+            if app.is_remote_workspace() {
+                return Err("Remote workspace became active during git refresh".into());
+            }
+            (active_key, app.ui.workspace.root.clone())
         };
-        let snapshot = app_core::refresh_remote_git_status(&config)?;
+
+        let snapshot = git_service::GitService::open(&root).map_err(|e| e.to_string())?;
 
         let mut guard = self.workspaces.lock().map_err(|e| e.to_string())?;
         if guard.active_workspace.as_deref() == Some(workspace_key.as_str())
             && let Some(WorkspaceEntry::Connected(app)) = guard.workspaces.get_mut(&workspace_key)
-            && app.is_remote_workspace()
+            && !app.is_remote_workspace()
         {
             app.replace_repository_snapshot(snapshot.clone());
+            return Ok(app.ui.repository.clone());
         }
         Ok(snapshot)
+    }
+
+    pub fn git_stage(&self, paths: Vec<String>) -> Result<(), String> {
+        self.run_local_or_remote_git(
+            "stage",
+            |root| git_service::GitService::stage_status_paths(root, &paths).map_err(|e| e.to_string()),
+            |app| app.stage_files(&paths),
+        )
+    }
+
+    pub fn git_unstage(&self, paths: Vec<String>) -> Result<(), String> {
+        self.run_local_or_remote_git(
+            "unstage",
+            |root| git_service::GitService::unstage(root, &paths).map_err(|e| e.to_string()),
+            |app| app.unstage_files(&paths),
+        )
+    }
+
+    pub fn git_commit(&self, message: String) -> Result<(), String> {
+        self.run_local_or_remote_git(
+            "commit",
+            |root| git_service::GitService::commit(root, &message).map_err(|e| e.to_string()),
+            |app| app.commit_files(&message),
+        )
+    }
+
+    pub fn git_push(&self) -> Result<String, String> {
+        enum Plan {
+            Local {
+                workspace_key: String,
+                root: PathBuf,
+            },
+            RemoteUnsupported,
+        }
+
+        let plan = {
+            let guard = self.workspaces.lock().map_err(|e| e.to_string())?;
+            let active_key = guard.active_workspace.clone().ok_or("No workspace open")?;
+            let app = match guard.workspaces.get(&active_key) {
+                Some(WorkspaceEntry::Connected(app)) => app,
+                _ => return Err("No connected workspace open".into()),
+            };
+            if app.is_remote_workspace() {
+                Plan::RemoteUnsupported
+            } else {
+                Plan::Local {
+                    workspace_key: active_key,
+                    root: app.ui.workspace.root.clone(),
+                }
+            }
+        };
+
+        match plan {
+            Plan::RemoteUnsupported => Err("远程工作区暂不支持推送".into()),
+            Plan::Local {
+                workspace_key,
+                root,
+            } => {
+                // Hold no app lock across network-bound git push.
+                let result = git_service::GitService::push(&root).map_err(|e| e.to_string())?;
+                self.refresh_local_repository_if_active(&workspace_key, &root)?;
+                Ok(result)
+            }
+        }
+    }
+
+    pub fn git_commit_and_push(&self, message: String) -> Result<String, String> {
+        enum Plan {
+            Local {
+                workspace_key: String,
+                root: PathBuf,
+            },
+            RemoteUnsupported,
+        }
+
+        let plan = {
+            let guard = self.workspaces.lock().map_err(|e| e.to_string())?;
+            let active_key = guard.active_workspace.clone().ok_or("No workspace open")?;
+            let app = match guard.workspaces.get(&active_key) {
+                Some(WorkspaceEntry::Connected(app)) => app,
+                _ => return Err("No connected workspace open".into()),
+            };
+            if app.is_remote_workspace() {
+                Plan::RemoteUnsupported
+            } else {
+                Plan::Local {
+                    workspace_key: active_key,
+                    root: app.ui.workspace.root.clone(),
+                }
+            }
+        };
+
+        match plan {
+            Plan::RemoteUnsupported => Err("远程工作区暂不支持推送".into()),
+            Plan::Local {
+                workspace_key,
+                root,
+            } => {
+                git_service::GitService::commit(&root, &message).map_err(|e| e.to_string())?;
+                let result = git_service::GitService::push(&root).map_err(|e| e.to_string())?;
+                self.refresh_local_repository_if_active(&workspace_key, &root)?;
+                Ok(result)
+            }
+        }
+    }
+
+    fn run_local_or_remote_git<T, Local, Remote>(
+        &self,
+        operation: &str,
+        local: Local,
+        remote: Remote,
+    ) -> Result<T, String>
+    where
+        Local: FnOnce(&Path) -> Result<T, String>,
+        Remote: FnOnce(&mut Application) -> Result<T, String>,
+    {
+        let (workspace_key, root) = {
+            let mut guard = self.workspaces.lock().map_err(|e| e.to_string())?;
+            let active_key = guard.active_workspace.clone().ok_or("No workspace open")?;
+            let app = match guard.workspaces.get_mut(&active_key) {
+                Some(WorkspaceEntry::Connected(app)) => app,
+                _ => return Err("No connected workspace open".into()),
+            };
+            if app.is_remote_workspace() {
+                // Remote git still needs the app for SSH config + status expand.
+                // Keep the existing Application path for remote ops.
+                return remote(app);
+            }
+            (active_key, app.ui.workspace.root.clone())
+        };
+
+        let _ = operation;
+        let result = local(&root)?;
+        self.refresh_local_repository_if_active(&workspace_key, &root)?;
+        Ok(result)
+    }
+
+    fn refresh_local_repository_if_active(
+        &self,
+        workspace_key: &str,
+        root: &Path,
+    ) -> Result<(), String> {
+        let snapshot = git_service::GitService::open(root).map_err(|e| e.to_string())?;
+        let mut guard = self.workspaces.lock().map_err(|e| e.to_string())?;
+        if guard.active_workspace.as_deref() == Some(workspace_key)
+            && let Some(WorkspaceEntry::Connected(app)) = guard.workspaces.get_mut(workspace_key)
+            && !app.is_remote_workspace()
+        {
+            app.replace_repository_snapshot(snapshot);
+        }
+        Ok(())
     }
 
     pub fn with_workspace_app<F, R>(&self, path: Option<String>, f: F) -> Result<R, String>

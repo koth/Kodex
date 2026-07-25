@@ -4,6 +4,7 @@ import { startupPerfMark, sessionGetState } from "../../lib/tauri";
 import { onUiSnapshot, onUiSnapshotPatch } from "../../lib/events";
 import {
   appendStreamingMessageDelta,
+  flushStreamingMessageBodies,
   getStreamingMessageBody,
 } from "../conversation/streaming-message-store";
 
@@ -113,15 +114,30 @@ function isStreamingDeltaOnlyPatch(patch: UiSnapshotPatch) {
 }
 
 export function materializeStreamingMessageBodies(snapshot: UiSnapshot): UiSnapshot {
+  // Pending stream flushes are debounced; force them out before we decide whether
+  // the snapshot body is stale relative to the live stream store.
+  flushStreamingMessageBodies();
   let changed = false;
   const messages = snapshot.messages.map((message) => {
     const streamingBody = getStreamingMessageBody(message.id);
     if (
       streamingBody == null ||
       streamingBody === message.body ||
-      streamingBody.length <= message.body.length ||
-      !streamingBody.startsWith(message.body)
+      streamingBody.length <= message.body.length
     ) {
+      return message;
+    }
+    // Prefer the longer stream body whenever it is a continuation OR the
+    // snapshot body is only a stale prefix-incompatible fragment. The common
+    // failure mode is delta-only patches updating the stream store while
+    // `snapshot.messages` stays truncated; when streaming ends the UI would
+    // otherwise render the truncated snapshot body.
+    const streamIsContinuation = streamingBody.startsWith(message.body);
+    const snapshotLooksStalePrefix =
+      message.role === "Assistant" &&
+      message.body.length > 0 &&
+      streamingBody.includes(message.body);
+    if (!streamIsContinuation && !snapshotLooksStalePrefix) {
       return message;
     }
     changed = true;
@@ -232,21 +248,18 @@ export function useWorkbenchSnapshot() {
 
     onUiSnapshotPatch((patch) => {
       if (disposed) return;
-      if (
+      const hasDeltas = (patch.message_deltas?.length ?? 0) > 0;
+      const isDuplicateRevision =
         patch.session.id === prevSnapshotSessionId.current &&
-        patch.revision === prevSnapshotRevision.current
-      )
-        return;
-      applyStreamingDeltas(patch);
-      setWorkspaceReady(true);
-      if (isStreamingDeltaOnlyPatch(patch)) {
-        prevSnapshotSessionId.current = patch.session.id;
-        prevSnapshotRevision.current = patch.revision;
-        if (!snapshotRef.current) {
-          void pollState();
-        }
-        return;
+        patch.revision === prevSnapshotRevision.current;
+      // Same-revision patches are normally ignored, but streaming deltas must
+      // still land in the stream store + snapshot bodies.
+      if (isDuplicateRevision && !hasDeltas) return;
+
+      if (hasDeltas) {
+        applyStreamingDeltas(patch);
       }
+      setWorkspaceReady(true);
       setSnapshot((prev) => {
         if (!prev) {
           void pollState();
@@ -255,12 +268,28 @@ export function useWorkbenchSnapshot() {
         // Reject stale patches that belong to a different session than the
         // one currently rendered (e.g. a patch emitted by the bridge before a
         // session switch that arrives after the switch).
-        if (patch.session.id !== prev.session.id || patch.revision <= prev.revision) {
+        if (patch.session.id !== prev.session.id || patch.revision < prev.revision) {
           void pollState();
           return prev;
         }
+
         prevSnapshotSessionId.current = patch.session.id;
-        prevSnapshotRevision.current = patch.revision;
+        prevSnapshotRevision.current = Math.max(prev.revision, patch.revision);
+
+        // Delta-only patches intentionally omit `messages`. Fold the live
+        // stream store back into snapshot bodies so Idle/final renders keep
+        // the full assistant text instead of a truncated prefix.
+        if (isStreamingDeltaOnlyPatch(patch) || (hasDeltas && patch.messages.length === 0)) {
+          return materializeStreamingMessageBodies({
+            ...prev,
+            revision: Math.max(prev.revision, patch.revision),
+            session: patch.session,
+            session_config: patch.session_config ?? prev.session_config,
+            thinking_status: patch.thinking_status ?? prev.thinking_status,
+            pending_steers: patch.pending_steers ?? prev.pending_steers,
+          });
+        }
+
         const next = applySnapshotPatch(prev, patch);
         return materializeStreamingMessageBodies(next);
       });

@@ -849,12 +849,18 @@ body.is-resizing-left-sidebar {
   max-width: calc(100% - 2 * var(--center-panel-gutter));
   overflow: hidden;
   flex-direction: column;
-  border: 1px solid color-mix(in srgb, var(--border-strong) 58%, transparent);
+  border: 1px solid color-mix(in srgb, #ffffff 8%, transparent);
   border-radius: 18px;
-  background: #2c2c2c;
+  background:
+    linear-gradient(
+      180deg,
+      color-mix(in srgb, #2a2b30 92%, #3a3d48 8%),
+      #232428 100%
+    );
   box-shadow:
-    0 16px 44px rgba(0, 0, 0, 0.24),
-    inset 0 1px 0 color-mix(in srgb, var(--text-strong) 5%, transparent);
+    0 18px 48px rgba(0, 0, 0, 0.34),
+    inset 0 1px 0 color-mix(in srgb, #ffffff 6%, transparent);
+  color: #e8eaed;
   pointer-events: auto;
 }
 
@@ -883,10 +889,20 @@ body.is-resizing-left-sidebar {
 
 .agent-plan-dock .agent-plan-environment-title {
   font-size: 13px;
+  color: color-mix(in srgb, #e8eaed 52%, transparent);
+  font-weight: 650;
 }
 
 .agent-plan-dock .agent-plan-env-add {
-  color: var(--text-soft);
+  display: inline-flex;
+  width: 28px;
+  height: 28px;
+  align-items: center;
+  justify-content: center;
+  border-radius: 999px;
+  border: 1px solid color-mix(in srgb, #ffffff 10%, transparent);
+  background: color-mix(in srgb, #ffffff 5%, transparent);
+  color: color-mix(in srgb, #e8eaed 72%, transparent);
 }
 
 .agent-plan-dock .agent-plan-toggle {
@@ -923,12 +939,15 @@ body.is-resizing-left-sidebar {
 
 .agent-plan-dock .agent-plan-env-row {
   min-height: 30px;
+  color: #e8eaed;
 }
 
-.agent-plan-dock .agent-plan-env-label {
+.agent-plan-dock .agent-plan-env-label,
+.agent-plan-dock .agent-plan-env-action {
   gap: 11px;
   font-size: 15px;
   font-weight: 700;
+  color: inherit;
 }
 
 .agent-plan-dock .agent-plan-env-label.has-menu {
@@ -938,6 +957,35 @@ body.is-resizing-left-sidebar {
 .agent-plan-dock .agent-plan-env-change-metrics {
   gap: 6px;
   font-size: 15px;
+}
+
+.agent-plan-dock .agent-plan-env-added {
+  color: #7dcea0;
+}
+
+.agent-plan-dock .agent-plan-env-removed {
+  color: #e8a090;
+}
+
+.agent-plan-dock .agent-plan-env-usage-metrics {
+  color: color-mix(in srgb, #e8eaed 72%, transparent);
+}
+
+.agent-plan-dock .agent-plan-env-usage-staleness {
+  color: color-mix(in srgb, #e8eaed 42%, transparent);
+}
+
+.agent-plan-dock .agent-plan-env-usage-breakdown {
+  color: color-mix(in srgb, #e8eaed 48%, transparent);
+}
+
+.agent-plan-dock .agent-plan-env-row.is-muted {
+  color: color-mix(in srgb, #e8eaed 48%, transparent);
+}
+
+.agent-plan-dock .agent-plan-toggle {
+  border-top-color: color-mix(in srgb, #ffffff 8%, transparent);
+  color: color-mix(in srgb, #e8eaed 58%, transparent);
 }
 
 .agent-plan-dock .agent-plan-content {

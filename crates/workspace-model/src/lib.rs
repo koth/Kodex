@@ -795,6 +795,12 @@ pub struct RepositorySnapshot {
     pub branch: String,
     pub head: String,
     pub changed_files: Vec<ChangedFile>,
+    /// Local commits not yet on the upstream branch.
+    #[serde(default)]
+    pub ahead_count: u32,
+    /// Upstream commits not yet in the local branch.
+    #[serde(default)]
+    pub behind_count: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

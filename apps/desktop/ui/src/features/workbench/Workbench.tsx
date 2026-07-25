@@ -22,6 +22,7 @@ import {
   findPlanReplanOption,
   findPlanTerminateOption,
 } from "../composer/AgentPlanPanel";
+import { CommitDialog } from "../changes/CommitDialog";
 import { ReviewPanel } from "../review/ReviewPanel";
 import type { ReviewPanelActiveTab, ReviewPanelOpenTab, ReviewPreferredChangeSet } from "../review/ReviewPanel";
 import { DiffTab } from "../editor/DiffTab";
@@ -90,11 +91,11 @@ function ContextDockToggleIcon() {
   );
 }
 
-function buildAgentPlanEnvironmentInfo(
+export function buildAgentPlanEnvironmentInfo(
   snapshot: UiSnapshot,
   gitHydrated: boolean,
 ): AgentPlanEnvironmentInfo {
-  const changedFiles = snapshot.repository.changed_files;
+const changedFiles = snapshot.repository.changed_files;
   const addedLines = changedFiles.reduce((sum, file) => sum + file.stats.added, 0);
   const removedLines = changedFiles.reduce((sum, file) => sum + file.stats.removed, 0);
   const branchLabel =
@@ -102,6 +103,21 @@ function buildAgentPlanEnvironmentInfo(
     (snapshot.repository.head ? snapshot.repository.head.slice(0, 7) : "") ||
     "无分支";
   const changeCount = changedFiles.length;
+  const stagedCount = changedFiles.filter((file) => file.section === "Staged").length;
+  const aheadCount = snapshot.repository.ahead_count ?? 0;
+
+  let actionLabel = "工作区干净";
+  if (!gitHydrated) {
+    actionLabel = "读取 Git 状态";
+  } else if (stagedCount > 0 && aheadCount > 0) {
+    actionLabel = "提交并推送";
+  } else if (stagedCount > 0) {
+    actionLabel = "提交";
+  } else if (aheadCount > 0) {
+    actionLabel = aheadCount === 1 ? "推送 1 个提交" : `推送 ${aheadCount} 个提交`;
+  } else if (changeCount > 0) {
+    actionLabel = "先暂存变更";
+  }
 
   return {
     changeCount,
@@ -109,12 +125,10 @@ function buildAgentPlanEnvironmentInfo(
     removedLines,
     locationLabel: snapshot.workspace.location?.kind === "remote_linux" ? "远程" : "本地",
     branchLabel,
-    actionLabel: !gitHydrated
-      ? "读取 Git 状态"
-      : changeCount > 0
-        ? "提交或推送"
-        : "工作区干净",
-    githubLabel: "GitHub CLI 不可用",
+    actionLabel,
+    // Only open the dialog when there is something it can actually do:
+    // staged files to commit, or local commits to push.
+    actionEnabled: gitHydrated && (stagedCount > 0 || aheadCount > 0),
     usage: snapshot.usage,
     streaming:
       snapshot.session.status === "Streaming" ||
@@ -340,6 +354,7 @@ export function Workbench() {
     handleRightPanelResizeStart,
   } = useRightPanelState();
   const [reviewPanelExpanded, setReviewPanelExpanded] = useState(false);
+  const [commitDialogOpen, setCommitDialogOpen] = useState(false);
   const [contextDockCollapsed, setContextDockCollapsed] = useState(true);
   const [contextDockResizeTier, setContextDockResizeTier] =
     useState<AgentPlanOverlapTier>("none");
@@ -1028,6 +1043,10 @@ export function Workbench() {
   const terminalDockAvailable = isTerminalDockAvailableForWorkspace(snapshot.workspace);
   const terminalDockActive = terminalDockAvailable && terminalDockVisible;
   const agentPlanEnvironment = buildAgentPlanEnvironmentInfo(snapshot, gitHydrated);
+  const stagedCount = snapshot.repository.changed_files.filter((file) => file.section === "Staged").length;
+  const unstagedCount = snapshot.repository.changed_files.filter(
+    (file) => file.section === "Unstaged" || file.section === "Untracked",
+  ).length;
   const agentPlanDockSlot =
     contextDockVisible ? (
       <aside
@@ -1036,7 +1055,10 @@ export function Workbench() {
         }`}
         aria-label="环境信息"
       >
-        <AgentPlanEnvironment environment={agentPlanEnvironment} />
+        <AgentPlanEnvironment
+          environment={agentPlanEnvironment}
+          onCommitAction={() => setCommitDialogOpen(true)}
+        />
         <AgentPlanPanel entries={agentPlanEntries} />
       </aside>
     ) : null;
@@ -1223,6 +1245,15 @@ export function Workbench() {
               </div>
             )}
             {agentPlanDockSlot}
+            {commitDialogOpen && (
+              <CommitDialog
+                stagedCount={stagedCount}
+                unstagedCount={unstagedCount}
+                aheadCount={snapshot.repository.ahead_count ?? 0}
+                onClose={() => setCommitDialogOpen(false)}
+                onCommitted={handleRefreshGit}
+              />
+            )}
 
             {displayTabs.length > 1 && (
               <div className="center-tab-bar-shell">

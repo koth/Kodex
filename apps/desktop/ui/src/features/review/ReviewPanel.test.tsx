@@ -1141,7 +1141,7 @@ describe("ReviewPanel scoped change sets", () => {
     );
 
     fireEvent.click(await screen.findByRole("button", { name: "提交已暂存变更 (1)" }));
-    expect(await screen.findByRole("dialog", { name: "提交已暂存变更" })).toBeTruthy();
+    expect(await screen.findByRole("dialog", { name: "提交" })).toBeTruthy();
     expect(screen.getByPlaceholderText("feat: 简要描述本次改动")).toBeTruthy();
     expect(screen.getByRole("button", { name: "AI" })).toBeTruthy();
   });
@@ -1168,7 +1168,7 @@ describe("ReviewPanel scoped change sets", () => {
     fireEvent.contextMenu(await screen.findByText(/^已暂存/), { clientX: 10, clientY: 10 });
     fireEvent.click(await screen.findByRole("menuitem", { name: "提交 (1)" }));
 
-    expect(await screen.findByRole("dialog", { name: "提交已暂存变更" })).toBeTruthy();
+    expect(await screen.findByRole("dialog", { name: "提交" })).toBeTruthy();
     expect(screen.getByPlaceholderText("feat: 简要描述本次改动")).toBeTruthy();
     expect(screen.getByRole("button", { name: "AI" })).toBeTruthy();
   });

@@ -927,7 +927,7 @@ fn python_open_write_command_yields_written_file_hint() {
 }
 
 #[test]
-fn command_write_hint_retries_only_for_codebuddy_shell_tools() {
+fn command_write_hint_retries_for_shell_tools_across_agents() {
     let dir = tempfile::tempdir().unwrap();
     let mut app = test_app(&dir);
     app.ui.session.agent_cli = Some("Codex".into());
@@ -949,7 +949,7 @@ fn command_write_hint_retries_only_for_codebuddy_shell_tools() {
         logs: Vec::new(),
         diff_paths: Vec::new(),
         diff_previews: Vec::new(),
-        raw_input: Some(raw_input),
+        raw_input: Some(raw_input.clone()),
         raw_output: None,
         terminal_output: None,
         error: None,
@@ -961,10 +961,20 @@ fn command_write_hint_retries_only_for_codebuddy_shell_tools() {
         stop_status: None,
     });
 
-    assert!(!app.completed_tool_has_detectable_write_hint("call-bash"));
+    assert!(app.completed_tool_has_detectable_write_hint("call-bash"));
 
     app.ui.session.agent_cli = Some("CodeBuddy".into());
+    assert!(app.completed_tool_has_detectable_write_hint("call-bash"));
 
+    let tool = app
+        .ui
+        .tools
+        .iter_mut()
+        .find(|tool| tool.call_id == "call-bash")
+        .unwrap();
+    tool.name = "Get-ChildItem".into();
+    tool.kind = "Execute".into();
+    tool.raw_input = Some(raw_input);
     assert!(app.completed_tool_has_detectable_write_hint("call-bash"));
 
     let tool = app
@@ -975,8 +985,95 @@ fn command_write_hint_retries_only_for_codebuddy_shell_tools() {
         .unwrap();
     tool.name = "Read".into();
     tool.kind = "Read".into();
+    tool.raw_input = Some(
+        serde_json::json!({
+            "file_path": "packages/frontend/src/pages/GalleryPage.tsx",
+        })
+        .to_string(),
+    );
 
     assert!(!app.completed_tool_has_detectable_write_hint("call-bash"));
+}
+
+#[test]
+fn codex_python_shell_write_attaches_tool_and_session_diff() {
+    let dir = tempfile::tempdir().unwrap();
+    let relative_path = "apps/desktop/ui/src/features/changes/CommitDialog.tsx";
+    let file_path = dir.path().join(relative_path);
+    fs::create_dir_all(file_path.parent().unwrap()).unwrap();
+    let before = "export function CommitDialog() {\n  return null;\n}\n";
+    let after = "export function CommitDialog() {\n  return <dialog />;\n}\n";
+    fs::write(&file_path, before).unwrap();
+
+    let mut app = test_app(&dir);
+    app.ui.session.agent_cli = Some("Codex".into());
+    let raw_input = serde_json::json!({
+        "command": format!(
+            "python3 - <<'PY'\nfrom pathlib import Path\ndialog_tsx = Path('{path}')\ntext = dialog_tsx.read_text()\ndialog_tsx.write_text(text.replace('return null;', 'return <dialog />;'))\nPY",
+            path = relative_path,
+        ),
+    })
+    .to_string();
+
+    let started = app.apply_runtime_events_with_file_tracking(vec![ClientEvent::ToolStarted {
+        id: "call-python-write".into(),
+        parent_id: None,
+        name: "python3 - <<'PY'".into(),
+        kind: "Execute".into(),
+        summary: "python3 - <<'PY'".into(),
+        is_subagent: false,
+        raw_input: Some(raw_input.clone()),
+    }]);
+    assert!(!started.had_file_changes);
+    assert_eq!(
+        app.file_tracker
+            .get_baseline_text("call-python-write", relative_path),
+        Some(before)
+    );
+
+    fs::write(&file_path, after).unwrap();
+    let completed = app.apply_runtime_events_with_file_tracking(vec![ClientEvent::ToolCompleted {
+        id: "call-python-write".into(),
+        name: Some("python3 - <<'PY'".into()),
+        outcome: "Completed".into(),
+        raw_output: Some("css written 10504\nCommitDialog component written".into()),
+        terminal_output: None,
+    }]);
+    assert!(!completed.had_file_changes);
+
+    app.advance_runtime_clock(Duration::from_secs(1));
+    assert!(app.retry_pending_tool_write_detections());
+
+    assert_eq!(app.ui.session_changes.len(), 1);
+    assert_eq!(app.ui.session_changes[0].path, relative_path);
+    assert_eq!(app.ui.session_changes[0].old_text.as_deref(), Some(before));
+    assert_eq!(app.ui.session_changes[0].new_text, after);
+
+    let tool = app
+        .ui
+        .tools
+        .iter()
+        .find(|tool| tool.call_id == "call-python-write")
+        .unwrap();
+    assert_eq!(tool.diff_previews.len(), 1);
+    let preview = &tool.diff_previews[0];
+    assert_eq!(preview.path, std::path::PathBuf::from(relative_path));
+    let added = preview
+        .hunks
+        .iter()
+        .flat_map(|hunk| &hunk.lines)
+        .filter(|line| line.kind == DiffLineKind::Added)
+        .map(|line| line.content.as_str())
+        .collect::<Vec<_>>();
+    let removed = preview
+        .hunks
+        .iter()
+        .flat_map(|hunk| &hunk.lines)
+        .filter(|line| line.kind == DiffLineKind::Removed)
+        .map(|line| line.content.as_str())
+        .collect::<Vec<_>>();
+    assert!(added.iter().any(|line| line.contains("<dialog />")));
+    assert!(removed.iter().any(|line| line.contains("return null;")));
 }
 
 #[test]

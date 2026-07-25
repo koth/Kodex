@@ -14,16 +14,20 @@ impl GitService {
     pub fn open_metadata(path: impl AsRef<Path>) -> anyhow::Result<RepositorySnapshot> {
         let repo = Repository::discover(path).context("failed to discover git repository")?;
         let (branch, head) = repository_identity(&repo);
+        let (ahead_count, behind_count) = repository_ahead_behind(&repo);
         Ok(RepositorySnapshot {
             branch,
             head,
             changed_files: Vec::new(),
+            ahead_count,
+            behind_count,
         })
     }
 
     pub fn open(path: impl AsRef<Path>) -> anyhow::Result<RepositorySnapshot> {
         let repo = Repository::discover(path).context("failed to discover git repository")?;
         let (branch, head_id) = repository_identity(&repo);
+        let (ahead_count, behind_count) = repository_ahead_behind(&repo);
 
         let mut options = StatusOptions::new();
         options
@@ -60,6 +64,8 @@ impl GitService {
             branch,
             head: head_id,
             changed_files,
+            ahead_count,
+            behind_count,
         })
     }
 
@@ -188,6 +194,40 @@ impl GitService {
         .context("无法创建提交")
     }
 
+    /// Push the current branch to its upstream remote using the system `git`
+    /// binary so credential helpers / SSH agents work the same as the CLI.
+    pub fn push(path: impl AsRef<Path>) -> anyhow::Result<String> {
+        let path = path.as_ref();
+        let output = std::process::Command::new("git")
+            .arg("-C")
+            .arg(path)
+            .args(["push", "--porcelain"])
+            // Never block the app on an interactive password/passphrase prompt.
+            // Credential helpers and ssh-agent still work; only TTY prompts are refused.
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .env(
+                "GIT_SSH_COMMAND",
+                "ssh -o BatchMode=yes -o ConnectTimeout=20 -o StrictHostKeyChecking=accept-new",
+            )
+            .output()
+            .context("无法启动 git push")?;
+        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        if !output.status.success() {
+            let detail = if !stderr.is_empty() {
+                stderr
+            } else if !stdout.is_empty() {
+                stdout
+            } else {
+                format!("git push 失败 (exit {})", output.status)
+            };
+            bail!(
+                "{detail}\n提示：推送不会弹出密码框。请先在终端配置好 SSH key / credential helper。"
+            );
+        }
+        Ok(if stdout.is_empty() { "已推送到远程".into() } else { stdout })
+    }
+
     pub fn head_text(path: impl AsRef<Path>, file_path: &str) -> anyhow::Result<Option<String>> {
         let repo = Repository::discover(path).context("failed to discover git repository")?;
         let workdir = repo.workdir().context("仓库没有工作目录")?;
@@ -286,6 +326,29 @@ fn repository_identity(repo: &Repository) -> (String, String) {
         .map(|oid| oid.to_string())
         .unwrap_or_else(|| "未诞生".into());
     (branch, head_id)
+}
+
+fn repository_ahead_behind(repo: &Repository) -> (u32, u32) {
+    let Ok(head) = repo.head() else {
+        return (0, 0);
+    };
+    if !head.is_branch() {
+        return (0, 0);
+    }
+    let Some(local) = head.target() else {
+        return (0, 0);
+    };
+    let branch = git2::Branch::wrap(head);
+    let Ok(upstream) = branch.upstream() else {
+        return (0, 0);
+    };
+    let Some(upstream_oid) = upstream.get().target() else {
+        return (0, 0);
+    };
+    match repo.graph_ahead_behind(local, upstream_oid) {
+        Ok((ahead, behind)) => (ahead as u32, behind as u32),
+        Err(_) => (0, 0),
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -854,6 +917,38 @@ mod tests {
         let snapshot = GitService::open_metadata(dir.path()).unwrap();
         assert_eq!(snapshot.branch, "master");
         assert!(snapshot.changed_files.is_empty());
+    }
+
+    #[test]
+    fn snapshot_reports_ahead_count_against_upstream() {
+        let (dir, repo) = setup_repo();
+        commit_file(&repo, "base.txt", "base\n");
+
+        let base_oid = repo.head().unwrap().target().unwrap();
+        repo.remote("origin", dir.path().to_str().unwrap()).unwrap();
+        repo.reference("refs/remotes/origin/master", base_oid, true, "set origin/master")
+            .unwrap();
+        let mut branch = repo
+            .find_branch("master", git2::BranchType::Local)
+            .unwrap();
+        branch.set_upstream(Some("origin/master")).unwrap();
+
+        commit_file(&repo, "local.txt", "local\n");
+
+        let snapshot = GitService::open(dir.path()).unwrap();
+        assert_eq!(snapshot.ahead_count, 1);
+        assert_eq!(snapshot.behind_count, 0);
+        assert!(snapshot.changed_files.is_empty());
+    }
+
+    #[test]
+    fn snapshot_reports_zero_ahead_without_upstream() {
+        let (dir, repo) = setup_repo();
+        commit_file(&repo, "local.txt", "local\n");
+
+        let snapshot = GitService::open(dir.path()).unwrap();
+        assert_eq!(snapshot.ahead_count, 0);
+        assert_eq!(snapshot.behind_count, 0);
     }
 
     #[test]

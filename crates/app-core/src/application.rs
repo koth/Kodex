@@ -39,7 +39,8 @@ mod update_signal;
 pub use update_signal::AppUpdate;
 use diff_utils::{
     expand_tool_diff_fragment_from_disk, looks_like_fragment_to_full_file_text,
-    normalize_diff_text_for_session_change, raw_input_has_write_payload, tool_event_hint_paths,
+    normalize_diff_text_for_session_change, raw_input_has_write_payload,
+    tool_command_write_hint_paths, tool_event_hint_paths,
 };
 use inline_think::InlineThinkFilter;
 pub use path_utils::{normalize_path_for_storage, normalize_tracked_path};

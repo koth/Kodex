@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest";
 import type { ToolInvocation, UiSnapshot, UiSnapshotPatch } from "../../types";
-import { replaceStreamingMessageBody } from "../conversation/streaming-message-store";
+import {
+  appendStreamingMessageDelta,
+  replaceStreamingMessageBody,
+} from "../conversation/streaming-message-store";
 import { applySnapshotPatch, materializeStreamingMessageBodies } from "./useWorkbenchSnapshot";
 
 function makeSnapshot(overrides: Partial<UiSnapshot> = {}): UiSnapshot {
@@ -99,6 +102,22 @@ describe("materializeStreamingMessageBodies", () => {
     expect(next.messages[0].body).toBe("\n\n##xxxx\n\n#### yy");
   });
 
+  it("folds pending stream flushes into snapshot bodies before idle render", () => {
+    // Simulate a short body already in the store, then a pending delta that has
+    // not been flushed to listeners yet.
+    replaceStreamingMessageBody("msg-pending-flush", "已按 ");
+    appendStreamingMessageDelta("msg-pending-flush", "codex-acp 路径收紧。");
+    const snapshot = makeSnapshot({
+      session: { ...makeSnapshot().session, status: "Idle" },
+      messages: [{ id: "msg-pending-flush", role: "Assistant", body: "已按 " }],
+      timeline: [{ Message: "msg-pending-flush" }],
+    });
+
+    const next = materializeStreamingMessageBodies(snapshot);
+
+    expect(next.messages[0].body).toBe("已按 codex-acp 路径收紧。");
+  });
+
   it("does not overwrite a newer final snapshot body with stale streaming text", () => {
     replaceStreamingMessageBody("msg-final-complete", "\n\n##");
     const snapshot = makeSnapshot({
@@ -132,6 +151,27 @@ describe("applySnapshotPatch", () => {
     const next = applySnapshotPatch(snapshot, patch);
 
     expect(next.messages[0].body).toBe("I will inspect the file first.");
+  });
+
+  it("materializes delta-only stream text so idle renders keep the full reply", () => {
+    replaceStreamingMessageBody("msg-delta-only", "已按 ");
+    appendStreamingMessageDelta("msg-delta-only", "codex-acp 路径收紧，并补充了拦截测试。");
+    const snapshot = makeSnapshot({
+      session: { ...makeSnapshot().session, status: "Streaming" },
+      messages: [{ id: "msg-delta-only", role: "Assistant", body: "已按 " }],
+      timeline: [{ Message: "msg-delta-only" }],
+    });
+
+    // Backend delta-only patch does not include messages[]. The UI must still
+    // promote the stream store body before the turn flips to Idle.
+    const next = materializeStreamingMessageBodies({
+      ...snapshot,
+      session: { ...snapshot.session, status: "Idle" },
+      revision: snapshot.revision + 1,
+    });
+
+    expect(next.messages[0].body).toContain("补充了拦截测试");
+    expect(next.messages[0].body.startsWith("已按 ")).toBe(true);
   });
 
   it("keeps streamed assistant text materialized when a tool card is appended", () => {

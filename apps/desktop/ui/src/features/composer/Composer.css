@@ -659,6 +659,45 @@
   gap: 6px;
 }
 
+.agent-plan-env-label.is-disabled {
+  color: var(--text-soft);
+  font-weight: 650;
+}
+
+.agent-plan-env-action {
+  display: inline-flex;
+  min-width: 0;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--text-strong);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 650;
+  line-height: 1.2;
+  cursor: pointer;
+  text-align: left;
+}
+
+.agent-plan-env-action:hover {
+  color: color-mix(in srgb, var(--text-strong) 88%, #9eb0ff);
+}
+
+.agent-plan-env-action svg {
+  flex: 0 0 auto;
+  color: currentColor;
+}
+
+.agent-plan-env-action span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .agent-plan-env-label span {
   min-width: 0;
   overflow: hidden;
@@ -668,13 +707,6 @@
 
 .agent-plan-env-chevron {
   color: var(--text-soft);
-}
-
-.agent-plan-env-github {
-  width: 14px;
-  height: 14px;
-  flex: 0 0 auto;
-  fill: currentColor;
 }
 
 .agent-plan-env-usage-metrics {
@@ -716,14 +748,15 @@
   overflow: hidden;
   height: 4px;
   border-radius: 999px;
-  background: color-mix(in srgb, var(--border-subtle) 70%, transparent);
+  background: color-mix(in srgb, #ffffff 8%, transparent);
 }
 
 .agent-plan-env-usage-bar span {
   display: block;
   height: 100%;
   border-radius: inherit;
-  background: var(--accent);
+  background: linear-gradient(90deg, #8ea8ff 0%, #a9b8ff 55%, #c2c8ff 100%);
+  box-shadow: 0 0 10px color-mix(in srgb, #9eb0ff 35%, transparent);
 }
 
 .agent-plan-env-usage-breakdown {

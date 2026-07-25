@@ -52,13 +52,15 @@ describe("AgentPlanPanel", () => {
           removedLines: 5,
           locationLabel: "本地",
           branchLabel: "master",
-          actionLabel: "提交或推送",
-          githubLabel: "GitHub CLI 不可用",
+          actionLabel: "提交并推送",
+          actionEnabled: true,
         }}
+        onCommitAction={() => {}}
       />,
     );
 
     expect(screen.getByLabelText("环境信息")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "提交并推送" })).toBeTruthy();
     expect(screen.queryByLabelText("进度")).toBeNull();
     expect(screen.getByText("变更")).toBeTruthy();
     expect(screen.getByText("+34")).toBeTruthy();
@@ -67,6 +69,7 @@ describe("AgentPlanPanel", () => {
     expect(screen.queryByText("来源")).toBeNull();
     expect(screen.queryByText("暂无来源")).toBeNull();
     expect(screen.queryByLabelText("用量")).toBeNull();
+    expect(screen.queryByText("GitHub CLI 不可用")).toBeNull();
   });
 
   it("renders live usage with context occupancy and no pricing", () => {
@@ -78,8 +81,7 @@ describe("AgentPlanPanel", () => {
           removedLines: 5,
           locationLabel: "本地",
           branchLabel: "master",
-          actionLabel: "提交或推送",
-          githubLabel: "GitHub CLI 不可用",
+          actionLabel: "提交并推送",
           usage: {
             context: { used_tokens: 12345, window_tokens: 128000, updated_at: "2026-06-23T00:00:00Z" },
             current_turn: { total_tokens: 1200 },
@@ -122,7 +124,6 @@ describe("AgentPlanPanel", () => {
           locationLabel: "本地",
           branchLabel: "master",
           actionLabel: "工作区干净",
-          githubLabel: "GitHub CLI 不可用",
           streaming: true,
           usage: {
             context: {
@@ -152,7 +153,6 @@ describe("AgentPlanPanel", () => {
           locationLabel: "本地",
           branchLabel: "master",
           actionLabel: "工作区干净",
-          githubLabel: "GitHub CLI 不可用",
           usage: {
             context: {
               used_tokens: 12345,
@@ -179,7 +179,6 @@ describe("AgentPlanPanel", () => {
           locationLabel: "本地",
           branchLabel: "master",
           actionLabel: "工作区干净",
-          githubLabel: "GitHub CLI 不可用",
           usage: {
             context: { used_tokens: 0, window_tokens: 249036, updated_at: "2026-06-28T00:00:00Z" },
             current_turn: { total_tokens: 0 },

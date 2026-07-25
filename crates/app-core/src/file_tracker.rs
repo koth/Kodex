@@ -290,6 +290,11 @@ impl FileChangeTracker {
 
             if full_path.exists() {
                 let file_meta = fs::metadata(&full_path);
+                // Directories and other non-files can show up as path hints
+                // (for example shell `cwd`). Never promote them to file changes.
+                if file_meta.as_ref().is_ok_and(|meta| !meta.is_file()) {
+                    continue;
+                }
                 let is_changed = match (base_meta, file_meta.as_ref()) {
                     (Some(base), Ok(current)) => {
                         let mtime = current.modified().unwrap_or(SystemTime::UNIX_EPOCH);

@@ -45,6 +45,13 @@ export function getStreamingMessageBody(id: string) {
   return states.get(id)?.body ?? null;
 }
 
+/** Flush any coalesced pending appends so readers see the latest body. */
+export function flushStreamingMessageBodies() {
+  for (const state of states.values()) {
+    flushPending(state);
+  }
+}
+
 export function ensureStreamingMessageBody(id: string, body: string) {
   const state = getOrCreateState(id);
   if (!state.body) {

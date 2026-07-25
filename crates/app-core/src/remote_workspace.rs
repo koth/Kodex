@@ -402,6 +402,10 @@ struct RemoteGitStatusResponse {
     branch: String,
     head: String,
     changed_files: Vec<RemoteChangedFile>,
+    #[serde(default)]
+    ahead_count: u32,
+    #[serde(default)]
+    behind_count: u32,
 }
 
 #[derive(Debug, Deserialize)]
@@ -422,6 +426,8 @@ impl From<RemoteGitStatusResponse> for RepositorySnapshot {
                 .into_iter()
                 .map(|file| changed_file(file.path, file.section, file.added, file.removed))
                 .collect(),
+            ahead_count: value.ahead_count,
+            behind_count: value.behind_count,
         }
     }
 }
@@ -694,7 +700,18 @@ for (let i = 0; i < parts.length; i += 1) {
     changed_files.push({ path: file, section: 'Unstaged', ...stats });
   }
 }
-console.log(JSON.stringify({ branch, head, changed_files }));
+let ahead_count = 0;
+let behind_count = 0;
+const upstream = gitMaybe(['rev-parse', '--abbrev-ref', '--symbolic-full-name', '@{upstream}'], { cwd: root });
+if (upstream) {
+  const counts = (gitMaybe(['rev-list', '--left-right', '--count', 'HEAD...@{upstream}'], { cwd: root }) || '').trim();
+  const partsCount = counts.split(/[\t ]+/).filter(Boolean);
+  if (partsCount.length >= 2) {
+    ahead_count = Number.parseInt(partsCount[0], 10) || 0;
+    behind_count = Number.parseInt(partsCount[1], 10) || 0;
+  }
+}
+console.log(JSON.stringify({ branch, head, changed_files, ahead_count, behind_count }));
 "#;
 
 const GIT_STAGE_SCRIPT: &str = r#"
@@ -1057,6 +1074,20 @@ mod tests {
         assert_eq!(repo.branch, "main");
         assert_eq!(repo.changed_files[0].path, PathBuf::from("src/main.rs"));
         assert_eq!(repo.changed_files[0].stats.added, 2);
+    }
+
+    #[test]
+    fn git_status_decodes_ahead_behind_counts() {
+        let runner = FakeRunner::new(vec![ok(
+            r#"{"branch":"main","head":"abc","changed_files":[],"ahead_count":2,"behind_count":1}"#,
+        )]);
+        let config = config();
+        let client = RemoteWorkspaceClient::with_runner(&config, runner);
+
+        let repo = client.git_status().unwrap();
+
+        assert_eq!(repo.ahead_count, 2);
+        assert_eq!(repo.behind_count, 1);
     }
 
     #[test]

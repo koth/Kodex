@@ -1724,6 +1724,8 @@ mod tests {
                 branch: "main".into(),
                 head: "abc".into(),
                 changed_files: Vec::new(),
+                ahead_count: 0,
+                behind_count: 0,
             },
             inspector_tab: InspectorTab::Activity,
             inspector_sections: Vec::new(),

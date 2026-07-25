@@ -87,7 +87,7 @@ pub(super) fn decide_permission_with_edit_policy(
     }
 }
 
-const APPLY_PATCH_RETRY_GUIDANCE: &str = "Use the apply_patch tool for ordinary text file create, update, and delete operations. Retry this edit with an apply_patch patch. Direct filesystem writes are reserved for formatters, generators, package managers, lockfiles, and binary or media files.";
+const APPLY_PATCH_RETRY_GUIDANCE: &str = "Do not edit ordinary text/source files with shell, Python, Node, redirection, or in-place sed/perl. Use the apply_patch tool (or Edit/MultiEdit/Write when available) and retry this change as a patch. Direct filesystem writes are reserved for formatters, generators, package managers, lockfiles, and binary or media files.";
 
 pub(super) fn apply_patch_retry_guidance() -> &'static str {
     APPLY_PATCH_RETRY_GUIDANCE

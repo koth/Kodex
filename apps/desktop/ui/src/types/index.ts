@@ -408,6 +408,10 @@ export interface RepositorySnapshot {
   branch: string;
   head: string;
   changed_files: ChangedFile[];
+  /** Local commits not yet on the upstream branch. */
+  ahead_count?: number;
+  /** Upstream commits not yet in the local branch. */
+  behind_count?: number;
 }
 
 export interface SidebarSection {

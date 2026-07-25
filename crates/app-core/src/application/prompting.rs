@@ -720,6 +720,12 @@ impl Application {
                             self.file_tracker.add_candidate(id, path);
                         }
                     }
+                    // Shell tools often stream the full command only in a later
+                    // update. Capture write-target baselines as soon as the
+                    // command text is known so post-completion diff recovery works.
+                    for path in tool_command_write_hint_paths(raw_input.as_deref()) {
+                        self.file_tracker.add_candidate(id, path);
+                    }
                 }
                 ClientEvent::ToolCompleted { id, raw_output, .. } => {
                     completed_tool_ids.push(id.clone());
@@ -771,7 +777,7 @@ impl Application {
         }
         self.session.update_session_id(&events);
 
-        // Detect file writes from completed tool calls (CodeBuddy uses terminal commands)
+        // Detect file writes from completed tool calls (shell/Python bypass ACP ToolDiff).
         for id in &completed_tool_ids {
             if completed_tool_ids_with_tracker_changes.contains(id) {
                 continue;
@@ -784,6 +790,9 @@ impl Application {
                 had_file_changes = true;
                 continue;
             }
+            // Keep any write-target hints discovered from the final tool payload
+            // attached to the recording window before settle/retry.
+            self.seed_tracker_candidates_from_completed_tool(id);
             if self.file_tracker.has_active_candidates(id)
                 || self.completed_tool_has_detectable_write_hint(id)
             {
@@ -852,6 +861,25 @@ impl Application {
         }
         self.current_turn_user_message_id = previous_turn_user_id;
         result
+    }
+
+    fn seed_tracker_candidates_from_completed_tool(&mut self, call_id: &str) {
+        let Some(tool) = self.ui.tools.iter().find(|tool| tool.call_id == call_id) else {
+            return;
+        };
+        let mut paths = tool_event_hint_paths(tool.raw_input.as_deref());
+        paths.extend(tool_command_write_hint_paths(tool.raw_input.as_deref()));
+        if !tool.detail_text.trim().is_empty() {
+            paths.extend(tool_event_hint_paths(Some(tool.detail_text.as_str())));
+            paths.extend(tool_command_write_hint_paths(Some(tool.detail_text.as_str())));
+        }
+        paths.sort();
+        paths.dedup();
+        for path in paths {
+            // Prefer preserving an earlier baseline. add_candidate only records a
+            // path the first time it is seen for this call_id.
+            self.file_tracker.add_candidate(call_id, path);
+        }
     }
 
     fn enqueue_pending_tool_write_detection(&mut self, call_id: &str) {

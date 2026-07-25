@@ -48,6 +48,8 @@ fn build_initial_ui_for_descriptor(descriptor: WorkspaceDescriptor) -> anyhow::R
         branch: "加载中".into(),
         head: "待刷新".into(),
         changed_files: Vec::new(),
+        ahead_count: 0,
+        behind_count: 0,
     };
 
     let system_message = ChatMessage {

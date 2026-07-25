@@ -112,6 +112,16 @@ impl Application {
         Ok(())
     }
 
+    pub fn push_files(&mut self) -> Result<String, String> {
+        if self.is_remote_workspace() {
+            return Err("远程工作区暂不支持推送".to_string());
+        }
+        self.ensure_local_workspace_for("local git commands")?;
+        let result = GitService::push(&self.ui.workspace.root).map_err(|e| e.to_string())?;
+        self.refresh_repository();
+        Ok(result)
+    }
+
 /// Generate a commit-message draft by spinning up a throwaway sub-agent
     /// session with the current model settings. The agent is given read-only
     /// permission, so only inspection commands run — it inspects the staged

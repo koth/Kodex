@@ -137,6 +137,15 @@ export async function gitCommit(message: string): Promise<void> {
   return invoke("git_commit", { message });
 }
 
+export async function gitPush(): Promise<string> {
+  return invoke<string>("git_push");
+}
+
+/** Commit staged changes and immediately push to remote. */
+export async function gitCommitAndPush(message: string): Promise<string> {
+  return invoke<string>("git_commit_and_push", { message });
+}
+
 /** Ask a throwaway sub-agent (using the current model settings) to write a
  *  commit message for the currently staged changes. */
 export async function gitGenerateCommitMessage(): Promise<string> {

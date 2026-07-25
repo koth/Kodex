@@ -118,6 +118,8 @@ fn main() {
             commands::git::git_stage,
             commands::git::git_unstage,
             commands::git::git_commit,
+            commands::git::git_push,
+            commands::git::git_commit_and_push,
             commands::git::git_refresh,
             commands::git::git_generate_commit_message,
             commands::editor::editor_open_file,

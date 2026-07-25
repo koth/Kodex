@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   agentPlanDockProgressSignature,
   agentPlanProgressSignature,
+  buildAgentPlanEnvironmentInfo,
   findPendingPermissionRequest,
   findPendingPlanApproval,
   isTerminalDockAvailableForWorkspace,
@@ -465,6 +466,104 @@ describe("findPendingPermissionRequest", () => {
         tool({ call_id: "pending-2", permission_options: [{ id: "reject", label: "Reject", kind: "RejectOnce" }] }),
       ]),
     ).toEqual(["pending-1", "pending-execute", "pending-2"]);
+  });
+});
+
+describe("buildAgentPlanEnvironmentInfo", () => {
+  it("labels a clean worktree with unpushed commits as push", () => {
+    const info = buildAgentPlanEnvironmentInfo(
+      makeSnapshot({
+        repository: {
+          branch: "main",
+          head: "abc123",
+          changed_files: [],
+          ahead_count: 2,
+          behind_count: 0,
+        },
+      }),
+      true,
+    );
+
+    expect(info.actionLabel).toBe("推送 2 个提交");
+    expect(info.actionEnabled).toBe(true);
+  });
+
+  it("labels dirty worktrees without unpushed commits as commit", () => {
+    const info = buildAgentPlanEnvironmentInfo(
+      makeSnapshot({
+        repository: {
+          branch: "main",
+          head: "abc123",
+          ahead_count: 0,
+          behind_count: 0,
+          changed_files: [
+            {
+              path: "src/a.ts",
+              section: "Staged",
+              stats: { added: 1, removed: 0 },
+              patch_status: "Staged",
+              hunks: [],
+            },
+          ],
+        },
+      }),
+      true,
+    );
+
+    expect(info.actionLabel).toBe("提交");
+    expect(info.actionEnabled).toBe(true);
+  });
+
+  it("labels staged changes with unpushed commits as commit-and-push", () => {
+    const info = buildAgentPlanEnvironmentInfo(
+      makeSnapshot({
+        repository: {
+          branch: "main",
+          head: "abc123",
+          ahead_count: 1,
+          behind_count: 0,
+          changed_files: [
+            {
+              path: "src/a.ts",
+              section: "Staged",
+              stats: { added: 2, removed: 1 },
+              patch_status: "Staged",
+              hunks: [],
+            },
+          ],
+        },
+      }),
+      true,
+    );
+
+    expect(info.actionLabel).toBe("提交并推送");
+    expect(info.actionEnabled).toBe(true);
+  });
+
+  it("disables commit when only unstaged changes remain", () => {
+    const info = buildAgentPlanEnvironmentInfo(
+      makeSnapshot({
+        repository: {
+          branch: "main",
+          head: "abc123",
+          ahead_count: 0,
+          behind_count: 0,
+          changed_files: [
+            {
+              path: "src/a.ts",
+              section: "Unstaged",
+              stats: { added: 1, removed: 0 },
+              patch_status: "Proposed",
+              hunks: [],
+            },
+          ],
+        },
+      }),
+      true,
+    );
+
+    expect(info.actionLabel).toBe("先暂存变更");
+    expect(info.actionEnabled).toBe(false);
   });
 });
 
