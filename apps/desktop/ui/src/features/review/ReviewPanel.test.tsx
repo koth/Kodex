@@ -12,10 +12,12 @@ import {
   sessionListChangeSetFiles,
   sessionListChangeSets,
 } from "../../lib/tauri";
-import { confirm } from "@tauri-apps/plugin-dialog";
+import { appConfirm } from "../../lib/confirm";
 
-vi.mock("@tauri-apps/plugin-dialog", () => ({
-  confirm: vi.fn(),
+vi.mock("../../lib/confirm", () => ({
+  appConfirm: vi.fn(),
+  trackConfirmRequest: (input: { path: string; count?: number }) => input,
+  rejectPatchConfirmRequest: (path: string) => ({ path }),
 }));
 
 vi.mock("../editor/DiffTab", () => ({
@@ -154,6 +156,7 @@ function makeChangedFile(path: string, section: ChangedFile["section"]): Changed
 }
 
 beforeEach(() => {
+  vi.mocked(appConfirm).mockResolvedValue(true);
   vi.mocked(fsListDir).mockResolvedValue([]);
   vi.mocked(sessionListChangeSets).mockResolvedValue([]);
   vi.mocked(sessionListChangeSetFiles).mockResolvedValue({
@@ -1029,7 +1032,7 @@ describe("ReviewPanel scoped change sets", () => {
 
   it("tracks all displayed files under an untracked directory from its context menu", async () => {
     const onRefresh = vi.fn();
-    vi.mocked(confirm).mockResolvedValue(true);
+    vi.mocked(appConfirm).mockResolvedValue(true);
     render(
       <ReviewPanel
         snapshot={makeSnapshot({

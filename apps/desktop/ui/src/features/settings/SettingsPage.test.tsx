@@ -7,7 +7,7 @@ import {
   within,
 } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { confirm } from "@tauri-apps/plugin-dialog";
+import { appConfirm } from "../../lib/confirm";
 import { SettingsPage } from "./SettingsPage";
 import {
   sessionDeleteAllArchived,
@@ -50,8 +50,17 @@ import type {
   RemoteMachineProfilesSnapshot,
 } from "../../types";
 
-vi.mock("@tauri-apps/plugin-dialog", () => ({
-  confirm: vi.fn(),
+vi.mock("../../lib/confirm", () => ({
+  appConfirm: vi.fn(),
+  removeProviderConfirmRequest: (label: string) => ({ label }),
+  clearProviderConfirmRequest: (label: string) => ({ label }),
+  deleteAllArchivedConfirmRequest: () => ({}),
+}));
+
+vi.mock("../../lib/updater", () => ({
+  checkForAppUpdate: vi.fn(),
+  getCurrentAppVersion: vi.fn(),
+  installPendingAppUpdate: vi.fn(),
 }));
 
 vi.mock("../../lib/tauri", async () => {
@@ -91,20 +100,10 @@ vi.mock("../../lib/tauri", async () => {
     settingsSaveLspServer: vi.fn(),
     settingsResetLspServer: vi.fn(),
     usageGetSummary: vi.fn(),
-    // P2: default to an empty daily series so the usage dashboard renders
-    // without real Tauri `invoke` calls in tests.
     usageGetDailySeries: vi.fn().mockResolvedValue([]),
-    // 24H REQ card: default to 0 so the usage dashboard renders without a
-    // real Tauri `invoke` call in tests.
     usageGetRequestCount: vi.fn().mockResolvedValue(0),
   };
 });
-
-vi.mock("../../lib/updater", () => ({
-  checkForAppUpdate: vi.fn(),
-  getCurrentAppVersion: vi.fn(),
-  installPendingAppUpdate: vi.fn(),
-}));
 
 function providerProfile(
   family: "codex" | "claude",
@@ -610,7 +609,7 @@ describe("SettingsPage LSP settings", () => {
     vi.mocked(getCurrentAppVersion).mockResolvedValue("0.1.0");
     vi.mocked(checkForAppUpdate).mockResolvedValue(null);
     vi.mocked(installPendingAppUpdate).mockResolvedValue(undefined);
-    vi.mocked(confirm).mockResolvedValue(true);
+    vi.mocked(appConfirm).mockResolvedValue(true);
     vi.mocked(settingsGetAgentSnapshot).mockResolvedValue(agentSnapshot);
     vi.mocked(settingsGetLspSnapshot).mockResolvedValue(lspSnapshot());
     vi.mocked(settingsGetRemoteProfiles).mockResolvedValue({ profiles: [] });
@@ -1080,11 +1079,7 @@ describe("SettingsPage LSP settings", () => {
     await screen.findByText("Fix codex-acp bundle error");
     fireEvent.click(screen.getByRole("button", { name: "全部删除" }));
 
-    await waitFor(() =>
-      expect(confirm).toHaveBeenCalledWith(
-        "确定删除所有已归档对话？此操作不可撤销。",
-      ),
-    );
+    await waitFor(() => expect(appConfirm).toHaveBeenCalledWith({}));
     await waitFor(() => expect(sessionDeleteAllArchived).toHaveBeenCalled());
     expect(await screen.findByText("已删除所有已归档对话")).toBeInTheDocument();
   });
@@ -2113,7 +2108,7 @@ describe("SettingsPage LSP settings", () => {
         profiles: codexProfiles("byok"),
       },
     });
-    vi.mocked(confirm).mockResolvedValueOnce(true);
+    vi.mocked(appConfirm).mockResolvedValueOnce(true);
 
     render(<SettingsPage onBack={vi.fn()} />);
 
@@ -2342,7 +2337,7 @@ describe("SettingsPage LSP settings", () => {
         profiles: claudeProfiles("byok", { timiai: true }),
       },
     });
-    vi.mocked(confirm).mockResolvedValueOnce(true);
+    vi.mocked(appConfirm).mockResolvedValueOnce(true);
 
     render(<SettingsPage onBack={vi.fn()} />);
 

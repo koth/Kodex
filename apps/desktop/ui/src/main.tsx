@@ -1,6 +1,7 @@
 import React, { Component, type ReactNode } from "react";
 import ReactDOM from "react-dom/client";
 import { Workbench } from "./features/workbench/Workbench";
+import { ConfirmProvider } from "./lib/confirm";
 import { startupPerfMark } from "./lib/tauri";
 import "./theme.css";
 
@@ -38,7 +39,9 @@ void startupPerfMark("react_render_start", `performance_now=${performance.now().
 ReactDOM.createRoot(document.getElementById("root")!).render(
   <React.StrictMode>
     <ErrorBoundary>
-      <Workbench />
+      <ConfirmProvider>
+        <Workbench />
+      </ConfirmProvider>
     </ErrorBoundary>
   </React.StrictMode>
 );

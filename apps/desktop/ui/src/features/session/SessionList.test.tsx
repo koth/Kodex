@@ -1,6 +1,6 @@
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { confirm } from "@tauri-apps/plugin-dialog";
+import { appConfirm } from "../../lib/confirm";
 import { SessionList } from "./SessionList";
 import { onRemoteOpenProgress, onSessionStatus } from "../../lib/events";
 import {
@@ -45,7 +45,11 @@ vi.mock("../../lib/tauri", async () => {
 
 vi.mock("@tauri-apps/plugin-dialog", () => ({
   open: vi.fn(),
-  confirm: vi.fn(),
+}));
+
+vi.mock("../../lib/confirm", () => ({
+  appConfirm: vi.fn(),
+  archiveWorkspaceConfirmRequest: (label: string) => ({ label }),
 }));
 
 vi.mock("../../lib/events", () => ({
@@ -229,7 +233,7 @@ describe("SessionList agent picker", () => {
     vi.mocked(sessionSwitch).mockResolvedValue(undefined);
     vi.mocked(sessionArchive).mockResolvedValue(undefined);
     vi.mocked(workspaceArchive).mockResolvedValue(null);
-    vi.mocked(confirm).mockResolvedValue(true);
+    vi.mocked(appConfirm).mockResolvedValue(true);
     vi.mocked(workspaceSetActive).mockResolvedValue({} as never);
     vi.mocked(workspaceOpenRemoteProfile).mockResolvedValue({} as never);
   });
@@ -685,7 +689,7 @@ const workspaceButton = await screen.findByTitle(/^双击连接远程工作区/)
       });
       expect(onSessionChanged).toHaveBeenCalled();
     });
-    expect(confirm).not.toHaveBeenCalled();
+    expect(appConfirm).not.toHaveBeenCalled();
   });
 
   it("archives an inactive workspace without changing the active snapshot", async () => {
@@ -722,7 +726,7 @@ const workspaceButton = await screen.findByTitle(/^双击连接远程工作区/)
     fireEvent.click(await screen.findByRole("button", { name: "归档项目 Other" }));
 
     await waitFor(() => {
-      expect(confirm).toHaveBeenCalledWith("确定归档项目 Other？归档后该项目及其所有会话将从列表中移除，数据仍保留在本地。");
+      expect(appConfirm).toHaveBeenCalledWith({ label: "Other" });
       expect(workspaceArchive).toHaveBeenCalledWith("/Users/kothchen/code/Other");
       expect(onWorkspaceArchived).not.toHaveBeenCalled();
     });
@@ -749,7 +753,7 @@ const workspaceButton = await screen.findByTitle(/^双击连接远程工作区/)
     fireEvent.click(await screen.findByRole("button", { name: "归档项目 Kodex" }));
 
     await waitFor(() => {
-      expect(confirm).toHaveBeenCalledWith("确定归档项目 Kodex？归档后该项目及其所有会话将从列表中移除，数据仍保留在本地。");
+      expect(appConfirm).toHaveBeenCalledWith({ label: "Kodex" });
       expect(workspaceArchive).toHaveBeenCalledWith("/Users/kothchen/code/Kodex");
       expect(onWorkspaceArchived).toHaveBeenCalledWith(nextSnapshot);
     });

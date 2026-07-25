@@ -1,12 +1,13 @@
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { confirm } from "@tauri-apps/plugin-dialog";
+import { appConfirm } from "../../lib/confirm";
 import { fsDeleteFile, fsListDir } from "../../lib/tauri";
 import type { FileEntry } from "../../types";
 import { FileTree, stripWorkspaceRootPrefix } from "./FileTree";
 
-vi.mock("@tauri-apps/plugin-dialog", () => ({
-  confirm: vi.fn(),
+vi.mock("../../lib/confirm", () => ({
+  appConfirm: vi.fn(),
+  deleteFileConfirmRequest: (path: string) => ({ path }),
 }));
 
 vi.mock("../../lib/tauri", async () => {
@@ -33,7 +34,7 @@ describe("FileTree", () => {
       path === "" ? rootEntries : [],
     );
     vi.mocked(fsDeleteFile).mockResolvedValue(undefined);
-    vi.mocked(confirm).mockResolvedValue(true);
+    vi.mocked(appConfirm).mockResolvedValue(true);
   });
 
   afterEach(() => {
@@ -52,7 +53,7 @@ describe("FileTree", () => {
     fireEvent.click(screen.getByRole("menuitem", { name: "删除文件" }));
 
     await waitFor(() => expect(fsDeleteFile).toHaveBeenCalledWith("notes.md"));
-    expect(confirm).toHaveBeenCalledWith("确定删除文件 notes.md？");
+    expect(appConfirm).toHaveBeenCalledWith({ path: "notes.md" });
     expect(fsListDir).toHaveBeenLastCalledWith("");
   });
 

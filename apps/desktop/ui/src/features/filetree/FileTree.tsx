@@ -1,10 +1,10 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import type { MouseEvent as ReactMouseEvent } from "react";
-import { confirm } from "@tauri-apps/plugin-dialog";
 import type { FileEntry } from "../../types";
 import { fsDeleteFile, fsListDir, fsRename, fsReveal } from "../../lib/tauri";
 import { getFileIcon } from "./file-icons";
 import "./FileTree.css";
+import { appConfirm, deleteFileConfirmRequest } from "../../lib/confirm";
 
 interface FileTreeProps {
   workspaceRoot: string;
@@ -423,7 +423,7 @@ export function FileTree({
   const handleDeleteFile = useCallback(async (entry: FileEntry) => {
     if (entry.kind !== "File") return;
     setContextMenu(null);
-    const accepted = await confirm(`确定删除文件 ${entry.path}？`);
+    const accepted = await appConfirm(deleteFileConfirmRequest(entry.path));
     if (!accepted) return;
 
     try {

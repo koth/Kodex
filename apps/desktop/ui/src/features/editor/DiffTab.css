@@ -199,22 +199,126 @@
 .dt-editor {
   position: relative;
   flex: 1;
+  min-height: 0;
   overflow: hidden;
+  background: var(--app-bg);
 }
 
-.dt-editor .monaco-editor .scroll-decoration,
-.dt-editor .monaco-diff-editor .scroll-decoration {
-  box-shadow: none !important;
+.dt-pierre-scroll {
+  --review-diff-scrollbar-thumb: color-mix(in srgb, var(--app-bg) 82%, var(--text-soft));
+  --review-diff-scrollbar-thumb-active: color-mix(in srgb, var(--app-bg) 56%, var(--text-muted));
+  --review-diff-scrollbar-thumb-hover: color-mix(in srgb, var(--app-bg) 34%, var(--text-muted));
+  height: 100%;
+  overflow: auto;
+  background: var(--app-bg);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.5;
+  overscroll-behavior: contain;
+  scrollbar-color: var(--review-diff-scrollbar-thumb) transparent;
+  scrollbar-gutter: stable;
+  scrollbar-width: thin;
 }
 
-.dt-editor .monaco-diff-editor .line-insert,
-.dt-editor .monaco-diff-editor .char-insert,
-.dt-editor .monaco-diff-editor .line-delete,
-.dt-editor .monaco-diff-editor .char-delete {
-  border: 0 !important;
-  box-shadow: none !important;
-  outline: 0 !important;
-  text-decoration: none !important;
+.dt-pierre-scroll:hover {
+  scrollbar-color: var(--review-diff-scrollbar-thumb-active) transparent;
+}
+
+.dt-pierre-scroll::-webkit-scrollbar {
+  width: 9px;
+  height: 9px;
+}
+
+.dt-pierre-scroll::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.dt-pierre-scroll::-webkit-scrollbar-thumb {
+  min-width: 36px;
+  min-height: 36px;
+  border: 2px solid transparent;
+  border-radius: 999px;
+  background-color: var(--review-diff-scrollbar-thumb);
+  background-clip: content-box;
+}
+
+.dt-pierre-scroll:hover::-webkit-scrollbar-thumb {
+  background-color: var(--review-diff-scrollbar-thumb-active);
+}
+
+.dt-pierre-scroll::-webkit-scrollbar-thumb:hover {
+  background-color: var(--review-diff-scrollbar-thumb-hover);
+}
+
+.dt-pierre-diff {
+  color-scheme: dark;
+  --diffs-font-family: var(--font-mono);
+  --diffs-header-font-family: var(--font-chat);
+  --diffs-font-size: 12px;
+  --diffs-line-height: 20px;
+  --diffs-font-features: "liga" 0, "calt" 0;
+  --diffs-gap-inline: 0px;
+  --diffs-gap-block: 0px;
+  --diffs-dark-bg: var(--app-bg);
+  --diffs-dark: var(--text-strong);
+  --diffs-bg-context-override: var(--app-bg);
+  --diffs-bg-buffer-override: var(--app-bg);
+  --diffs-bg-separator-override: color-mix(in srgb, var(--app-bg) 82%, var(--text-strong));
+  --diffs-fg-number-override: var(--text-soft);
+  --diffs-addition-color-override: #35d879;
+  --diffs-deletion-color-override: #ff5a5f;
+  --diffs-fg-number-addition-override: #35d879;
+  --diffs-fg-number-deletion-override: #ff5a5f;
+  --diffs-bg-addition-override: color-mix(in srgb, #35d879 22%, var(--app-bg));
+  --diffs-bg-deletion-override: color-mix(in srgb, #ff5a5f 24%, var(--app-bg));
+  --diffs-bg-addition-number-override: #35d879;
+  --diffs-bg-deletion-number-override: #ff5a5f;
+  --diffs-bg-addition-emphasis-override: color-mix(in srgb, #35d879 14%, transparent);
+  --diffs-bg-deletion-emphasis-override: color-mix(in srgb, #ff5a5f 14%, transparent);
+  --diffs-bg-hover-override: color-mix(in srgb, var(--text-strong) 12%, transparent);
+  display: block;
+  overflow: visible;
+  max-height: none;
+  min-height: 100%;
+  background: var(--app-bg);
+  color: var(--text-strong);
+  font-family: var(--font-chat);
+  font-size: 12px;
+}
+
+.dt-pierre-diff pre {
+  margin: 0;
+  font-family: var(--font-mono);
+}
+
+:root[data-theme="light"] .dt-pierre-scroll,
+:root[data-theme="light"] .dt-pierre-diff {
+  background: var(--app-bg);
+}
+
+:root[data-theme="light"] .dt-pierre-diff {
+  color-scheme: light;
+  --diffs-light-bg: var(--app-bg);
+  --diffs-light: #24292f;
+  --diffs-bg-context-override: var(--app-bg);
+  --diffs-bg-buffer-override: var(--app-bg);
+  --diffs-bg-separator-override: #f1f2f3;
+  --diffs-fg-number-override: #6e7781;
+  --diffs-addition-color-override: #1a7f37;
+  --diffs-deletion-color-override: #cf222e;
+  --diffs-fg-number-addition-override: #1a7f37;
+  --diffs-fg-number-deletion-override: #cf222e;
+  --diffs-bg-addition-override: #e6f4ea;
+  --diffs-bg-deletion-override: #ffebe9;
+  --diffs-bg-addition-number-override: #2da44e;
+  --diffs-bg-deletion-number-override: #cf222e;
+  --diffs-bg-addition-emphasis-override: rgba(26, 127, 55, 0.1);
+  --diffs-bg-deletion-emphasis-override: rgba(207, 34, 46, 0.1);
+  --diffs-bg-hover-override: rgba(31, 35, 40, 0.08);
+  --diffs-gap-inline: 0px;
+  --diffs-gap-block: 0px;
+  --diffs-font-size: 12px;
+  --diffs-line-height: 21px;
 }
 
 .dt-loading {

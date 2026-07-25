@@ -1,16 +1,20 @@
 import { memo, useState, useMemo, useCallback, useEffect, useRef } from "react";
 import type { Dispatch, ReactNode, SetStateAction } from "react";
 import { MultiFileDiff } from "@pierre/diffs/react";
-import type { FileContents } from "@pierre/diffs/react";
-import { confirm } from "@tauri-apps/plugin-dialog";
 import { GitCommitHorizontal } from "lucide-react";
-import type { UiSnapshot, ChangedFile, ChangeSection, DiffStats, FileEntry, ChangeSetSummary, FileChangeSummary, FileChangeRecord, DiffQuality, AppTheme } from "../../types";
+import type { UiSnapshot, ChangedFile, ChangeSection, DiffStats, FileEntry, ChangeSetSummary, FileChangeSummary, FileChangeRecord, AppTheme } from "../../types";
 import { fsListDir, gitStage, gitUnstage, reviewRejectPatch, sessionListChangeSets, sessionListChangeSetFiles, sessionGetChangeSetFileDiff } from "../../lib/tauri";
 import { CommitDialog } from "../changes/CommitDialog";
 import { DiffTab } from "../editor/DiffTab";
+import {
+  buildPierreDiff,
+  pierreDiffOptions,
+  resolvePierreDiffHorizontalScrollTarget,
+} from "../editor/pierre-diff";
 import { disposeModel, isModelDirty } from "../editor/monaco-model-registry";
 import { FileTree } from "../filetree/FileTree";
 import { getFileIcon } from "../filetree/file-icons";
+import { appConfirm, rejectPatchConfirmRequest, trackConfirmRequest } from "../../lib/confirm";
 import { useHorizontalScrollControls } from "../../lib/use-horizontal-scroll-controls";
 import "./ReviewPanel.css";
 
@@ -73,102 +77,6 @@ const REVIEW_INLINE_DIFF_AUTO_OPEN_FILE_LIMIT = 4;
 const REVIEW_INLINE_DIFF_AUTO_OPEN_FILE_LINE_LIMIT = 320;
 const REVIEW_INLINE_DIFF_AUTO_OPEN_TOTAL_LINE_LIMIT = 520;
 const REVIEW_DIFF_MAX_MATRIX_CELLS = 250_000;
-const REVIEW_DIFF_SCROLL_TARGET_SELECTOR = "[data-code], pre, [data-diff], [data-content]";
-const REVIEW_DIFF_OPTIONS_BASE = {
-  disableFileHeader: true,
-  hunkSeparators: "line-info",
-  collapsedContextThreshold: 6,
-  expansionLineCount: 80,
-  lineDiffType: "none",
-  overflow: "scroll",
-  unsafeCSS: `
-    :host {
-      --diffs-bg: var(--app-bg) !important;
-      --diffs-dark-bg: var(--app-bg) !important;
-      --diffs-light-bg: var(--app-bg) !important;
-      --diffs-bg-context: var(--app-bg) !important;
-      --diffs-bg-buffer: var(--app-bg) !important;
-      --review-diff-scrollbar-thumb: color-mix(in srgb, var(--app-bg) 82%, var(--text-soft)) !important;
-      --review-diff-scrollbar-thumb-active: color-mix(in srgb, var(--app-bg) 56%, var(--text-muted)) !important;
-      --review-diff-scrollbar-thumb-hover: color-mix(in srgb, var(--app-bg) 34%, var(--text-muted)) !important;
-      background-color: var(--app-bg) !important;
-    }
-
-    pre,
-    code,
-    [data-code],
-    [data-diff],
-    [data-file],
-    [data-gutter],
-    [data-content] {
-      background-color: var(--diffs-bg) !important;
-    }
-
-    :where([data-background]) [data-line-type="context"],
-    :where([data-background]) [data-line-type="context-expanded"],
-    :where([data-background]) [data-gutter-buffer],
-    :where([data-background]) [data-column-number]:not([data-line-type="change-addition"]):not([data-line-type="change-deletion"]),
-    :where([data-background]) [data-line]:not([data-line-type="change-addition"]):not([data-line-type="change-deletion"]),
-    :where([data-background]) [data-no-newline]:not([data-line-type="change-addition"]):not([data-line-type="change-deletion"]) {
-      --diffs-computed-decoration-bg: var(--diffs-bg) !important;
-      --diffs-computed-diff-line-bg: var(--diffs-bg) !important;
-      --diffs-computed-selected-line-bg: var(--diffs-bg) !important;
-      --diffs-line-bg: var(--diffs-bg) !important;
-      background-color: var(--diffs-bg) !important;
-    }
-
-    [data-line-type="context"],
-    [data-line-type="context-expanded"],
-    [data-line-annotation],
-    [data-gutter-buffer="annotation"] {
-      --diffs-line-bg: var(--diffs-bg) !important;
-      background-color: var(--diffs-bg) !important;
-    }
-
-    [data-content-buffer],
-    [data-gutter-buffer="buffer"] {
-      --diffs-line-bg: var(--diffs-bg) !important;
-      background-color: var(--diffs-bg) !important;
-      background-image: none !important;
-    }
-
-    [data-overflow="scroll"] [data-code] {
-      overflow-x: auto !important;
-      overflow-y: clip !important;
-      scrollbar-color: var(--review-diff-scrollbar-thumb) transparent !important;
-      scrollbar-width: thin !important;
-    }
-
-    :host(:hover) [data-overflow="scroll"] [data-code] {
-      scrollbar-color: var(--review-diff-scrollbar-thumb-active) transparent !important;
-    }
-
-    [data-overflow="scroll"] [data-code]::-webkit-scrollbar {
-      width: 0 !important;
-      height: 9px !important;
-    }
-
-    [data-overflow="scroll"] [data-code]::-webkit-scrollbar-track {
-      background: transparent !important;
-    }
-
-    [data-overflow="scroll"] [data-code]::-webkit-scrollbar-thumb {
-      min-width: 36px !important;
-      border: 2px solid transparent !important;
-      border-radius: 999px !important;
-      background-color: var(--review-diff-scrollbar-thumb) !important;
-      background-clip: content-box !important;
-    }
-
-    :host(:hover) [data-overflow="scroll"] [data-code]::-webkit-scrollbar-thumb {
-      background-color: var(--review-diff-scrollbar-thumb-active) !important;
-    }
-
-    [data-overflow="scroll"] [data-code]::-webkit-scrollbar-thumb:hover {
-      background-color: var(--review-diff-scrollbar-thumb-hover) !important;
-    }
-  `,
-} as const;
 
 function buildFileTree(files: ChangedFile[]): TreeNode[] {
   interface DirEntry {
@@ -973,10 +881,11 @@ function GitChangesTree({
         setContextMenu(null);
         return;
       }
-      const accepted = await confirm(
-        targets.length === 1
-          ? `是否跟踪文件 ${targets[0]}？`
-          : `是否跟踪 ${path} 下的 ${targets.length} 个文件？`,
+      const accepted = await appConfirm(
+        trackConfirmRequest({
+          path: targets.length === 1 ? targets[0] : path,
+          count: targets.length,
+        }),
       );
       if (!accepted) {
         setContextMenu(null);
@@ -1045,7 +954,7 @@ function GitChangesTree({
   const handleRejectFile = useCallback(
     async (path: string) => {
       setContextMenu(null);
-      const accepted = await confirm(`撤销 ${path} 的工作区改动？`);
+      const accepted = await appConfirm(rejectPatchConfirmRequest(path));
       if (!accepted) return;
 
       try {
@@ -1542,83 +1451,6 @@ function ReviewChangesView({
   );
 }
 
-function resolveReviewDiffHorizontalScrollTarget(root: HTMLDivElement) {
-  const candidates = collectReviewDiffScrollTargets(root).filter(isHorizontallyScrollable);
-  if (candidates.length === 0) return root;
-
-  const activeElement = typeof document !== "undefined" ? document.activeElement : null;
-  if (activeElement) {
-    const activeCandidate = candidates.find((candidate) =>
-      candidateContainsActiveElement(candidate, activeElement),
-    );
-    if (activeCandidate) return activeCandidate;
-  }
-
-  const hoveredCandidate = candidates.find(isHoveredElement);
-  return hoveredCandidate ?? candidates[0] ?? root;
-}
-
-function collectReviewDiffScrollTargets(root: HTMLDivElement) {
-  const targets: HTMLElement[] = [];
-  const seenTargets = new Set<HTMLElement>();
-  const seenScopes = new Set<Document | DocumentFragment | Element>();
-
-  const addTarget = (target: HTMLElement) => {
-    if (seenTargets.has(target)) return;
-    seenTargets.add(target);
-    targets.push(target);
-  };
-
-  const collectFromScope = (scope: Document | DocumentFragment | Element) => {
-    if (seenScopes.has(scope)) return;
-    seenScopes.add(scope);
-
-    if (
-      scope instanceof HTMLElement &&
-      scope.matches(REVIEW_DIFF_SCROLL_TARGET_SELECTOR)
-    ) {
-      addTarget(scope);
-    }
-
-    for (const element of Array.from(
-      scope.querySelectorAll<HTMLElement>(REVIEW_DIFF_SCROLL_TARGET_SELECTOR),
-    )) {
-      addTarget(element);
-    }
-
-    for (const element of Array.from(scope.querySelectorAll<HTMLElement>("*"))) {
-      if (element.shadowRoot) collectFromScope(element.shadowRoot);
-    }
-  };
-
-  collectFromScope(root);
-  addTarget(root);
-  return targets;
-}
-
-function isHorizontallyScrollable(element: HTMLElement) {
-  return element.scrollWidth > element.clientWidth + 1;
-}
-
-function isHoveredElement(element: HTMLElement) {
-  try {
-    return element.matches(":hover");
-  } catch {
-    return false;
-  }
-}
-
-function candidateContainsActiveElement(candidate: HTMLElement, activeElement: Element) {
-  if (candidate === activeElement || candidate.contains(activeElement)) return true;
-
-  const candidateRoot = candidate.getRootNode();
-  return Boolean(
-    typeof ShadowRoot !== "undefined" &&
-      candidateRoot instanceof ShadowRoot &&
-      candidateRoot.host === activeElement,
-  );
-}
-
 const ReviewChangeCard = memo(function ReviewChangeCard({
   change,
   changeSetId,
@@ -1644,20 +1476,15 @@ const ReviewChangeCard = memo(function ReviewChangeCard({
         ? null
         : hydrationFailed
         ? { kind: "message" as const, text: "这个差异记录暂时无法加载" }
-        : buildReviewDiff(displayChange),
+        : buildPierreDiff(displayChange),
     [collapsed, displayChange, hydrationFailed],
   );
   const diffOptions = useMemo(
-    () => ({
-      ...REVIEW_DIFF_OPTIONS_BASE,
-      diffStyle: "unified",
-      theme: appTheme === "light" ? "pierre-light" : "pierre-dark",
-      themeType: appTheme === "light" ? "light" : "dark",
-    } as const),
+    () => pierreDiffOptions(appTheme, "unified"),
     [appTheme],
   );
   const horizontalScroll = useHorizontalScrollControls<HTMLDivElement>({
-    resolveScrollTarget: resolveReviewDiffHorizontalScrollTarget,
+    resolveScrollTarget: resolvePierreDiffHorizontalScrollTarget,
   });
 
   useEffect(() => {
@@ -1943,18 +1770,6 @@ function timestampValue(value: string | null | undefined) {
   return Number.isFinite(numeric) ? numeric : 0;
 }
 
-function diffQualityMessage(quality: DiffQuality) {
-  const messages: Record<DiffQuality, string | null> = {
-    Exact: null,
-    LargeFileSkipped: "文件太大，已跳过内联差异预览",
-    BinarySkipped: "二进制或不可读取文件，无法展示文本差异",
-    MissingBaseline: "缺少可比较的基线内容，无法展示可靠差异",
-    FragmentRejected: "只捕获到了片段级改动，已拒绝渲染为完整文件差异",
-    LegacyIncomplete: "旧历史记录缺少完整快照，无法展示可靠差异",
-  };
-  return messages[quality] ?? null;
-}
-
 type ReviewDiffChange = FileChangeSummary | FileChangeRecord;
 
 function needsDiffHydration(change: ReviewDiffChange) {
@@ -1965,41 +1780,6 @@ function needsDiffHydration(change: ReviewDiffChange) {
     change.added_lines > 0 ||
     change.removed_lines > 0
   );
-}
-
-type ReviewPatchPreview =
-  | { kind: "patch"; oldFile: FileContents; newFile: FileContents }
-  | { kind: "message"; text: string };
-
-function buildReviewDiff(change: ReviewDiffChange): ReviewPatchPreview {
-  const quality = "quality" in change ? change.quality : "Exact";
-  const unavailable = diffQualityMessage(quality);
-  if (unavailable) {
-    return { kind: "message", text: unavailable };
-  }
-  if (!("old_text" in change) || !("new_text" in change)) {
-    return { kind: "message", text: "正在加载差异..." };
-  }
-  const oldText = change.old_text ?? "";
-  const newText = change.new_text ?? "";
-
-  if (oldText === newText) {
-    return { kind: "message", text: "暂无可预览的文本差异" };
-  }
-
-  return {
-    kind: "patch",
-    oldFile: {
-      name: change.path,
-      contents: oldText,
-      cacheKey: `${change.path}:old:${oldText.length}:${change.updated_at ?? ""}`,
-    },
-    newFile: {
-      name: change.path,
-      contents: newText,
-      cacheKey: `${change.path}:new:${newText.length}:${change.updated_at ?? ""}`,
-    },
-  };
 }
 
 export function buildLineDiffRows(oldLines: string[], newLines: string[]): InlineDiffLine[] {
@@ -2697,7 +2477,7 @@ function UntrackedTree({
   const handleTrackFile = useCallback(
     async (path: string) => {
       setContextMenu(null);
-      const accepted = await confirm(`是否跟踪文件 ${path}？`);
+      const accepted = await appConfirm(trackConfirmRequest({ path }));
       if (!accepted) return;
 
       try {

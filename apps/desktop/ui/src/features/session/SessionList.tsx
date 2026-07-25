@@ -1,5 +1,4 @@
 import { useState, useEffect, useCallback, useRef } from "react";
-import { confirm } from "@tauri-apps/plugin-dialog";
 import { createPortal } from "react-dom";
 import type { AgentCliId, AgentSettingsSnapshot, RemoteLinuxWorkspace, SessionListItem, SessionStatus, UiSnapshot, WorkspaceSessionList } from "../../types";
 import {
@@ -17,6 +16,7 @@ import { onSessionStatus } from "../../lib/events";
 import { open } from "@tauri-apps/plugin-dialog";
 import { RemoteOpenPanel } from "../workbench/RemoteOpenPanel";
 import "./SessionList.css";
+import { appConfirm, archiveWorkspaceConfirmRequest } from "../../lib/confirm";
 
 interface Props {
   activeSessionId: string;
@@ -362,7 +362,7 @@ export function SessionList({
     async (workspaceRoot: string, isActive: boolean, workspaceName?: string) => {
       try {
         const label = workspaceName || "此项目";
-        const accepted = await confirm(`确定归档项目 ${label}？归档后该项目及其所有会话将从列表中移除，数据仍保留在本地。`);
+        const accepted = await appConfirm(archiveWorkspaceConfirmRequest(label));
         if (!accepted) return;
         const nextSnapshot = await workspaceArchive(workspaceRoot);
         if (isActive) {

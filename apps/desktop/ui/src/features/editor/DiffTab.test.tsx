@@ -1,7 +1,23 @@
-import { afterEach, describe, expect, it } from "vitest";
-import { cleanup, render, screen, within } from "@testing-library/react";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { DiffTab } from "./DiffTab";
 import type { DiffQuality, FileChangeRecord } from "../../types";
+
+vi.mock("@pierre/diffs/react", () => ({
+  MultiFileDiff: ({
+    className,
+    options,
+  }: {
+    className?: string;
+    options?: { diffStyle?: string };
+  }) => (
+    <div
+      data-testid="pierre-diff"
+      className={className}
+      data-diff-style={options?.diffStyle ?? "unified"}
+    />
+  ),
+}));
 
 function makeChange(quality: DiffQuality): FileChangeRecord {
   return {
@@ -50,5 +66,18 @@ describe("DiffTab unavailable quality states", () => {
     expect(within(breadcrumbs).getByText("src")).toBeTruthy();
     expect(within(breadcrumbs).getByText("file.ts")).toBeTruthy();
     expect(screen.queryByText("src/file.ts")).toBeNull();
+  });
+
+  it("renders Pierre unified diffs by default and can switch to split", () => {
+    render(<DiffTab change={makeChange("Exact")} appTheme="graphite" />);
+
+    const diff = screen.getByTestId("pierre-diff");
+    expect(diff.getAttribute("data-diff-style")).toBe("unified");
+    expect(diff.className).toContain("dt-pierre-diff");
+    expect(screen.getByText("内联")).toBeTruthy();
+
+    fireEvent.click(screen.getByText("内联"));
+    expect(screen.getByTestId("pierre-diff").getAttribute("data-diff-style")).toBe("split");
+    expect(screen.getByText("并排")).toBeTruthy();
   });
 });

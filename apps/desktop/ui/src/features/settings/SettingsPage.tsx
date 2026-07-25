@@ -1,6 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { confirm } from "@tauri-apps/plugin-dialog";
 import {
   ArchiveRestore,
   Folder,
@@ -82,6 +81,12 @@ import {
 } from "../../lib/updater";
 import { APP_THEMES, applyAppTheme } from "../../theme";
 import "./SettingsPage.css";
+import {
+  appConfirm,
+  clearProviderConfirmRequest,
+  deleteAllArchivedConfirmRequest,
+  removeProviderConfirmRequest,
+} from "../../lib/confirm";
 
 export type AgentSettingsTab = Extract<
   AgentCliId,
@@ -1388,9 +1393,7 @@ export function SettingsPage({
   ]);
 
   const handleRemoveCustomProvider = useCallback(async (profile: AgentProviderProfile) => {
-    const accepted = await confirm(
-      `确定移除 ${profile.label}？此操作会删除 endpoint、模型列表和已保存的 API key。`,
-    );
+    const accepted = await appConfirm(removeProviderConfirmRequest(profile.label));
     if (!accepted) return;
     setError(null);
     setCodexAcpMessage(null);
@@ -1428,9 +1431,7 @@ export function SettingsPage({
 
   const handleClearByokProviderConfiguration = useCallback(
     async (profile: AgentProviderProfile) => {
-      const accepted = await confirm(
-        `确定清除 ${profile.label} 设置？此操作会删除已保存的 API key、模型列表和列表 URL。`,
-      );
+      const accepted = await appConfirm(clearProviderConfirmRequest(profile.label));
       if (!accepted) return;
       setError(null);
       setCodexAcpMessage(null);
@@ -1954,7 +1955,7 @@ export function SettingsPage({
 
   const handleDeleteAllArchivedSessions = useCallback(async () => {
     if (archivedSessions.length === 0) return;
-    const accepted = await confirm("确定删除所有已归档对话？此操作不可撤销。");
+    const accepted = await appConfirm(deleteAllArchivedConfirmRequest());
     if (!accepted) return;
     setDeletingAllArchived(true);
     setArchivedError(null);
