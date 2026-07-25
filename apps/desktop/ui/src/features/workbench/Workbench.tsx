@@ -726,7 +726,11 @@ export function Workbench() {
     // Chat file links resolve to absolute paths; the editor + file tree speak
     // workspace-relative paths (absolute ones trip the backend traversal
     // check and break tree expansion).
-    const relativePath = stripWorkspaceRootPrefix(filePath, snapshot?.workspace.root);
+    const workspaceRootForPaths =
+      snapshot?.workspace.location?.kind === "remote_linux"
+        ? snapshot.workspace.location.remote_path
+        : snapshot?.workspace.root;
+    const relativePath = stripWorkspaceRootPrefix(filePath, workspaceRootForPaths);
     searchOpenSeqRef.current += 1;
     const tab: ReviewPanelOpenTab = {
       kind: "file",
@@ -745,7 +749,7 @@ export function Workbench() {
       return [...current, tab];
     });
     setReviewPanelActiveTab(tab);
-  }, [setRightPanelCollapsed, snapshot?.workspace.root]);
+  }, [setRightPanelCollapsed, snapshot?.workspace.location, snapshot?.workspace.root]);
 
   const autoReviewTarget = useMemo(
     () => latestReviewableTurnChangeSet(timelineTurnChangeSets, liveTurnChangeSet),

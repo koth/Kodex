@@ -145,6 +145,69 @@ impl Application {
         crate::workspace_files::resolve_existing_path(&self.ui.workspace.root, path)
     }
 
+    /// Existence probe for chat file links. Accepts workspace-relative or
+    /// absolute-in-workspace paths; returns false for missing/outside/dir.
+    pub fn workspace_paths_exist(&self, paths: &[String]) -> Result<Vec<bool>, String> {
+        if self.is_remote_workspace() {
+            let remote_root = match &self.ui.workspace.location {
+                workspace_model::WorkspaceLocation::RemoteLinux(remote) => {
+                    PathBuf::from(&remote.remote_path)
+                }
+                _ => self.ui.workspace.root.clone(),
+            };
+            let mut relative = Vec::with_capacity(paths.len());
+            for path in paths {
+                let rel = normalize_path_for_storage(path, &remote_root);
+                // Absolute foreign paths stay absolute after normalization and
+                // must not be probed remotely (sanitize would reject them).
+                if rel.is_empty()
+                    || rel.starts_with('/')
+                    || (rel.len() > 2 && rel.as_bytes()[1] == b':')
+                {
+                    relative.push(String::new());
+                } else {
+                    relative.push(rel);
+                }
+            }
+            // Empty placeholders stay false without a remote round-trip.
+            if relative.iter().all(|path| path.is_empty()) {
+                return Ok(paths.iter().map(|_| false).collect());
+            }
+            let client = self.remote_workspace_client("remote path exists")?;
+            let mut results = Vec::with_capacity(paths.len());
+            let mut probe_paths = Vec::new();
+            let mut probe_indexes = Vec::new();
+            for (index, path) in relative.iter().enumerate() {
+                if path.is_empty() {
+                    results.push(false);
+                } else {
+                    results.push(false); // placeholder
+                    probe_paths.push(path.clone());
+                    probe_indexes.push(index);
+                }
+            }
+            if !probe_paths.is_empty() {
+                let probed = client
+                    .paths_exist(&probe_paths)
+                    .map_err(|error| format!("failed to probe remote paths: {error}"))?;
+                for (slot, exists) in probe_indexes.into_iter().zip(probed) {
+                    results[slot] = exists;
+                }
+            }
+            return Ok(results);
+        }
+
+        self.ensure_local_workspace_for("local filesystem commands")?;
+        Ok(paths
+            .iter()
+            .map(|path| {
+                crate::workspace_files::resolve_existing_path(&self.ui.workspace.root, path)
+                    .map(|target| target.is_file())
+                    .unwrap_or(false)
+            })
+            .collect())
+    }
+
     pub fn review_changed_file(&self, path: &str) -> Option<ChangedFile> {
         let normalized = normalize_tracked_path(path);
         let normalized_relative = normalize_path_for_storage(path, &self.ui.workspace.root);

@@ -15,6 +15,7 @@ import { Prism as SyntaxHighlighter } from "react-syntax-highlighter";
 import { oneLight, vscDarkPlus } from "react-syntax-highlighter/dist/esm/styles/prism";
 import { getAppliedAppTheme } from "../../theme";
 import { fsPathExists } from "../../lib/tauri";
+import { stripWorkspaceRootPrefix } from "../filetree/FileTree";
 
 interface Props {
   content: string;
@@ -89,21 +90,21 @@ function MarkdownBody({ content, workspaceRoot, onFilePathClick, changedFiles, c
     const root = workspaceRoot
       ? normalizeFilePathSeparators(workspaceRoot).replace(/[\\/]+$/, "")
       : "";
-    const separator = root.includes("\\") ? "\\" : "/";
 
-    // Pass 0: changeset + turn candidate pool. A candidate's matchTail
+// Pass 0: changeset + turn candidate pool. A candidate's matchTail
     //  (`Composer.tsx`, `commands/fs.rs` or `app-core / state.rs`) is matched
     //  as an ordered segment subsequence against each candidate path — the
-    //  fragment is never split into a basename prefix. Hits resolve directly
-    //  to the real workspace path without any filesystem IO.
-    const poolMatched = new Map<string, string>();
+    //  fragment is never split into a basename prefix. Hits only produce a
+    //  better path to probe; existence is always confirmed via fsPathExists
+    //  so stale/hallucinated pool entries cannot become dead links.
+    const poolResolved = new Map<string, string>();
     const matchSources = [
       ...(changedFiles ?? []),
       ...(candidatePaths ?? []),
     ];
     if (matchSources.length > 0) {
       for (const [key, resolved] of candidates) {
-        if (poolMatched.has(key) || !resolved.matchTail) continue;
+        if (poolResolved.has(key) || !resolved.matchTail) continue;
         const tail = resolved.matchTail.replace(/\\/g, "/");
         for (const sourcePath of matchSources) {
           // Candidate paths harvested from shell output can carry a trailing
@@ -114,40 +115,16 @@ function MarkdownBody({ content, workspaceRoot, onFilePathClick, changedFiles, c
             .replace(/\\/g, "/")
             .replace(/:\d+(?::\d+)?$/, "");
           if (!pathMatchesFragment(normalized, tail)) continue;
-          const isAbsolute =
-            /^[A-Za-z]:[\\/]/.test(normalized) || normalized.startsWith("/");
-          poolMatched.set(
-            key,
-            isAbsolute
-              ? normalized
-              : root
-                ? `${root}${separator}${normalized.replace(/[\\/]+/g, separator)}`
-                : "",
-          );
+          // Keep the open/probe target workspace-relative. Absolute pool
+          // entries (shell cwd dumps) are stripped against the workspace root
+          // so the editor never receives a synthetic absolute path that later
+          // fails strip-on-click.
+          const relative = toWorkspaceRelativePath(normalized, root || undefined);
+          if (relative) poolResolved.set(key, relative);
           break;
         }
       }
     }
-
-    // Candidates resolved by the pools are done immediately.
-    const poolKeys = new Set(poolMatched.keys());
-    const changesetVerified: string[] = [];
-    for (const [key, resolvedPath] of poolMatched) {
-      if (!resolvedPath) continue;
-      filePathExistenceCache.set(key, true);
-      barePathOverrides.set(key, resolvedPath);
-      changesetVerified.push(key);
-    }
-    if (changesetVerified.length > 0) {
-      setVerifiedPaths((prev) => {
-        const next = new Set(prev);
-        for (const key of changesetVerified) next.add(key);
-        return next;
-      });
-    }
-
-    // Remaining candidates still need filesystem probing.
-    const remaining = candidates.filter(([key]) => !poolKeys.has(key));
 
     // Directories of already-resolved full paths in this message give bare
     // names (`Composer.tsx:12`) a same-directory first guess before falling
@@ -157,7 +134,10 @@ function MarkdownBody({ content, workspaceRoot, onFilePathClick, changedFiles, c
         [...pendingCandidates.values()]
           .filter((resolved) => !resolved.matchTail)
           .map((resolved) => {
-            const normalized = resolved.path.replace(/\\/g, "/");
+            const normalized = toWorkspaceRelativePath(
+              resolved.path,
+              root || undefined,
+            ).replace(/\\/g, "/");
             const lastSlash = normalized.lastIndexOf("/");
             return lastSlash > 0 ? normalized.slice(0, lastSlash) : null;
           })
@@ -165,12 +145,19 @@ function MarkdownBody({ content, workspaceRoot, onFilePathClick, changedFiles, c
       ),
     ];
 
-    // Pass 1: probe every remaining candidate's resolved path with fsPathExists.
-    // This covers complete relative paths and absolute paths alike. Candidates
-    // with a matchTail (bare names or partial paths) that fail here get one
-    // context-directory retry below; there is deliberately no workspace-wide
-    // name search — unresolved spans stay plain code.
-    const allPaths = [...new Set(remaining.map(([, resolved]) => resolved.path))];
+    // Pass 1: probe every candidate path with fsPathExists. Pool matches are
+    // probed at their resolved location; everything else uses the literal
+    // span path. No candidate becomes clickable without a true result.
+    const probeEntries = candidates.map(([key, resolved]) => {
+      const probePath = poolResolved.get(key) ?? resolved.path;
+      return {
+        key,
+        resolved,
+        probePath,
+        fromPool: poolResolved.has(key),
+      };
+    });
+    const allPaths = [...new Set(probeEntries.map((entry) => entry.probePath))];
     fsPathExists(allPaths)
       .then(async (results) => {
         if (cancelled) return;
@@ -178,25 +165,42 @@ function MarkdownBody({ content, workspaceRoot, onFilePathClick, changedFiles, c
           allPaths.map((path, index) => [path, results[index] === true]),
         );
         const newlyVerified: string[] = [];
-        for (const [key, resolved] of remaining) {
-          const exists = existsByPath.get(resolved.path) === true;
-          filePathExistenceCache.set(key, exists);
-          if (exists) newlyVerified.push(key);
+        const unresolved: typeof probeEntries = [];
+        for (const entry of probeEntries) {
+          const exists = existsByPath.get(entry.probePath) === true;
+          if (exists) {
+            filePathExistenceCache.set(entry.key, true);
+            const openPath = toWorkspaceRelativePath(
+              entry.probePath,
+              root || undefined,
+            );
+            if (openPath && (entry.fromPool || openPath !== entry.resolved.path)) {
+              barePathOverrides.set(entry.key, openPath);
+            }
+            newlyVerified.push(entry.key);
+            continue;
+          }
+          // Keep matchTail candidates open for a context-dir retry; cache a
+          // definitive miss only when there is nothing left to try.
+          if (entry.resolved.matchTail) {
+            unresolved.push(entry);
+          } else {
+            filePathExistenceCache.set(entry.key, false);
+          }
         }
 
         // Pass 2: candidates that failed fsPathExists but have a matchTail
         // (bare names or partial paths) get a second chance via context dirs.
-        const unresolved = remaining.filter(
-          ([key, resolved]) =>
-            !newlyVerified.includes(key) && resolved.matchTail,
-        );
         const resolvedByKey = new Map<string, string | null>();
 
         const guesses: { key: string; guess: string }[] = [];
-        for (const [key, resolved] of unresolved) {
+        for (const { key, resolved } of unresolved) {
           const tail = resolved.matchTail!.replace(/\\/g, "/");
           for (const dir of contextDirs) {
-            guesses.push({ key, guess: `${dir}/${tail}` });
+            guesses.push({
+              key,
+              guess: toWorkspaceRelativePath(`${dir}/${tail}`, root || undefined),
+            });
           }
         }
         if (guesses.length > 0) {
@@ -212,11 +216,14 @@ function MarkdownBody({ content, workspaceRoot, onFilePathClick, changedFiles, c
           }
         }
 
-        for (const [key] of unresolved) {
+        for (const { key } of unresolved) {
           const resolvedPath = resolvedByKey.get(key) ?? null;
           filePathExistenceCache.set(key, resolvedPath != null);
           if (resolvedPath != null) {
-            barePathOverrides.set(key, resolvedPath);
+            barePathOverrides.set(
+              key,
+              toWorkspaceRelativePath(resolvedPath, root || undefined),
+            );
             newlyVerified.push(key);
           }
         }
@@ -435,8 +442,9 @@ interface ResolvedFilePath {
 /**
  * Detect inline-code spans that look like a workspace file reference such as
  * `crates/codebuddy-proxy/src/usage.rs:75` or `apps/desktop/ui/src/main.tsx`
- * and resolve them to an absolute path. Returns null for anything that is
- * clearly not a file path (identifiers, commands, urls, prose).
+ * and resolve them to a workspace-relative open path. Returns null for
+ * anything that is clearly not a file path (identifiers, commands, urls,
+ * prose).
  */
 export function resolveClickableFilePath(
   raw: string,
@@ -494,18 +502,29 @@ export function resolveClickableFilePath(
   }
 
   if (isWindowsAbs || isPosixAbs) {
-    return { path: normalizeFilePathSeparators(candidate), lineNumber };
+    // Absolute spans only become openable when they sit under the current
+    // workspace root. Keep the stored path relative so the editor/open path
+    // never depends on a second strip pass at click time.
+    if (!workspaceRoot) return null;
+    const relative = toWorkspaceRelativePath(candidate, workspaceRoot);
+    if (
+      !relative ||
+      relative === candidate ||
+      /^[A-Za-z]:[\\/]/.test(relative) ||
+      relative.startsWith("/")
+    ) {
+      return null;
+    }
+    return { path: relative, lineNumber };
   }
   if (!workspaceRoot) {
     return null;
   }
-  const root = normalizeFilePathSeparators(workspaceRoot).replace(/[\\/]+$/, "");
-  const separator = root.includes("\\") ? "\\" : "/";
-  const relative = candidate.replace(/[\\/]+/g, separator);
+  const relative = candidate.replace(/\\/g, "/");
   const matchTail = candidate
     .replace(/\\/g, "/")
     .replace(/:\d+(?::\d+)?$/, "");
-  return { path: `${root}${separator}${relative}`, lineNumber, matchTail };
+  return { path: relative, lineNumber, matchTail };
 }
 
 /** Collapse mixed `\` / `/` separators to the platform-dominant one so the
@@ -515,6 +534,13 @@ function normalizeFilePathSeparators(value: string) {
   const backslashes = (value.match(/\\/g) ?? []).length;
   const slashes = (value.match(/\//g) ?? []).length;
   return backslashes > slashes ? value.replace(/\//g, "\\") : value.replace(/\\/g, "/");
+}
+
+/** Normalize any absolute-in-workspace or mixed-separator path down to the
+ *  workspace-relative form the editor and remote FS APIs expect. */
+function toWorkspaceRelativePath(path: string, workspaceRoot?: string) {
+  const normalized = path.replace(/\\/g, "/").replace(/^\.\/+/, "");
+  return stripWorkspaceRootPrefix(normalized, workspaceRoot).replace(/\\/g, "/");
 }
 
 /** A path fragment (`app-core/state.rs`) matches a candidate path when its

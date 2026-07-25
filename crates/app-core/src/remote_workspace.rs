@@ -120,6 +120,46 @@ where
         Ok(())
     }
 
+    /// Cheap existence probe used by chat file-link rendering. Returns true
+    /// only for regular files that currently exist inside the remote workspace.
+    pub(crate) fn path_exists(&self, path: &str) -> anyhow::Result<bool> {
+        let path = sanitize_relative_path(path, false)?;
+        let response: RemoteExistsResponse = self.run_node_json(
+            PATH_EXISTS_SCRIPT,
+            &[path.as_str()],
+            None,
+            REMOTE_LIST_DIR_TIMEOUT,
+        )?;
+        Ok(response.exists)
+    }
+
+    /// Batch existence probe so the chat renderer can validate many candidate
+    /// links without one SSH round-trip per path.
+    pub(crate) fn paths_exist(&self, paths: &[String]) -> anyhow::Result<Vec<bool>> {
+        if paths.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut relative = Vec::with_capacity(paths.len());
+        for path in paths {
+            relative.push(sanitize_relative_path(path, false)?);
+        }
+        let arg_refs = relative.iter().map(String::as_str).collect::<Vec<_>>();
+        let response: RemoteExistsBatchResponse = self.run_node_json(
+            PATHS_EXIST_SCRIPT,
+            &arg_refs,
+            None,
+            REMOTE_LIST_DIR_TIMEOUT,
+        )?;
+        if response.exists.len() != paths.len() {
+            bail!(
+                "远程存在性探测返回数量不匹配：expected {}, got {}",
+                paths.len(),
+                response.exists.len()
+            );
+        }
+        Ok(response.exists)
+    }
+
     pub(crate) fn git_status(&self) -> anyhow::Result<RepositorySnapshot> {
         let response: RemoteGitStatusResponse =
             self.run_node_json(GIT_STATUS_SCRIPT, &[], None, REMOTE_GIT_TIMEOUT)?;
@@ -354,6 +394,16 @@ fn current_timestamp() -> String {
 struct RemoteOkResponse {
     #[allow(dead_code)]
     ok: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct RemoteExistsResponse {
+    exists: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct RemoteExistsBatchResponse {
+    exists: Vec<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -639,6 +689,41 @@ ensureInside(root, real);
 if (!fs.statSync(real).isFile()) die('cannot delete directories from the file tree');
 fs.unlinkSync(real);
 console.log(JSON.stringify({ ok: true }));
+"#;
+
+const PATH_EXISTS_SCRIPT: &str = r#"
+const { root, target } = rootAndRel();
+let exists = false;
+try {
+  if (fs.existsSync(target)) {
+    const real = fs.realpathSync(target);
+    ensureInside(root, real);
+    exists = fs.statSync(real).isFile();
+  }
+} catch (_) {
+  exists = false;
+}
+console.log(JSON.stringify({ exists }));
+"#;
+
+const PATHS_EXIST_SCRIPT: &str = r#"
+const rootArg = process.argv[1];
+if (!rootArg || !path.isAbsolute(rootArg)) die('remote root must be absolute');
+const root = fs.realpathSync(rootArg);
+const exists = process.argv.slice(2).map((relArg) => {
+  try {
+    if (!relArg || path.isAbsolute(relArg) || relArg.split(/[\\/]+/).includes('..')) return false;
+    const target = path.resolve(root, relArg);
+    if (!fs.existsSync(target)) return false;
+    const real = fs.realpathSync(target);
+    const normalizedRoot = root.endsWith(path.sep) ? root : root + path.sep;
+    if (real !== root && !real.startsWith(normalizedRoot)) return false;
+    return fs.statSync(real).isFile();
+  } catch (_) {
+    return false;
+  }
+});
+console.log(JSON.stringify({ exists }));
 "#;
 
 const GIT_STATUS_SCRIPT: &str = r#"
@@ -1059,6 +1144,31 @@ mod tests {
         let err = client.read_file("../secret").unwrap_err();
 
         assert!(err.to_string().contains("路径遍历"));
+    }
+
+    #[test]
+    fn path_exists_decodes_boolean() {
+        let runner = FakeRunner::new(vec![ok(r#"{"exists":true}"#)]);
+        let config = config();
+        let client = RemoteWorkspaceClient::with_runner(&config, runner.clone());
+
+        assert!(client.path_exists("src/main.rs").unwrap());
+        let commands = runner.commands();
+        assert!(commands[0].remote_command.contains("src/main.rs"));
+    }
+
+    #[test]
+    fn paths_exist_decodes_batch_booleans() {
+        let runner = FakeRunner::new(vec![ok(r#"{"exists":[true,false]}"#)]);
+        let config = config();
+        let client = RemoteWorkspaceClient::with_runner(&config, runner);
+
+        assert_eq!(
+            client
+                .paths_exist(&["src/main.rs".into(), "missing.rs".into()])
+                .unwrap(),
+            vec![true, false]
+        );
     }
 
     #[test]

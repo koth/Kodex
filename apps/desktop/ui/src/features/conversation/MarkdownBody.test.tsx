@@ -1,5 +1,5 @@
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import MarkdownBody, {
   clearFilePathLinkCacheForTests,
   pathMatchesFragment,
@@ -20,6 +20,14 @@ vi.mock("../../lib/tauri", async () => {
 const originalClipboard = navigator.clipboard;
 
 describe("MarkdownBody", () => {
+  beforeEach(() => {
+    // Pool matches now always go through fsPathExists; restore a permissive
+    // default after tests that force every probe to false.
+    vi.mocked(fsPathExists).mockImplementation(async (paths: string[]) =>
+      paths.map(() => true),
+    );
+  });
+
   afterEach(() => {
     cleanup();
     vi.restoreAllMocks();
@@ -111,10 +119,10 @@ describe("MarkdownBody", () => {
         "md-file-path",
       ),
     );
-    expect(fsPathExists).toHaveBeenCalledWith([`${root}\\crates\\codebuddy-proxy\\src\\usage.rs`]);
+    expect(fsPathExists).toHaveBeenCalledWith(["crates/codebuddy-proxy/src/usage.rs"]);
     fireEvent.click(screen.getByText("crates/codebuddy-proxy/src/usage.rs:75"));
     expect(onFilePathClick).toHaveBeenCalledWith(
-      `${root}\\crates\\codebuddy-proxy\\src\\usage.rs`,
+      "crates/codebuddy-proxy/src/usage.rs",
       75,
     );
 
@@ -169,9 +177,15 @@ describe("MarkdownBody", () => {
       expect(screen.getByText("Composer.tsx:548")).toHaveClass("md-file-path"),
     );
     expect(screen.getByText("ConversationTimeline.css:848")).toHaveClass("md-file-path");
+    expect(fsPathExists).toHaveBeenCalledWith(
+      expect.arrayContaining([
+        "apps/desktop/ui/src/features/composer/Composer.tsx",
+        "apps/desktop/ui/src/features/conversation/ConversationTimeline.css",
+      ]),
+    );
     fireEvent.click(screen.getByText("Composer.tsx:548"));
     expect(onFilePathClick).toHaveBeenCalledWith(
-      `${root}\\apps\\desktop\\ui\\src\\features\\composer\\Composer.tsx`,
+      "apps/desktop/ui/src/features/composer/Composer.tsx",
       548,
     );
   });
@@ -192,7 +206,7 @@ describe("MarkdownBody", () => {
     );
     fireEvent.click(screen.getByText("commands/fs.rs:138"));
     expect(onFilePathClick).toHaveBeenCalledWith(
-      `${root}\\apps\\desktop\\src-tauri\\src\\commands\\fs.rs`,
+      "apps/desktop/src-tauri/src/commands/fs.rs",
       138,
     );
   });
@@ -213,7 +227,7 @@ describe("MarkdownBody", () => {
     );
     fireEvent.click(screen.getByText("MarkdownBody.tsx"));
     expect(onFilePathClick).toHaveBeenCalledWith(
-      `${root}\\apps\\desktop\\ui\\src\\features\\conversation\\MarkdownBody.tsx`,
+      "apps/desktop/ui/src/features/conversation/MarkdownBody.tsx",
       undefined,
     );
   });
@@ -235,7 +249,7 @@ describe("MarkdownBody", () => {
     );
     fireEvent.click(screen.getByText("app-core / state.rs"));
     expect(onFilePathClick).toHaveBeenCalledWith(
-      `${root}\\crates\\app-core\\src\\state.rs`,
+      "crates/app-core/src/state.rs",
       undefined,
     );
   });
@@ -257,7 +271,7 @@ describe("MarkdownBody", () => {
     );
     fireEvent.click(screen.getByText("commands/fs.rs:144"));
     expect(onFilePathClick).toHaveBeenCalledWith(
-      `${root}\\apps\\desktop\\src-tauri\\src\\commands\\fs.rs`,
+      "apps/desktop/src-tauri/src/commands/fs.rs",
       144,
     );
   });
@@ -278,6 +292,27 @@ describe("MarkdownBody", () => {
     expect(screen.getByText("SomeUnrelated.tsx:12")).not.toHaveClass("md-file-path");
   });
 
+  it("keeps pool-matched paths as plain code when the resolved file does not exist", async () => {
+    vi.mocked(fsPathExists).mockImplementation(async (paths: string[]) => paths.map(() => false));
+    render(
+      <MarkdownBody
+        content={"提到 `transport.rs:16` 和 `docs/relay-service-requirements.md`。"}
+        workspaceRoot="D:\\work\\kodex"
+        onFilePathClick={vi.fn()}
+        candidatePaths={[
+          "server/src/transport.rs",
+          "docs/relay-service-requirements.md",
+        ]}
+      />,
+    );
+
+    await waitFor(() => expect(fsPathExists).toHaveBeenCalled());
+    expect(screen.getByText("transport.rs:16")).not.toHaveClass("md-file-path");
+    expect(screen.getByText("docs/relay-service-requirements.md")).not.toHaveClass(
+      "md-file-path",
+    );
+  });
+
   it("strips trailing line references from candidate pool matches", async () => {
     const onFilePathClick = vi.fn();
     const root = "D:\\work\\kodex";
@@ -296,7 +331,7 @@ describe("MarkdownBody", () => {
     );
     fireEvent.click(screen.getByText("commands/fs.rs:144"));
     expect(onFilePathClick).toHaveBeenCalledWith(
-      `${root}\\apps\\desktop\\src-tauri\\src\\commands\\fs.rs`,
+      "apps/desktop/src-tauri/src/commands/fs.rs",
       144,
     );
   });
@@ -318,7 +353,7 @@ describe("MarkdownBody", () => {
       expect(screen.getByText("Composer.tsx:548")).toHaveClass("md-file-path"),
     );
     fireEvent.click(screen.getByText("Composer.tsx:548"));
-    expect(onFilePathClick).toHaveBeenCalledWith(`${rootA}\\apps\\Composer.tsx`, 548);
+    expect(onFilePathClick).toHaveBeenCalledWith("apps/Composer.tsx", 548);
     onFilePathClick.mockClear();
 
     // Switching to a different workspace must not reuse repoA's cached
@@ -336,7 +371,7 @@ describe("MarkdownBody", () => {
       expect(screen.getByText("Composer.tsx:548")).toHaveClass("md-file-path"),
     );
     fireEvent.click(screen.getByText("Composer.tsx:548"));
-    expect(onFilePathClick).toHaveBeenCalledWith(`${rootB}\\src\\Composer.tsx`, 548);
+    expect(onFilePathClick).toHaveBeenCalledWith("src/Composer.tsx", 548);
   });
 });
 
@@ -345,28 +380,29 @@ describe("resolveClickableFilePath", () => {
 
   it("resolves relative paths with line and column", () => {
     expect(resolveClickableFilePath("crates/acp-core/src/mapping.rs:391", root)).toMatchObject({
-      path: `${root}\\crates\\acp-core\\src\\mapping.rs`,
+      path: "crates/acp-core/src/mapping.rs",
       lineNumber: 391,
     });
     expect(resolveClickableFilePath("src/lib.rs:10:5", root)).toMatchObject({
-      path: `${root}\\src\\lib.rs`,
+      path: "src/lib.rs",
       lineNumber: 10,
     });
   });
 
   it("resolves diff-prefixed and absolute paths", () => {
     expect(resolveClickableFilePath("a/crates/x.rs:3", root)).toMatchObject({
-      path: `${root}\\crates\\x.rs`,
+      path: "crates/x.rs",
       lineNumber: 3,
     });
     expect(resolveClickableFilePath("D:\\work\\kodex\\src\\main.rs:8", root)).toMatchObject({
-      path: "D:\\work\\kodex\\src\\main.rs",
+      path: "src/main.rs",
       lineNumber: 8,
     });
-    expect(resolveClickableFilePath("/home/user/repo/src/main.rs", root)).toMatchObject({
-      path: "/home/user/repo/src/main.rs",
+    expect(resolveClickableFilePath("/home/user/repo/src/main.rs", "/home/user/repo")).toMatchObject({
+      path: "src/main.rs",
       lineNumber: undefined,
     });
+    expect(resolveClickableFilePath("/home/user/other/src/main.rs", root)).toBeNull();
   });
 
   it("rejects identifiers, commands, urls, and directories", () => {
@@ -379,12 +415,12 @@ describe("resolveClickableFilePath", () => {
 
   it("accepts space-separated path fragments and normalises them", () => {
     expect(resolveClickableFilePath("app-core / state.rs", root)).toEqual({
-      path: `${root}\\app-core\\state.rs`,
+      path: "app-core/state.rs",
       lineNumber: undefined,
       matchTail: "app-core/state.rs",
     });
     expect(resolveClickableFilePath("crates / app-core / src / state.rs:12", root)).toEqual({
-      path: `${root}\\crates\\app-core\\src\\state.rs`,
+      path: "crates/app-core/src/state.rs",
       lineNumber: 12,
       matchTail: "crates/app-core/src/state.rs",
     });

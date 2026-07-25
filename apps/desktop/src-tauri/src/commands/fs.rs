@@ -105,24 +105,11 @@ pub fn fs_reveal(state: State<'_, AppState>, path: String, select: bool) -> Resu
 pub async fn fs_path_exists(app: AppHandle, paths: Vec<String>) -> Result<Vec<bool>, String> {
     tokio::task::spawn_blocking(move || {
         let state = app.state::<AppState>();
-        Ok(paths
-            .into_iter()
-            .map(|path| {
-                state
-                    .with_app(|app| {
-                        if app.is_remote_workspace() {
-                            // Remote existence probing is not wired; be
-                            // permissive so remote chat links still render.
-                            return Ok(true);
-                        }
-                        Ok(app
-                            .resolve_workspace_entry_for_shell(&path)
-                            .map(|target| target.is_file())
-                            .unwrap_or(false))
-                    })
-                    .unwrap_or(false)
-            })
-            .collect::<Vec<bool>>())
+        // Never fail the command for probe errors — a reconnecting remote or
+        // transient FS blip must leave spans as plain code, not crash the UI.
+        Ok(state
+            .with_app(|app| app.workspace_paths_exist(&paths))
+            .unwrap_or_else(|_| paths.iter().map(|_| false).collect()))
     })
     .await
     .map_err(|e| format!("Path exists task failed: {e}"))?

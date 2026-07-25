@@ -782,7 +782,12 @@ export function ConversationTimeline({
   onStopTool,
   onFilePathClick,
 }: Props) {
-  visibleWorkspaceRoot = snapshot.workspace.root;
+  // Remote workspaces store a synthetic ssh:// key in workspace.root. File
+  // link resolution/open needs the real remote filesystem root instead.
+  visibleWorkspaceRoot =
+    snapshot.workspace.location?.kind === "remote_linux"
+      ? snapshot.workspace.location.remote_path
+      : snapshot.workspace.root;
   const scrollRef = useRef<HTMLDivElement>(null);
   const itemsRef = useRef<HTMLDivElement>(null);
   const bottomSentinelRef = useRef<HTMLDivElement>(null);
