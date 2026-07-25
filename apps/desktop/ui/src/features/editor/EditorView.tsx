@@ -707,7 +707,10 @@ export function EditorView({
               minimap: { enabled: false },
               scrollBeyondLastLine: false,
               fontSize: 13,
-              fontFamily: "'Consolas', 'Courier New', monospace",
+              fontFamily:
+                "'SFMono-Regular', 'Cascadia Mono', 'JetBrains Mono', 'SF Mono', 'Menlo', 'Consolas', monospace",
+              fontLigatures: false,
+              fontWeight: "500",
               lineHeight: 20,
               renderLineHighlight: "line",
               bracketPairColorization: { enabled: false },

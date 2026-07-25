@@ -1063,6 +1063,22 @@ body.is-resizing-left-sidebar {
   color: #7c8288;
 }
 
+/* Expanded editor/review: the floating composer layer is absolutely
+ * positioned over the panel, so give it a solid background and a top
+ * divider in light mode. Otherwise it visually collides with the header
+ * above and the file tree on the right, which all share the same white
+ * surface. */
+:root[data-theme="light"] .workbench-body.is-review-expanded .expanded-review-panel-shell,
+:root[data-theme="light"] .workbench-body.is-review-expanded .expanded-review-panel-shell .review-panel {
+  background: var(--app-bg);
+}
+
+:root[data-theme="light"] .expanded-review-composer-layer {
+  padding-top: 8px;
+  border-top: 1px solid var(--border-subtle);
+  background: var(--app-bg);
+}
+
 /*
  * When the agent plan dock is shown, push the centered conversation column
  * (timeline + composer + status slot) to the left so the docked panel floats

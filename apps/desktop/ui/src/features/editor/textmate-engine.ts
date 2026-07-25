@@ -86,6 +86,7 @@ const SCOPE_TOKEN_MAP: [string, string][] = [
   ["support.class", "type"],
   ["support.constant", "constant"],
   ["meta.preprocessor", "keyword"],
+  ["meta.attribute", "attribute"],
   ["meta.object-literal.key", "string"],
   ["storage.type.function", "keyword"],
   ["storage.type", "storage.type"],

@@ -41,6 +41,34 @@
   border-radius: 14px;
 }
 
+/* Expanded review/editor docks the composer as a short single-line strip,
+ * but the six-column grid above puts the Build/model/send controls on the
+ * same row as the input and stretches the input to their height, pushing
+ * the placeholder to the bottom of the pill. In the docked overlay we
+ * instead want the classic two-row composer: input on top, control rail
+ * below. */
+.expanded-review-composer-layer .composer.is-compact .composer-inner {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 2px;
+  padding: 8px 10px 6px;
+  border-radius: 16px;
+}
+
+.expanded-review-composer-layer .composer.is-compact .composer-input-wrap {
+  order: 0;
+  min-height: 0;
+}
+
+.expanded-review-composer-layer .composer.is-compact .composer-control-rail {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  min-height: 34px;
+  margin-top: 0;
+}
+
 .composer.is-compact.has-attachments .composer-inner {
   display: grid;
   min-height: 0;

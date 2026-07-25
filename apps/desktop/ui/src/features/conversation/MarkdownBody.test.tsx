@@ -277,6 +277,67 @@ describe("MarkdownBody", () => {
     await waitFor(() => expect(fsPathExists).toHaveBeenCalled());
     expect(screen.getByText("SomeUnrelated.tsx:12")).not.toHaveClass("md-file-path");
   });
+
+  it("strips trailing line references from candidate pool matches", async () => {
+    const onFilePathClick = vi.fn();
+    const root = "D:\\work\\kodex";
+    render(
+      <MarkdownBody
+        content={"输出里提到的 `commands/fs.rs:144` 可以直接跳转。"}
+        workspaceRoot={root}
+        onFilePathClick={onFilePathClick}
+        // Shell output candidate carries a trailing :1 line reference.
+        candidatePaths={["apps/desktop/src-tauri/src/commands/fs.rs:1"]}
+      />,
+    );
+
+    await waitFor(() =>
+      expect(screen.getByText("commands/fs.rs:144")).toHaveClass("md-file-path"),
+    );
+    fireEvent.click(screen.getByText("commands/fs.rs:144"));
+    expect(onFilePathClick).toHaveBeenCalledWith(
+      `${root}\\apps\\desktop\\src-tauri\\src\\commands\\fs.rs`,
+      144,
+    );
+  });
+
+  it("does not carry link resolution across workspace switches", async () => {
+    const rootA = "D:\\work\\repoA";
+    const rootB = "D:\\work\\repoB";
+    const onFilePathClick = vi.fn();
+
+    const { rerender } = render(
+      <MarkdownBody
+        content={"改在 `Composer.tsx:548` 里。"}
+        workspaceRoot={rootA}
+        onFilePathClick={onFilePathClick}
+        changedFiles={["apps/Composer.tsx"]}
+      />,
+    );
+    await waitFor(() =>
+      expect(screen.getByText("Composer.tsx:548")).toHaveClass("md-file-path"),
+    );
+    fireEvent.click(screen.getByText("Composer.tsx:548"));
+    expect(onFilePathClick).toHaveBeenCalledWith(`${rootA}\\apps\\Composer.tsx`, 548);
+    onFilePathClick.mockClear();
+
+    // Switching to a different workspace must not reuse repoA's cached
+    // resolved location — that override lives under a path inside repoA and
+    // would be rejected as outside the workspace when clicked in repoB.
+    rerender(
+      <MarkdownBody
+        content={"改在 `Composer.tsx:548` 里。"}
+        workspaceRoot={rootB}
+        onFilePathClick={onFilePathClick}
+        changedFiles={["src/Composer.tsx"]}
+      />,
+    );
+    await waitFor(() =>
+      expect(screen.getByText("Composer.tsx:548")).toHaveClass("md-file-path"),
+    );
+    fireEvent.click(screen.getByText("Composer.tsx:548"));
+    expect(onFilePathClick).toHaveBeenCalledWith(`${rootB}\\src\\Composer.tsx`, 548);
+  });
 });
 
 describe("resolveClickableFilePath", () => {

@@ -22,7 +22,6 @@ const REGISTRY: LanguageGrammarInfo[] = [
   { monacoLanguageId: "regexp", scopeName: "source.regexp.python", grammarModule: () => import("tm-grammars/grammars/regexp.json") },
   { monacoLanguageId: "glsl", scopeName: "source.glsl", grammarModule: () => import("tm-grammars/grammars/glsl.json") },
   { monacoLanguageId: "sql", scopeName: "source.sql", grammarModule: () => import("tm-grammars/grammars/sql.json") },
-  { monacoLanguageId: "css", scopeName: "source.css", grammarModule: () => import("tm-grammars/grammars/css.json") },
   { monacoLanguageId: "html", scopeName: "text.html.basic", grammarModule: () => import("tm-grammars/grammars/html.json") },
   { monacoLanguageId: "markdown", scopeName: "text.html.markdown", grammarModule: () => import("tm-grammars/grammars/markdown.json") },
 ];

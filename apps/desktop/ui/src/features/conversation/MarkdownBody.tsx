@@ -42,6 +42,20 @@ const filePathExistenceCache = new Map<string, boolean>();
  *  the real file instead of the placeholder name. */
 const barePathOverrides = new Map<string, string>();
 
+/** Build the cache key for a resolved file reference. The workspace root is
+ *  part of the key so that the same path mentioned across different
+ *  workspaces (or before/after a workspace switch) does not inherit a stale
+ *  existence probe or a stale resolved-location override from the other
+ *  workspace — bare names such as `Composer.tsx:548` resolve to a different
+ *  absolute path under each workspace, and reusing the old override would
+ *  point the link outside the current workspace and fail to open. */
+function filePathCacheKey(
+  resolved: Pick<ResolvedFilePath, "path" | "lineNumber">,
+  workspaceRoot?: string,
+): string {
+  return `${workspaceRoot ?? ""}\u0000${resolved.path}#${resolved.lineNumber ?? 0}`;
+}
+
 /** Test hook: clear the module-level existence cache between cases. */
 export function clearFilePathLinkCacheForTests() {
   filePathExistenceCache.clear();
@@ -92,16 +106,22 @@ function MarkdownBody({ content, workspaceRoot, onFilePathClick, changedFiles, c
         if (poolMatched.has(key) || !resolved.matchTail) continue;
         const tail = resolved.matchTail.replace(/\\/g, "/");
         for (const sourcePath of matchSources) {
-          const normalized = sourcePath.replace(/\\/g, "/");
+          // Candidate paths harvested from shell output can carry a trailing
+          // `:line[:col]` reference. Strip it before matching and joining so
+          // the resolved absolute path does not end in a bogus `file.rs:12`
+          // segment that the backend cannot canonicalise or open.
+          const normalized = sourcePath
+            .replace(/\\/g, "/")
+            .replace(/:\d+(?::\d+)?$/, "");
           if (!pathMatchesFragment(normalized, tail)) continue;
           const isAbsolute =
-            /^[A-Za-z]:[\\/]/.test(sourcePath) || sourcePath.startsWith("/");
+            /^[A-Za-z]:[\\/]/.test(normalized) || normalized.startsWith("/");
           poolMatched.set(
             key,
             isAbsolute
-              ? sourcePath
+              ? normalized
               : root
-                ? `${root}${separator}${sourcePath.replace(/[\\/]+/g, separator)}`
+                ? `${root}${separator}${normalized.replace(/[\\/]+/g, separator)}`
                 : "",
           );
           break;
@@ -289,7 +309,7 @@ function MarkdownBody({ content, workspaceRoot, onFilePathClick, changedFiles, c
               : null;
           let clickable = false;
           if (resolved) {
-            const cacheKey = `${resolved.path}#${resolved.lineNumber ?? 0}`;
+            const cacheKey = filePathCacheKey(resolved, workspaceRoot);
             pendingCandidates.set(cacheKey, resolved);
             clickable =
               verifiedPaths.has(cacheKey) ||
@@ -297,9 +317,8 @@ function MarkdownBody({ content, workspaceRoot, onFilePathClick, changedFiles, c
           }
           const openPath =
             clickable && resolved
-              ? barePathOverrides.get(
-                  `${resolved.path}#${resolved.lineNumber ?? 0}`,
-                ) ?? resolved.path
+              ? barePathOverrides.get(filePathCacheKey(resolved, workspaceRoot)) ??
+                resolved.path
               : undefined;
           return (
             <code
@@ -504,7 +523,10 @@ function normalizeFilePathSeparators(value: string) {
  *  `crates/app-core/src/state.rs` without ever splitting the fragment into
  *  a bare basename. */
 export function pathMatchesFragment(candidatePath: string, fragment: string) {
-  const candidateSegments = candidatePath.split("/").filter(Boolean);
+  const candidateSegments = candidatePath
+    .split("/")
+    .filter(Boolean)
+    .map((segment) => segment.replace(/:\d+(?::\d+)?$/, ""));
   const fragmentSegments = fragment
     .split("/")
     .filter(Boolean)

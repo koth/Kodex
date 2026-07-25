@@ -89,7 +89,10 @@ export function DiffView({ path, appTheme }: Props) {
             minimap: { enabled: false },
             scrollBeyondLastLine: false,
             fontSize: 13,
-            fontFamily: "'Consolas', 'Courier New', monospace",
+            fontFamily:
+              "'SFMono-Regular', 'Cascadia Mono', 'JetBrains Mono', 'SF Mono', 'Menlo', 'Consolas', monospace",
+            fontLigatures: false,
+            fontWeight: "500",
             lineHeight: 20,
             smoothScrolling: true,
             padding: { top: 12, bottom: 12 },
