@@ -175,6 +175,7 @@ impl Application {
              要求：\n\
              - 尽量详细，优先写清动机与影响，不要只写空泛的 one-liner\n\
              - 只输出 commit message 本身，不要任何解释、前后缀、引号、代码块或 markdown 标题\n\
+             - 不要输出思考过程、计划步骤或“Let me…”/“I now have…”这类旁白\n\
              - 不要包在 ``` 代码围栏里\n\
              - 只允许只读查看命令，不要 stage/unstage/commit/push，也不要修改任何文件。"
         );
@@ -190,6 +191,9 @@ impl Application {
         let task = handle.send_prompt_async(prompt);
         let collected = match task {
             Ok(mut task) => {
+                // Only keep assistant text emitted after the latest tool call.
+                // Earlier narration ("let me inspect…") is discarded so the
+                // draft is not polluted with chain-of-thought preamble.
                 let mut text = String::new();
                 let mut run_error: Option<String> = None;
                 while !task.is_finished() {
@@ -202,6 +206,7 @@ impl Application {
                                         content,
                                     } => text.push_str(content),
                                     ClientEvent::ToolStarted { name, summary, .. } => {
+                                        text.clear();
                                         let label = if summary.is_empty() {
                                             name.clone()
                                         } else {
@@ -223,12 +228,13 @@ impl Application {
                     }
                 }
                 for event in task.into_events() {
-                    if let ClientEvent::MessageChunk {
-                        role: workspace_model::MessageRole::Assistant,
-                        content,
-                    } = &event
-                    {
-                        text.push_str(content);
+                    match &event {
+                        ClientEvent::MessageChunk {
+                            role: workspace_model::MessageRole::Assistant,
+                            content,
+                        } => text.push_str(content),
+                        ClientEvent::ToolStarted { .. } => text.clear(),
+                        _ => {}
                     }
                 }
                 match run_error {
@@ -251,13 +257,19 @@ impl Application {
 }
 
 /// Normalize an AI-produced commit message into a multi-line draft.
-/// Keeps the subject + body, strips code fences / labels / surrounding quotes.
+/// Keeps the subject + body, strips thinking preamble / code fences / labels /
+/// surrounding quotes.
 fn sanitize_generated_commit_message(raw: &str) -> String {
     let mut text = raw.replace("\r\n", "\n").replace('\r', "\n");
     text = text.trim().to_string();
 
-    // Strip a single surrounding fenced code block if the whole answer is wrapped.
-    if text.starts_with("```") {
+    // Prefer the last fenced block when the model wraps the message (or wraps
+    // an intermediate draft). Ignore fences that don't look like a commit
+    // message (e.g. code samples in the narration). Fall back to stripping a
+    // single leading fence when the whole answer is wrapped.
+    if let Some(extracted) = extract_last_fenced_commit_block(&text) {
+        text = extracted;
+    } else if text.starts_with("```") {
         let mut lines: Vec<&str> = text.lines().collect();
         if lines.first().is_some_and(|line| line.starts_with("```")) {
             lines.remove(0);
@@ -268,7 +280,7 @@ fn sanitize_generated_commit_message(raw: &str) -> String {
         text = lines.join("\n").trim().to_string();
     }
 
-    // Drop common leading labels the model sometimes emits.
+    // Drop common leading labels the model sometimes emits (anywhere on a line).
     const LABELS: &[&str] = &[
         "commit message:",
         "commit message：",
@@ -284,6 +296,12 @@ fn sanitize_generated_commit_message(raw: &str) -> String {
             text = text[label.len()..].trim_start().to_string();
             break;
         }
+    }
+
+    // If narration precedes the real subject, cut everything before the last
+    // conventional-commit subject line.
+    if let Some(extracted) = extract_from_commit_subject(&text) {
+        text = extracted;
     }
 
     // Preserve internal blank lines (subject/body separator) while trimming edges.
@@ -314,6 +332,101 @@ fn sanitize_generated_commit_message(raw: &str) -> String {
         return trimmed[1..trimmed.len() - 1].trim().to_string();
     }
     cleaned
+}
+
+/// Return the content of the last ``` ... ``` fenced block, if any.
+fn extract_last_fenced_commit_block(text: &str) -> Option<String> {
+    let mut last: Option<String> = None;
+    let mut lines = text.lines().peekable();
+    while let Some(line) = lines.next() {
+        if !line.trim_start().starts_with("```") {
+            continue;
+        }
+        let mut body: Vec<&str> = Vec::new();
+        while let Some(inner) = lines.next() {
+            if inner.trim() == "```" {
+                break;
+            }
+            body.push(inner);
+        }
+        let content = body.join("\n").trim().to_string();
+        if !content.is_empty() && content.lines().any(looks_like_commit_subject) {
+            last = Some(content);
+        }
+    }
+    last
+}
+
+/// Conventional-commit subject: `type(scope)!: description`
+fn looks_like_commit_subject(line: &str) -> bool {
+    let line = line.trim();
+    if line.is_empty() || line.len() > 100 {
+        return false;
+    }
+    // Reject obvious prose / bullets / markdown.
+    if line.starts_with('-')
+        || line.starts_with('*')
+        || line.starts_with('#')
+        || line.starts_with('>')
+        || line.starts_with('`')
+    {
+        return false;
+    }
+    const TYPES: &[&str] = &[
+        "feat", "fix", "refactor", "docs", "test", "chore", "style", "perf",
+        "build", "ci", "revert",
+    ];
+    let lower = line.to_ascii_lowercase();
+    for ty in TYPES {
+        if !lower.starts_with(ty) {
+            continue;
+        }
+        let rest = &lower[ty.len()..];
+        // type: / type!: / type(scope): / type(scope)!:
+        if rest.starts_with(':') || rest.starts_with("!:") {
+            let desc = rest
+                .trim_start_matches('!')
+                .trim_start_matches(':')
+                .trim();
+            return !desc.is_empty();
+        }
+        if let Some(after_scope) = rest.strip_prefix('(').and_then(|s| s.find(')').map(|i| &s[i + 1..]))
+        {
+            if after_scope.starts_with(':') || after_scope.starts_with("!:") {
+                let desc = after_scope
+                    .trim_start_matches('!')
+                    .trim_start_matches(':')
+                    .trim();
+                return !desc.is_empty();
+            }
+        }
+    }
+    false
+}
+
+/// If the text contains narration before a conventional-commit subject, return
+/// the slice starting at the last such subject. When the first non-empty line
+/// is already a subject, return None (nothing to strip).
+fn extract_from_commit_subject(text: &str) -> Option<String> {
+    let lines: Vec<&str> = text.lines().collect();
+    let mut subject_indexes: Vec<usize> = Vec::new();
+    for (idx, line) in lines.iter().enumerate() {
+        if looks_like_commit_subject(line) {
+            subject_indexes.push(idx);
+        }
+    }
+    let subject_idx = *subject_indexes.last()?;
+
+    // Nothing to strip if the message already starts at (or is only blank lines
+    // before) the subject.
+    let leading_nonempty = lines[..subject_idx]
+        .iter()
+        .any(|line| !line.trim().is_empty());
+    if !leading_nonempty {
+        return None;
+    }
+
+    Some(lines[subject_idx..].join("\n").trim().to_string())
 }
 
 
@@ -347,6 +460,42 @@ mod generate_commit_message_tests {
         let raw = "chore: tidy\n\n\n\n- one\n\n\n- two\n";
         let message = sanitize_generated_commit_message(raw);
         assert_eq!(message, "chore: tidy\n\n- one\n\n- two");
+    }
+
+    #[test]
+    fn strips_thinking_preamble_before_subject() {
+        let raw = "\
+Now let me look at the remaining diff sections that were truncated:\
+I now have a comprehensive view of the entire diff. Let me summarize the changes and produce the commit message.\n\
+\n\
+refactor: unified steel-blue accent across all themes with token-driven CSS\n\
+\n\
+- Replaces the previously split warm-teal accent pair with a single steel-blue family.\n\
+- Migrates hardcoded color literals to semantic CSS custom properties.\n";
+        let message = sanitize_generated_commit_message(raw);
+        assert_eq!(
+            message,
+            "refactor: unified steel-blue accent across all themes with token-driven CSS\n\n\
+- Replaces the previously split warm-teal accent pair with a single steel-blue family.\n\
+- Migrates hardcoded color literals to semantic CSS custom properties."
+        );
+    }
+
+    #[test]
+    fn strips_preamble_and_keeps_scoped_subject() {
+        let raw = "Looking at the staged diff now.\n\nfeat(ui): polish commit dialog\n\n- widen textarea\n";
+        let message = sanitize_generated_commit_message(raw);
+        assert_eq!(message, "feat(ui): polish commit dialog\n\n- widen textarea");
+    }
+
+    #[test]
+    fn prefers_last_fenced_commit_block() {
+        let raw = "\
+drafting…\n\
+```\nnot the message\n```\n\
+```\nfix: final draft\n\n- keep this one\n```\n";
+        let message = sanitize_generated_commit_message(raw);
+        assert_eq!(message, "fix: final draft\n\n- keep this one");
     }
 }
 
