@@ -1033,6 +1033,22 @@ body.is-resizing-left-sidebar {
   color: #c62828;
 }
 
+:root[data-theme="light"] .agent-plan-dock .agent-plan-env-usage-metrics {
+  color: #3f454d;
+}
+
+:root[data-theme="light"] .agent-plan-dock .agent-plan-env-usage-staleness {
+  color: #9aa0a6;
+}
+
+:root[data-theme="light"] .agent-plan-dock .agent-plan-env-usage-breakdown {
+  color: #767b80;
+}
+
+:root[data-theme="light"] .agent-plan-dock .agent-plan-env-usage-bar {
+  background: rgba(32, 33, 36, 0.10);
+}
+
 :root[data-theme="light"] .agent-plan-dock .agent-plan-toggle {
   border-top-color: #ececea;
   color: #8a8f95;
