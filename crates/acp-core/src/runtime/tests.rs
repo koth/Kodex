@@ -637,14 +637,20 @@ fn codex_acp_commands_prefer_apply_patch_edits() {
 }
 
 #[test]
-fn claude_acp_commands_keep_default_edit_policy() {
+fn claude_acp_commands_prefer_apply_patch_edits() {
+    // Claude/GLM/etc. binaries previously opted out of apply_patch guidance.
+    // The per-write redirect now applies uniformly; lockfiles, binaries, and
+    // tooling pipelines stay excluded by the redirect logic itself.
     for command in [
         r#"C:\Users\yvonchen\.kodex\bin\claude-agent-acp.exe"#,
         r#"C:\Users\yvonchen\.kodex\bin\claude-acp.exe"#,
+        r#"C:\Users\yvonchen\.kodex\bin\claude-ubuntu.exe"#,
+        r#"C:\Users\yvonchen\.kodex\bin\ghe-codex.exe"#,
+        r#"C:\Users\yvonchen\.kodex\bin\glm-agent.exe"#,
     ] {
         assert_eq!(
             agent_edit_policy_for_command(command),
-            AgentEditPolicy::None,
+            AgentEditPolicy::PreferApplyPatch,
             "{command}",
         );
     }
@@ -652,7 +658,8 @@ fn claude_acp_commands_keep_default_edit_policy() {
 
 #[test]
 fn most_agents_default_to_prefer_apply_patch() {
-    // Claude binaries opt out; everything else defaults to PreferApplyPatch.
+    // All agents default to PreferApplyPatch; lockfiles/binaries/tooling are
+    // excluded by the per-write redirect logic, not by a per-agent opt-out.
     for command in ["codebuddy.exe --acp", "claude", "codex"] {
         assert_eq!(
             agent_edit_policy_for_command(command),

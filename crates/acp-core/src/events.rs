@@ -17,25 +17,14 @@ impl Default for AgentEditPolicy {
     }
 }
 
-pub fn agent_edit_policy_for_command(agent_command: &str) -> AgentEditPolicy {
-    let normalized = agent_command.to_ascii_lowercase();
-    let basename = normalized
-        .rsplit(['/', '\\'])
-        .next()
-        .unwrap_or(&normalized)
-        .trim_matches(['"', '\'', '`']);
-
-    // Opt out for agents that frequently produce lockfiles / generated
-    // artifacts through tooling pipelines — these are expected to write
-    // files directly without going through a patch editor.
-    if basename.starts_with("claude-agent-acp")
-        || basename.starts_with("claude-acp")
-        || basename.starts_with("claude-ubuntu")
-        || basename.starts_with("ghe-codex")
-        || basename.starts_with("glm")
-    {
-        return AgentEditPolicy::None;
-    }
+pub fn agent_edit_policy_for_command(_agent_command: &str) -> AgentEditPolicy {
+    // Uniform per-write apply_patch guidance. The redirect logic
+    // (`shell_command_prefers_apply_patch_for_writes` for shell/terminal,
+    // `path_prefers_apply_patch` for fs_write) already excludes lockfiles,
+    // binaries, media, and tooling pipelines (cargo/npm/...), so a per-agent
+    // opt-out was redundant and too coarse — it let scripted source-file
+    // writes (e.g. `python3 - <<'PY' … Path('…').write_text(…)`) reach a plain
+    // approval prompt instead of being redirected to apply_patch.
     AgentEditPolicy::PreferApplyPatch
 }
 

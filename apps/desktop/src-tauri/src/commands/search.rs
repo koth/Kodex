@@ -1,7 +1,7 @@
 use crate::state::AppState;
 use std::collections::HashMap;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use tauri::State;
 use workspace_model::{
@@ -39,7 +39,15 @@ pub fn fs_search(state: State<'_, AppState>, query: String) -> Result<SearchResu
     let workspace_root = state.with_app(|app| Ok(app.ui.workspace.root.clone()))?;
     let file_suggestions = collect_file_suggestions(Path::new(&workspace_root), &query);
 
-    let mut cmd = Command::new("rg");
+    let Some(rg_path) = resolve_rg_binary() else {
+        return Ok(empty_search_result(
+            &query,
+            file_suggestions,
+            Some(ripgrep_missing_notice()),
+        ));
+    };
+
+    let mut cmd = Command::new(&rg_path);
     cmd.current_dir(&workspace_root)
         .arg("--json")
         .arg("--no-messages")
@@ -214,6 +222,25 @@ fn ripgrep_missing_notice() -> SearchNotice {
         url: Some(RIPGREP_INSTALL_URL.to_string()),
         url_label: Some(RIPGREP_INSTALL_URL.to_string()),
     }
+}
+
+/// Resolve `rg` for GUI-launched apps that do not inherit the interactive shell PATH.
+fn resolve_rg_binary() -> Option<PathBuf> {
+    const NAMES: &[&str] = if cfg!(windows) {
+        &["rg.exe", "rg.cmd", "rg.bat", "rg"]
+    } else {
+        &["rg"]
+    };
+
+    for dir in app_core::settings::search_paths() {
+        for name in NAMES {
+            let candidate = dir.join(name);
+            if candidate.is_file() {
+                return Some(candidate);
+            }
+        }
+    }
+    None
 }
 
 fn collect_file_suggestions(root: &Path, query: &str) -> Vec<SearchFileSuggestion> {
@@ -438,6 +465,37 @@ mod tests {
         assert_eq!(result.file_suggestions.len(), 1);
         assert_eq!(result.files[0].path, "src/main.rs");
         assert!(result.notice.is_some());
+    }
+
+    #[test]
+    fn resolve_rg_binary_finds_common_install_locations() {
+        // GUI apps often miss interactive PATH entries such as Homebrew.
+        // If rg is installed in a known location, resolution must still succeed
+        // even when PATH is empty.
+        let previous = std::env::var_os("PATH");
+        // SAFETY: test-only env mutation on a single-threaded unit test path.
+        unsafe {
+            std::env::set_var("PATH", "");
+        }
+        let resolved = resolve_rg_binary();
+        match previous {
+            Some(value) => unsafe {
+                std::env::set_var("PATH", value);
+            },
+            None => unsafe {
+                std::env::remove_var("PATH");
+            },
+        }
+
+        let known_locations = [
+            PathBuf::from("/opt/homebrew/bin/rg"),
+            PathBuf::from("/usr/local/bin/rg"),
+            PathBuf::from("/usr/bin/rg"),
+        ];
+        if known_locations.iter().any(|path| path.is_file()) {
+            let path = resolved.expect("rg should resolve via augmented search paths");
+            assert!(path.is_file(), "resolved rg path should exist: {}", path.display());
+        }
     }
 
     fn temp_root(label: &str) -> std::path::PathBuf {

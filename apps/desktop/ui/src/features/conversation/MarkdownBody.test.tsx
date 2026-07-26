@@ -237,7 +237,7 @@ describe("MarkdownBody", () => {
     const root = "D:\\work\\kodex";
     render(
       <MarkdownBody
-        content={"2. `app-core / state.rs`：创建会话流程允许不绑定 workspace。"}
+        content={"2. `app-core / src / state.rs`：创建会话流程允许不绑定 workspace。"}
         workspaceRoot={root}
         onFilePathClick={onFilePathClick}
         candidatePaths={["crates/app-core/src/state.rs"]}
@@ -245,11 +245,41 @@ describe("MarkdownBody", () => {
     );
 
     await waitFor(() =>
-      expect(screen.getByText("app-core / state.rs")).toHaveClass("md-file-path"),
+      expect(screen.getByText("app-core / src / state.rs")).toHaveClass("md-file-path"),
     );
-    fireEvent.click(screen.getByText("app-core / state.rs"));
+    fireEvent.click(screen.getByText("app-core / src / state.rs"));
     expect(onFilePathClick).toHaveBeenCalledWith(
       "crates/app-core/src/state.rs",
+      undefined,
+    );
+  });
+
+  it("does not resolve a relative path to a deeper sibling that shares its segments", async () => {
+    // Regression: `runtime/tests.rs` used to link to
+    // `.../runtime/permissions/tests.rs` because the matcher only anchored on
+    // the trailing file name and treated the fragment as a loose subsequence.
+    // The whole fragment must now line up contiguously, so the contiguous
+    // `.../runtime/tests.rs` wins and the deeper sibling never matches.
+    const onFilePathClick = vi.fn();
+    const root = "D:\\work\\kodex";
+    render(
+      <MarkdownBody
+        content={"改在 `runtime/tests.rs` 里。"}
+        workspaceRoot={root}
+        onFilePathClick={onFilePathClick}
+        candidatePaths={[
+          "crates/acp-core/src/runtime/permissions/tests.rs",
+          "crates/acp-core/src/runtime/tests.rs",
+        ]}
+      />,
+    );
+
+    await waitFor(() =>
+      expect(screen.getByText("runtime/tests.rs")).toHaveClass("md-file-path"),
+    );
+    fireEvent.click(screen.getByText("runtime/tests.rs"));
+    expect(onFilePathClick).toHaveBeenCalledWith(
+      "crates/acp-core/src/runtime/tests.rs",
       undefined,
     );
   });
@@ -463,16 +493,33 @@ describe("resolveClickableFilePath", () => {
 });
 
 describe("pathMatchesFragment", () => {
-  it("matches fragments as an ordered segment subsequence", () => {
-    expect(pathMatchesFragment("crates/app-core/src/state.rs", "app-core/state.rs")).toBe(true);
+  it("matches fragments that are a contiguous trailing run of the candidate", () => {
+    // Leading directories may be dropped (abbreviated relative paths).
     expect(pathMatchesFragment("apps/desktop/src-tauri/src/commands/fs.rs", "commands/fs.rs")).toBe(true);
+    expect(pathMatchesFragment("crates/app-core/src/state.rs", "app-core/src/state.rs")).toBe(true);
+    expect(pathMatchesFragment("crates/app-core/src/state.rs", "state.rs")).toBe(true);
     expect(pathMatchesFragment("apps/desktop/ui/src/features/composer/Composer.tsx", "Composer.tsx")).toBe(true);
-    expect(pathMatchesFragment("crates/app-core/src/state.rs", "app-core/state.rs:12")).toBe(true);
+    expect(pathMatchesFragment("apps/desktop/src-tauri/src/commands/fs.rs", "commands/fs.rs:12")).toBe(true);
+  });
+
+  it("rejects fragments that skip intermediate segments", () => {
+    // `app-core/state.rs` is not a contiguous suffix of
+    // `crates/app-core/src/state.rs` — `src/` sits between `app-core` and
+    // `state.rs`, so it denotes a different file.
+    expect(pathMatchesFragment("crates/app-core/src/state.rs", "app-core/state.rs")).toBe(false);
+    expect(pathMatchesFragment("crates/app-core/src/state.rs", "app-core/state.rs:12")).toBe(false);
   });
 
   it("rejects out-of-order or foreign fragments", () => {
     expect(pathMatchesFragment("crates/app-core/src/state.rs", "state.rs/app-core")).toBe(false);
     expect(pathMatchesFragment("crates/app-core/src/state.rs", "other/state.rs")).toBe(false);
     expect(pathMatchesFragment("crates/app-core/src/state.rs", "app-core/lib.rs")).toBe(false);
+  });
+
+  it("does not match a deeper sibling that merely shares the fragment's segments", () => {
+    // Regression for `runtime/tests.rs` linking to
+    // `.../runtime/permissions/tests.rs`.
+    expect(pathMatchesFragment("crates/acp-core/src/runtime/permissions/tests.rs", "runtime/tests.rs")).toBe(false);
+    expect(pathMatchesFragment("crates/acp-core/src/runtime/tests.rs", "runtime/tests.rs")).toBe(true);
   });
 });

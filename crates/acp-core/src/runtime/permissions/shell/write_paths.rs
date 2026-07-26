@@ -600,7 +600,7 @@ fn collect_python_open_write_paths(command: &str, paths: &mut Vec<String>) {
     }
 }
 
-fn python_open_uses_write_mode(command: &str) -> bool {
+pub(super) fn python_open_uses_write_mode(command: &str) -> bool {
     let mut offset = 0;
     while let Some(index) = find_next_python_open_call(command, offset) {
         if let Some((_mode, _end)) = parse_python_open_write_mode_at(command, index) {
@@ -708,8 +708,11 @@ fn python_file_mode_can_write(mode: &str) -> bool {
 
 fn python_pathlib_assignments(command: &str) -> Vec<(String, String)> {
     let mut assignments = Vec::new();
-    for line in command.lines() {
-        let line = line.trim_start();
+    let lines: Vec<&str> = command.lines().collect();
+    let mut index = 0;
+    while index < lines.len() {
+        let line = lines[index].trim_start();
+        index += 1;
         if line.starts_with('#') {
             continue;
         }
@@ -721,8 +724,28 @@ fn python_pathlib_assignments(command: &str) -> Vec<(String, String)> {
             continue;
         }
         let right = line[eq_index + 1..].trim_start();
-        if let Some((path, _)) = parse_python_path_call_at(right, 0) {
-            assignments.push((name.to_string(), path));
+        // Support both `path = Path("x")` and wrapped forms:
+        //   path =
+        //   Path("x")
+        //   path = (
+        //     Path("x")
+        //   )
+        let mut candidate = right.to_string();
+        if candidate.is_empty() || candidate == "(" {
+            while index < lines.len() {
+                let next = lines[index].trim();
+                index += 1;
+                if next.is_empty() || next.starts_with('#') {
+                    continue;
+                }
+                candidate = next.trim_start_matches('(').trim().to_string();
+                break;
+            }
+        }
+        if let Some(path_idx) = find_next_python_path_call(&candidate, 0) {
+            if let Some((path, _)) = parse_python_path_call_at(&candidate, path_idx) {
+                assignments.push((name.to_string(), path));
+            }
         }
     }
     assignments

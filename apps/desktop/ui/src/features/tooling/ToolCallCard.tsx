@@ -9,6 +9,7 @@ import {
   classifyTool,
   commandHeaderTitle,
   diffPreviewsFromApplyPatchCommand,
+  displayPath,
   extractCommandDetail,
   extractHeaderTitle,
   filterCompletedCommandEditPaths,
@@ -109,32 +110,56 @@ function ToolCallCardImpl({
       : presentation.presentationKind === "command"
       ? classifyCommandPresentation(presentation.command)
       : classifyTool(tool);
-  const bullet = statusBullet(tool.status);
-  const verb = toolVerb(tool.status, category);
-  const headerTitle =
-    category === "editing"
-      ? extractHeaderTitle(tool, trackedDiffPaths)
-      : presentation.presentationKind === "command"
-      ? commandHeaderTitle(presentation.command, category, tool)
-      : extractHeaderTitle(tool, trackedDiffPaths);
-  const cmdDetail = extractCommandDetail(tool, trackedDiffPaths);
+const bullet = statusBullet(tool.status);
   const outputLines = getOutputLines(tool);
   const detailLines = getDetailLines(tool);
   const logEntries = getVisibleLogEntries(tool);
   const errorLine =
     tool.error && !isVagueError(tool.error) ? tool.error : null;
   const diffStats = getDiffStats(diffPreviews);
+  // Completed "edit" tools with no reviewable patch should not claim 已编辑.
+  // Keep 编辑中 while running; only the finished verb falls back to 已运行.
+  const hasReviewableDiff =
+    diffPreviews.length > 0 && (diffStats.added > 0 || diffStats.removed > 0);
+  const showAsExecutedWithoutDiff =
+    category === "editing" &&
+    !hasReviewableDiff &&
+    (tool.status === "Succeeded" ||
+      tool.status === "Failed" ||
+      tool.status === "Interrupted");
+  const verbCategory: ToolCategory = showAsExecutedWithoutDiff
+    ? "executing"
+    : category;
+  const verb = toolVerb(tool.status, verbCategory);
+  // When we demote a finished edit to "已运行", also leave the edit-only
+  // expand path so the shell/run panel can show the actual command.
+  const effectiveCategory: ToolCategory = showAsExecutedWithoutDiff
+    ? "executing"
+    : category;
+  const cmdDetail = extractCommandDetail(
+    tool,
+    effectiveCategory === "editing" ? trackedDiffPaths : [],
+  );
+  const headerTitle =
+    effectiveCategory === "editing"
+      ? extractHeaderTitle(tool, trackedDiffPaths)
+      : showAsExecutedWithoutDiff
+      ? executedEditHeaderTitle(tool, cmdDetail, trackedDiffPaths) ??
+        extractHeaderTitle(tool, trackedDiffPaths)
+      : presentation.presentationKind === "command"
+      ? commandHeaderTitle(presentation.command, effectiveCategory, tool)
+      : extractHeaderTitle(tool, trackedDiffPaths);
 
   // raw_output as expandable content (for non-terminal tools like Read, Search, etc.)
   const rawOutputLines = getRawOutputLines(tool);
   const explorationResult =
-    presentation.presentationKind !== "command" && category === "exploring"
+    presentation.presentationKind !== "command" && effectiveCategory === "exploring"
       ? getExplorationResult(tool, cmdDetail, detailLines.lines, outputLines.lines, rawOutputLines.lines)
       : null;
   const shellPresentation =
-    presentation.presentationKind === "command" && category !== "editing"
+    presentation.presentationKind === "command" && effectiveCategory !== "editing"
       ? presentation
-      : category === "exploring"
+      : effectiveCategory === "exploring"
         ? deriveExplorationShellPresentation(
             tool,
             presentation,
@@ -146,7 +171,19 @@ function ToolCallCardImpl({
             outputLines.lines,
             rawOutputLines.lines,
           )
-        : null;
+        : showAsExecutedWithoutDiff
+          ? deriveExecutedEditShellPresentation(
+              tool,
+              presentation,
+              cmdDetail,
+              trackedDiffPaths,
+              errorLine,
+              logEntries.entries,
+              detailLines.lines,
+              outputLines.lines,
+              rawOutputLines.lines,
+            )
+          : null;
   const needsPermission =
     tool.status === "Running" &&
     tool.permission_options.length > 0 &&
@@ -169,7 +206,7 @@ function ToolCallCardImpl({
 
 // Editing cards with a real diff should expand to the patch only.
   // Extra path/output/log noise makes the review view hard to scan.
-  const showEditingDiffOnly = category === "editing" && diffPreviews.length > 0;
+  const showEditingDiffOnly = effectiveCategory === "editing" && hasReviewableDiff;
 
   // Does this card have expandable content?
   const hasDetail = showEditingDiffOnly
@@ -199,7 +236,7 @@ function ToolCallCardImpl({
           <span className={`tc-bullet ${bullet.className}`}>{bullet.char}</span>
           <span className="tc-verb">{verb}</span>
           <span className="tc-cmd">{headerTitle}</span>
-          {category === "editing" && (diffStats.added > 0 || diffStats.removed > 0) && (
+          {effectiveCategory === "editing" && hasReviewableDiff && (
             <span className="tc-diff-stats" aria-label={`${diffStats.added} 处添加，${diffStats.removed} 处删除`}>
               <span className="tc-diff-added">+{diffStats.added}</span>
               <span className="tc-diff-removed">-{diffStats.removed}</span>
@@ -269,7 +306,7 @@ function ToolCallCardImpl({
 
               {/* Command detail (actual command or file path) */}
               {!shellPresentation &&
-                (presentation.presentationKind !== "command" || category === "editing") &&
+                (presentation.presentationKind !== "command" || effectiveCategory === "editing") &&
                 cmdDetail && (
                 <div className="tc-output-block">
                   <div className="tc-output-line">
@@ -567,6 +604,145 @@ function deriveExplorationShellPresentation(
     command,
     primaryOutput: outputParts.length > 0 ? outputParts.join("\n\n") : presentation.primaryOutput,
   };
+}
+
+function deriveExecutedEditShellPresentation(
+  tool: ToolInvocation,
+  presentation: ToolPresentation,
+  cmdDetail: string | null,
+  trackedDiffPaths: string[],
+  errorLine: string | null,
+  logEntries: Array<{ title: string; body: string }>,
+  detailLines: string[],
+  outputLines: string[],
+  rawOutputLines: string[],
+): ToolPresentation {
+  const command =
+    presentation.command ??
+    executedEditInvocationSummary(tool, cmdDetail, trackedDiffPaths);
+
+  const logLines = logEntries
+    .map((entry) => {
+      const title = entry.title.trim();
+      const body = entry.body.trim();
+      if (!title && !body) return null;
+      if (!title) return body;
+      if (!body) return title;
+      return `${title} ${body}`;
+    })
+    .filter((line): line is string => !!line);
+
+  const outputParts = [
+    uniqueStrings([
+      ...trackedDiffPaths,
+      ...detailLines,
+      ...logLines,
+      ...outputLines,
+      ...rawOutputLines,
+    ]).join("\n"),
+    errorLine,
+  ].filter((part): part is string => !!part && part.trim().length > 0);
+
+  return {
+    ...presentation,
+    presentationKind: "command",
+    toolLabel: executedEditToolLabel(tool, presentation),
+    command,
+    primaryOutput:
+      outputParts.length > 0 ? outputParts.join("\n\n") : presentation.primaryOutput,
+  };
+}
+
+function executedEditHeaderTitle(
+  tool: ToolInvocation,
+  cmdDetail: string | null,
+  trackedDiffPaths: string[],
+): string | null {
+  // Keep the collapsed header path-focused; the expand panel shows the
+  // actual invocation (Edit/Write/command) so the card is less mysterious.
+  if (trackedDiffPaths.length > 0) {
+    return displayPath(trackedDiffPaths[trackedDiffPaths.length - 1]);
+  }
+  if (cmdDetail && looksLikePathOnlyTitle(cmdDetail)) {
+    return displayPath(cmdDetail);
+  }
+  if (
+    tool.summary?.trim() &&
+    !isGenericToolName(tool.summary) &&
+    looksLikePathOnlyTitle(tool.summary)
+  ) {
+    return displayPath(tool.summary.trim());
+  }
+  return extractHeaderTitle(tool, trackedDiffPaths);
+}
+
+function executedEditInvocationSummary(
+  tool: ToolInvocation,
+  cmdDetail: string | null,
+  trackedDiffPaths: string[],
+): string | null {
+  if (cmdDetail && !looksLikePathOnlyTitle(cmdDetail)) {
+    return cmdDetail;
+  }
+
+  const path =
+    trackedDiffPaths[trackedDiffPaths.length - 1] ??
+    (cmdDetail && looksLikePathOnlyTitle(cmdDetail) ? cmdDetail : null) ??
+    extractHeaderTitle(tool, trackedDiffPaths);
+
+  const toolName = tool.name?.trim();
+  if (toolName && !isGenericToolName(toolName)) {
+    return path ? `${toolName} ${path}` : toolName;
+  }
+
+  const kind = tool.kind?.trim();
+  if (kind && !isGenericToolName(kind)) {
+    return path ? `${kind} ${path}` : kind;
+  }
+
+  return path;
+}
+
+function executedEditToolLabel(
+  tool: ToolInvocation,
+  presentation: ToolPresentation,
+): string {
+  const toolName = tool.name?.trim();
+  if (toolName && !isGenericToolName(toolName)) return toolName;
+  const kind = tool.kind?.trim();
+  if (kind && !isGenericToolName(kind)) return kind;
+  if (presentation.toolLabel && !isGenericToolName(presentation.toolLabel)) {
+    return presentation.toolLabel;
+  }
+  return "Tool";
+}
+
+function isGenericToolName(value: string): boolean {
+  const normalized = value.trim().toLowerCase();
+  return (
+    !normalized ||
+    normalized === "{" ||
+    normalized === "tool" ||
+    normalized === "execute" ||
+    normalized === "command" ||
+    normalized === "generic"
+  );
+}
+
+function looksLikePathOnlyTitle(value: string): boolean {
+  const trimmed = value.trim();
+  if (!trimmed) return false;
+  if (/\s/.test(trimmed) && !trimmed.includes("/") && !trimmed.includes("\\")) {
+    return false;
+  }
+  return (
+    trimmed.startsWith("/") ||
+    trimmed.startsWith("./") ||
+    trimmed.startsWith("../") ||
+    /^[A-Za-z]:[\\/]/.test(trimmed) ||
+    trimmed.includes("/") ||
+    trimmed.includes("\\")
+  );
 }
 
 export const ToolCallCard = memo(ToolCallCardImpl, areToolCardPropsEqual);

@@ -3,12 +3,12 @@ import type { SessionSummary } from "../../types";
 
 interface Props {
   session: SessionSummary;
-  planToggle?: ReactNode;
+  actions?: ReactNode;
 }
 
 export function ThreadHeader({
   session,
-  planToggle,
+  actions,
 }: Props) {
   return (
     <header className="thread-header">
@@ -17,7 +17,7 @@ export function ThreadHeader({
           {session.title}
         </h1>
       </div>
-      {planToggle && <div className="thread-header-actions">{planToggle}</div>}
+      {actions && <div className="thread-header-actions">{actions}</div>}
     </header>
   );
 }

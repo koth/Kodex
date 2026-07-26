@@ -12,6 +12,10 @@ vi.mock("../../lib/tauri", async () => {
   };
 });
 
+vi.mock("../filetree/file-icons", () => ({
+  getFileIcon: () => "icon.svg",
+}));
+
 function renderResults(result: SearchResult, onFileOpen = vi.fn()) {
   const onClose = vi.fn();
   render(
@@ -21,6 +25,7 @@ function renderResults(result: SearchResult, onFileOpen = vi.fn()) {
       error={null}
       onFileOpen={onFileOpen}
       onClose={onClose}
+      placement="inline"
     />,
   );
   return { onClose, onFileOpen };
@@ -52,8 +57,8 @@ describe("SearchResults", () => {
       onFileOpen,
     );
 
-    const suggestionTitle = screen.getByText("文件名匹配");
-    const contentHeader = screen.getByText("在 1 个文件中找到 1 个匹配");
+    const suggestionTitle = screen.getByText("文件");
+    const contentHeader = screen.getByText("内容匹配");
     expect(
       suggestionTitle.compareDocumentPosition(contentHeader) & Node.DOCUMENT_POSITION_FOLLOWING,
     ).toBeTruthy();
@@ -62,6 +67,22 @@ describe("SearchResults", () => {
 
     expect(onFileOpen).toHaveBeenCalledWith("src/features/search/SearchResults.tsx");
     expect(onClose).toHaveBeenCalledOnce();
+  });
+
+  it("highlights the query text inside file names", () => {
+    renderResults({
+      query: "Search",
+      file_suggestions: [
+        { path: "src/features/search/SearchResults.tsx", name: "SearchResults.tsx" },
+      ],
+      files: [],
+      total_matches: 0,
+      truncated: false,
+    });
+
+    const marks = screen.getAllByText("Search");
+    expect(marks.length).toBeGreaterThan(0);
+    expect(marks.every((node) => node.tagName === "MARK")).toBe(true);
   });
 
   it("opens notice urls externally", () => {

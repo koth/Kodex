@@ -185,15 +185,18 @@ fn request_should_retry_with_apply_patch(
         return false;
     }
 
+    // Shell-like filesystem writers should prefer apply_patch even when the
+    // agent labels the tool as Other/Bash instead of Execute.
+    if request_shell_write_should_retry_with_apply_patch(workspace_root, request) {
+        return true;
+    }
+
     match request.tool_call.fields.kind.unwrap_or(ToolKind::Other) {
         ToolKind::Edit | ToolKind::Delete | ToolKind::Move => {
             let paths = resolve_paths_against_workspace(workspace_root, permission_paths(request));
             !paths.is_empty()
                 && paths_are_inside_workspace(workspace_root, &paths)
                 && paths.iter().any(|path| path_prefers_apply_patch(path))
-        }
-        ToolKind::Execute => {
-            request_shell_write_should_retry_with_apply_patch(workspace_root, request)
         }
         _ => false,
     }
@@ -365,11 +368,11 @@ fn decide_build_permission(
     workspace_root: &str,
     request: &RequestPermissionRequest,
 ) -> PermissionDecision {
+    if request_has_direct_shell_file_mutation(request) {
+        return PermissionDecision::Ask;
+    }
     match request.tool_call.fields.kind.unwrap_or(ToolKind::Other) {
         ToolKind::SwitchMode => PermissionDecision::Ask,
-        ToolKind::Execute if request_has_direct_shell_file_mutation(request) => {
-            PermissionDecision::Ask
-        }
         ToolKind::Read | ToolKind::Search => {
             let paths = permission_paths(request);
             if paths_are_inside_workspace(workspace_root, &paths) {
@@ -394,6 +397,9 @@ fn decide_full_access_permission(
     workspace_root: &str,
     request: &RequestPermissionRequest,
 ) -> PermissionDecision {
+    if request_has_direct_shell_file_mutation(request) {
+        return PermissionDecision::Ask;
+    }
     match request.tool_call.fields.kind.unwrap_or(ToolKind::Other) {
         ToolKind::SwitchMode => PermissionDecision::Ask,
         ToolKind::Read | ToolKind::Search => {
@@ -403,9 +409,6 @@ fn decide_full_access_permission(
             } else {
                 PermissionDecision::Ask
             }
-        }
-        ToolKind::Execute if request_has_direct_shell_file_mutation(request) => {
-            PermissionDecision::Ask
         }
         ToolKind::Edit | ToolKind::Delete | ToolKind::Move => PermissionDecision::Ask,
         _ => select_permission_option(request, true),

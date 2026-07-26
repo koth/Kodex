@@ -900,6 +900,7 @@
 }
 
 .review-tree-name {
+  flex: 1;
   min-width: 0;
   overflow: hidden;
   color: inherit;
@@ -1224,6 +1225,50 @@
   display: flex;
   gap: 6px;
   flex-shrink: 0;
+}
+
+.review-row-action {
+  display: none;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  min-width: 36px;
+  height: 20px;
+  margin-left: 4px;
+  padding: 0 7px;
+  border: 1px solid color-mix(in srgb, var(--border-strong) 70%, transparent);
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--surface-bg) 78%, transparent);
+  color: var(--text-strong);
+  font-size: 10.5px;
+  font-weight: 650;
+  line-height: 1;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.review-diff-row:hover .review-row-action,
+.review-diff-row:focus-within .review-row-action,
+.review-untracked-row:hover .review-row-action,
+.review-untracked-row:focus-within .review-row-action,
+.review-row-action:focus-visible {
+  display: inline-flex;
+}
+
+.review-row-action:hover {
+  border-color: color-mix(in srgb, var(--accent) 42%, var(--border-strong));
+  background: color-mix(in srgb, var(--accent-soft) 72%, var(--surface-bg));
+  color: var(--text-strong);
+}
+
+.review-row-action:disabled {
+  opacity: 0.7;
+  cursor: progress;
+}
+
+.review-row-action .review-menu-spinner {
+  width: 11px;
+  height: 11px;
 }
 
 .review-diff-children {

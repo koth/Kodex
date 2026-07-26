@@ -1124,7 +1124,7 @@ describe("ReviewPanel scoped change sets", () => {
     fireEvent.click(screen.getByRole("button", { name: /Git/ }));
     await screen.findByText(/^未暂存/);
     expect(screen.queryByRole("button", { name: "提交已暂存变更 (1)" })).toBeNull();
-    expect(screen.queryByPlaceholderText("feat: 简要描述本次改动")).toBeNull();
+    expect(screen.queryByPlaceholderText(/feat: 概括本次改动的核心意图/)).toBeNull();
 
     rerender(
       <ReviewPanel
@@ -1145,8 +1145,8 @@ describe("ReviewPanel scoped change sets", () => {
 
     fireEvent.click(await screen.findByRole("button", { name: "提交已暂存变更 (1)" }));
     expect(await screen.findByRole("dialog", { name: "提交" })).toBeTruthy();
-    expect(screen.getByPlaceholderText("feat: 简要描述本次改动")).toBeTruthy();
-    expect(screen.getByRole("button", { name: "AI" })).toBeTruthy();
+    expect(screen.getByPlaceholderText(/feat: 概括本次改动的核心意图/)).toBeTruthy();
+    expect(screen.getByRole("button", { name: /AI 生成/ })).toBeTruthy();
   });
 
   it("opens a commit dialog from the Staged group header context menu", async () => {
@@ -1172,8 +1172,8 @@ describe("ReviewPanel scoped change sets", () => {
     fireEvent.click(await screen.findByRole("menuitem", { name: "提交 (1)" }));
 
     expect(await screen.findByRole("dialog", { name: "提交" })).toBeTruthy();
-    expect(screen.getByPlaceholderText("feat: 简要描述本次改动")).toBeTruthy();
-    expect(screen.getByRole("button", { name: "AI" })).toBeTruthy();
+    expect(screen.getByPlaceholderText(/feat: 概括本次改动的核心意图/)).toBeTruthy();
+    expect(screen.getByRole("button", { name: /AI 生成/ })).toBeTruthy();
   });
 
   it("sends files to context from right-side file tree context menus", async () => {

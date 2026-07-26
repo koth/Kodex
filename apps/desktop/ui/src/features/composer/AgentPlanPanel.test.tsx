@@ -458,10 +458,10 @@ describe("PermissionRequestPanel", () => {
     expect(screen.getByText("需要权限")).toBeTruthy();
     expect(screen.getAllByText(/find \/d\/work\/ArtAssets/).length).toBeGreaterThan(0);
 
-    fireEvent.click(screen.getByRole("button", { name: "Allow" }));
+    fireEvent.click(screen.getByRole("button", { name: "允许" }));
     expect(onPermissionSelect).toHaveBeenLastCalledWith("permission-bash", "allow");
 
-    fireEvent.click(screen.getByRole("button", { name: "Reject" }));
+    fireEvent.click(screen.getByRole("button", { name: "拒绝" }));
     expect(onPermissionSelect).toHaveBeenLastCalledWith("permission-bash", "reject");
   });
 

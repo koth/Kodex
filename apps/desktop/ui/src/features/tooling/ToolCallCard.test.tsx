@@ -496,7 +496,7 @@ describe("ToolCallCard tracker-confirmed diffs", () => {
     );
   });
 
-  it("classifies Codex PowerShell Set-Content command wrappers as edited paths", () => {
+it("classifies Codex PowerShell Set-Content command wrappers as edited paths", () => {
     const tool = makeTool({
       status: "Succeeded",
       kind: "execute",
@@ -514,7 +514,8 @@ describe("ToolCallCard tracker-confirmed diffs", () => {
       <ToolCallCard tool={tool} nested={false} onPermissionSelect={() => {}} />,
     );
 
-    expect(container.querySelector(".tc-verb")!.textContent).toBe("已编辑");
+    // No reviewable patch payload — finished verb falls back to 已运行.
+    expect(container.querySelector(".tc-verb")!.textContent).toBe("已运行");
     expect(container.querySelector(".tc-cmd")!.textContent).toBe("docs/windows-guide.md");
   });
 
@@ -549,7 +550,7 @@ describe("ToolCallCard tracker-confirmed diffs", () => {
     expect(container.querySelector(".tc-diff-preview")).toBeTruthy();
   });
 
-  it("classifies shell heredoc file writes as edits", () => {
+it("classifies shell heredoc file writes as edits", () => {
     const tool = makeTool({
       status: "Succeeded",
       kind: "execute",
@@ -564,7 +565,7 @@ describe("ToolCallCard tracker-confirmed diffs", () => {
       <ToolCallCard tool={tool} nested={false} onPermissionSelect={() => {}} />,
     );
 
-    expect(container.querySelector(".tc-verb")!.textContent).toBe("已编辑");
+    expect(container.querySelector(".tc-verb")!.textContent).toBe("已运行");
     expect(container.querySelector(".tc-cmd")!.textContent).toBe("AGENTS.md");
   });
 
@@ -587,11 +588,11 @@ describe("ToolCallCard tracker-confirmed diffs", () => {
       terminal_output: { exit_code: 0, output: "wrote app.js" },
     });
 
-    const { container } = render(
+const { container } = render(
       <ToolCallCard tool={tool} nested={false} onPermissionSelect={() => {}} />,
     );
 
-    expect(container.querySelector(".tc-verb")!.textContent).toBe("已编辑");
+    expect(container.querySelector(".tc-verb")!.textContent).toBe("已运行");
     expect(container.querySelector(".tc-cmd")!.textContent).toBe(
       "/Users/kothchen/code/hotnovel/web/app.js",
     );
@@ -619,11 +620,11 @@ describe("ToolCallCard tracker-confirmed diffs", () => {
       terminal_output: { exit_code: 0, output: "" },
     });
 
-    const { container } = render(
+const { container } = render(
       <ToolCallCard tool={tool} nested={false} onPermissionSelect={() => {}} />,
     );
 
-    expect(container.querySelector(".tc-verb")!.textContent).toBe("已编辑");
+    expect(container.querySelector(".tc-verb")!.textContent).toBe("已运行");
     expect(container.querySelector(".tc-cmd")!.textContent).toBe(
       "crates/app-core/src/application/repository.rs",
     );
@@ -667,11 +668,11 @@ it("classifies python heredoc read-modify-write with markup in triple-quoted rep
       terminal_output: { exit_code: 0, output: "" },
     });
 
-    const { container } = render(
+const { container } = render(
       <ToolCallCard tool={tool} nested={false} onPermissionSelect={() => {}} />,
     );
 
-    expect(container.querySelector(".tc-verb")!.textContent).toBe("已编辑");
+    expect(container.querySelector(".tc-verb")!.textContent).toBe("已运行");
     expect(container.querySelector(".tc-cmd")!.textContent).toBe(
       "apps/desktop/ui/src/features/session/SessionList.test.tsx",
     );
@@ -694,11 +695,11 @@ it("classifies python heredoc read-modify-write with markup in triple-quoted rep
       terminal_output: { exit_code: 0, output: "" },
     });
 
-    const { container } = render(
+const { container } = render(
       <ToolCallCard tool={tool} nested={false} onPermissionSelect={() => {}} />,
     );
 
-    expect(container.querySelector(".tc-verb")!.textContent).toBe("已编辑");
+    expect(container.querySelector(".tc-verb")!.textContent).toBe("已运行");
     expect(container.querySelector(".tc-cmd")!.textContent).toBe("src/main.rs");
     expect(container.querySelector(".tc-cmd")!.textContent).not.toContain("EOF");
   });
@@ -761,11 +762,11 @@ it("classifies python heredoc read-modify-write with markup in triple-quoted rep
       }),
     });
 
-    const { container } = render(
+const { container } = render(
       <ToolCallCard tool={tool} nested={false} onPermissionSelect={() => {}} />,
     );
 
-    expect(container.querySelector(".tc-verb")!.textContent).toBe("已编辑");
+    expect(container.querySelector(".tc-verb")!.textContent).toBe("已运行");
     expect(container.querySelector(".tc-cmd")!.textContent).toBe(
       "/Users/kothchen/code/hotnovel/probe2.mjs",
     );
@@ -790,11 +791,11 @@ it("classifies python heredoc read-modify-write with markup in triple-quoted rep
       }),
     });
 
-    const { container } = render(
+const { container } = render(
       <ToolCallCard tool={tool} nested={false} onPermissionSelect={() => {}} />,
     );
 
-    expect(container.querySelector(".tc-verb")!.textContent).toBe("已编辑");
+    expect(container.querySelector(".tc-verb")!.textContent).toBe("已运行");
     expect(container.querySelector(".tc-cmd")!.textContent).toBe(
       "/Users/kothchen/code/hotnovel/probe3.mjs",
     );
@@ -1208,7 +1209,7 @@ it("shows diff stats for tracker-confirmed changes", () => {
     expect(container.querySelector(".tc-diff-removed")?.textContent).toBe("-2");
   });
 
-  it("classifies CodeBuddy file replacement payloads as editing even when presented as a command", () => {
+it("classifies CodeBuddy file replacement payloads as editing even when presented as a command", () => {
     const tool = makeTool({
       status: "Succeeded",
       kind: "execute",
@@ -1224,16 +1225,17 @@ it("shows diff stats for tracker-confirmed changes", () => {
       <ToolCallCard tool={tool} nested={false} onPermissionSelect={() => {}} />,
     );
 
-    expect(container.querySelector(".tc-verb")!.textContent).toBe("已编辑");
+    // Path is still treated as an edit target, but finished verb needs a reviewable diff.
+    expect(container.querySelector(".tc-verb")!.textContent).toBe("已运行");
     expect(container.querySelector(".tc-cmd")!.textContent).toBe(
       "d:/work/InfiniteCanvasOL/.ci/scripts/deploy_remote_prd.py",
     );
 
     fireEvent.click(container.querySelector(".tc-header-line")!);
 
-    expect(container.querySelector(".tc-shell-panel")).toBeNull();
+    expect(container.querySelector(".tc-shell-panel")).toBeTruthy();
     expect(container.textContent).toContain(
-      "d:\\work\\InfiniteCanvasOL\\.ci\\scripts\\deploy_remote_prd.py",
+      "d:/work/InfiniteCanvasOL/.ci/scripts/deploy_remote_prd.py",
     );
     expect(container.textContent).not.toContain("def upload_tree_atomic");
   });
@@ -1252,14 +1254,14 @@ it("shows diff stats for tracker-confirmed changes", () => {
       <ToolCallCard tool={tool} nested={false} onPermissionSelect={() => {}} />,
     );
 
-    expect(container.querySelector(".tc-verb")!.textContent).toBe("已编辑");
+    expect(container.querySelector(".tc-verb")!.textContent).toBe("已运行");
     expect(container.querySelector(".tc-cmd")!.textContent).toBe(
       "d:/work/InfiniteCanvasOL/.ci/scripts/deploy_remote_prd.py",
     );
 
     fireEvent.click(container.querySelector(".tc-header-line")!);
 
-    expect(container.querySelector(".tc-shell-panel")).toBeNull();
+    expect(container.querySelector(".tc-shell-panel")).toBeTruthy();
     expect(container.textContent).not.toContain("def upload_tree_atomic");
   });
 
@@ -1387,7 +1389,7 @@ it("shows diff stats for tracker-confirmed changes", () => {
     );
   });
 
-  it("uses edit paths from tool logs when raw_input was truncated before file_path", () => {
+it("uses edit paths from tool logs when raw_input was truncated before file_path", () => {
     const tool = makeTool({
       status: "Succeeded",
       kind: "edit",
@@ -1406,7 +1408,7 @@ it("shows diff stats for tracker-confirmed changes", () => {
       <ToolCallCard tool={tool} nested={false} onPermissionSelect={() => {}} />,
     );
 
-    expect(container.querySelector(".tc-verb")!.textContent).toBe("已编辑");
+    expect(container.querySelector(".tc-verb")!.textContent).toBe("已运行");
     expect(container.querySelector(".tc-cmd")!.textContent).toBe(
       "openspec/changes/accelerate-pipeline-execution/specs/pipeline-execution/spec.md",
     );
@@ -1430,8 +1432,36 @@ it("shows diff stats for tracker-confirmed changes", () => {
       <ToolCallCard tool={tool} nested={false} onPermissionSelect={() => {}} />,
     );
 
-    expect(container.querySelector(".tc-verb")!.textContent).toBe("已编辑");
+    expect(container.querySelector(".tc-verb")!.textContent).toBe("已运行");
     expect(container.querySelector(".tc-cmd")!.textContent).toBe("C:/new/file.ts");
+  });
+
+  it("shows completed edit tools without reviewable diffs as 已运行", () => {
+    const tool = makeTool({
+      status: "Succeeded",
+      kind: "edit",
+      name: "Edit",
+      summary: "/Users/kothchen/code/Kodex/apps/desktop/ui/src/features/workbench/Workbench.css",
+      diff_paths: [
+        "/Users/kothchen/code/Kodex/apps/desktop/ui/src/features/workbench/Workbench.css",
+      ],
+    });
+    const { container } = render(
+      <ToolCallCard tool={tool} nested={false} onPermissionSelect={() => {}} />,
+    );
+
+    expect(container.querySelector(".tc-verb")!.textContent).toBe("已运行");
+    expect(container.querySelector(".tc-cmd")!.textContent).toBe(
+      "/Users/kothchen/code/Kodex/apps/desktop/ui/src/features/workbench/Workbench.css",
+    );
+    expect(container.querySelector(".tc-diff-added")).toBeNull();
+    expect(container.querySelector(".tc-diff-removed")).toBeNull();
+
+    fireEvent.click(container.querySelector(".tc-header-line")!);
+    expect(container.querySelector(".tc-shell-panel")).toBeTruthy();
+    expect(container.querySelector(".tc-shell-command")?.textContent).toContain(
+      "Edit /Users/kothchen/code/Kodex/apps/desktop/ui/src/features/workbench/Workbench.css",
+    );
   });
 
   it("hides raw JSON from primary command output when terminal output exists", () => {

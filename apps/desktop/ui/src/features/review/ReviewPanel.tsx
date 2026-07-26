@@ -56,6 +56,14 @@ type ReviewFileMenuAction = "track" | "stage" | "unstage";
 
 type ReviewGroupMenuAction = "stage-all" | "commit";
 
+type ReviewRowAction = {
+  label: string;
+  ariaLabel: string;
+  title?: string;
+  pendingPath?: string | null;
+  onClick: (path: string) => void | Promise<void>;
+};
+
 interface ReviewGroupContextMenuState {
   action: ReviewGroupMenuAction;
   x: number;
@@ -1040,6 +1048,13 @@ function GitChangesTree({
           onFileContextMenu={(path, x, y, isDir) =>
             handleFileContextMenu(path, x, y, false, "stage", !isDir)
           }
+          rowAction={{
+            label: "暂存",
+            ariaLabel: "暂存",
+            title: "暂存此文件",
+            pendingPath: pendingActionPath,
+            onClick: handleStageFile,
+          }}
         />
         <FileGroup
           title="已暂存"
@@ -1060,6 +1075,13 @@ function GitChangesTree({
           }
           onHeaderContextMenu={(x, y) => openGroupMenu("commit", x, y)}
           onFileContextMenu={(path, x, y) => handleFileContextMenu(path, x, y, false, "unstage")}
+          rowAction={{
+            label: "取消暂存",
+            ariaLabel: "取消暂存",
+            title: "取消暂存此文件",
+            pendingPath: pendingActionPath,
+            onClick: handleUnstageFile,
+          }}
         />
         <UntrackedTree
           files={grouped.Untracked}
@@ -1072,6 +1094,13 @@ function GitChangesTree({
           onFileContextMenu={(path, x, y, trackable, isDir) =>
             handleFileContextMenu(path, x, y, trackable, undefined, !isDir, isDir)
           }
+          rowAction={{
+            label: "跟踪",
+            ariaLabel: "跟踪",
+            title: "加入 Git 跟踪",
+            pendingPath: pendingActionPath,
+            onClick: handleStageFile,
+          }}
         />
       </div>
       {contextMenu && (
@@ -2122,6 +2151,7 @@ function FileGroup({
   onFileContextMenu,
   onHeaderContextMenu,
   headerAction,
+  rowAction,
   activePath,
   compact = false,
 }: {
@@ -2139,6 +2169,7 @@ function FileGroup({
     title?: string;
     onClick: () => void;
   };
+  rowAction?: ReviewRowAction;
   activePath?: string;
   compact?: boolean;
 }) {
@@ -2259,6 +2290,7 @@ function FileGroup({
               onToggleDir={handleToggleDir}
               onFileSelect={onFileSelect}
               onFileContextMenu={handleLocalFileContextMenu}
+              rowAction={rowAction}
               changeSetId={changeSetId}
               activePath={activePath}
               compact={compact}
@@ -2285,6 +2317,7 @@ function DiffTreeNode({
   onToggleDir,
   onFileSelect,
   onFileContextMenu,
+  rowAction,
   changeSetId,
   activePath,
   compact,
@@ -2295,6 +2328,7 @@ function DiffTreeNode({
   onToggleDir: (path: string) => void;
   onFileSelect: (path: string, changeSetId: string) => void;
   onFileContextMenu?: (path: string, x: number, y: number, isDir?: boolean) => void;
+  rowAction?: ReviewRowAction;
   changeSetId: string;
   activePath?: string;
   compact: boolean;
@@ -2322,6 +2356,26 @@ function DiffTreeNode({
           </span>
           <FolderTreeIcon className="review-tree-icon review-folder-icon" />
           <span className="review-diff-name">{node.name}</span>
+          {rowAction && (
+            <button
+              type="button"
+              className="review-row-action"
+              aria-label={`${rowAction.ariaLabel} ${node.name}`}
+              title={rowAction.title ?? rowAction.label}
+              disabled={rowAction.pendingPath === node.path}
+              onClick={(event) => {
+                event.preventDefault();
+                event.stopPropagation();
+                void rowAction.onClick(node.path);
+              }}
+            >
+              {rowAction.pendingPath === node.path ? (
+                <span className="review-menu-spinner" aria-hidden="true" />
+              ) : (
+                <span>{rowAction.label}</span>
+              )}
+            </button>
+          )}
         </div>
         {isExpanded && (
           <div className="review-diff-children">
@@ -2334,6 +2388,7 @@ function DiffTreeNode({
                 onToggleDir={onToggleDir}
                 onFileSelect={onFileSelect}
                 onFileContextMenu={onFileContextMenu}
+                rowAction={rowAction}
                 changeSetId={changeSetId}
                 activePath={activePath}
                 compact={compact}
@@ -2361,6 +2416,26 @@ function DiffTreeNode({
         <span className="review-tree-arrow" />
         <img className="review-tree-icon" src={getFileIcon(node.path)} alt="" />
         <span className="review-diff-name">{node.name}</span>
+        {rowAction && (
+          <button
+            type="button"
+            className="review-row-action"
+            aria-label={`${rowAction.ariaLabel} ${node.name}`}
+            title={rowAction.title ?? rowAction.label}
+            disabled={rowAction.pendingPath === node.path}
+            onClick={(event) => {
+              event.preventDefault();
+              event.stopPropagation();
+              void rowAction.onClick(node.path);
+            }}
+          >
+            {rowAction.pendingPath === node.path ? (
+              <span className="review-menu-spinner" aria-hidden="true" />
+            ) : (
+              <span>{rowAction.label}</span>
+            )}
+          </button>
+        )}
         <div className="review-diff-stats">
           <span className="review-stat-added">+{node.stats.added}</span>
           <span className="review-stat-removed">-{node.stats.removed}</span>
@@ -2377,6 +2452,7 @@ function UntrackedTree({
   onAddComposerReference,
   composerReferenceEnabled = false,
   onFileContextMenu,
+  rowAction,
   activePath,
   compact = false,
 }: {
@@ -2386,6 +2462,7 @@ function UntrackedTree({
   onAddComposerReference?: (path: string) => void;
   composerReferenceEnabled?: boolean;
   onFileContextMenu?: (path: string, x: number, y: number, trackable?: boolean, isDir?: boolean) => void;
+  rowAction?: ReviewRowAction;
   activePath?: string;
   compact?: boolean;
 }) {
@@ -2560,6 +2637,7 @@ function UntrackedTree({
               onAddComposerReference={onAddComposerReference}
               composerReferenceEnabled={composerReferenceEnabled}
               onFileContextMenu={handleLocalFileContextMenu}
+              rowAction={rowAction}
               activePath={activePath}
               compact={compact}
             />
@@ -2589,6 +2667,7 @@ function UntrackedTreeNode({
   onAddComposerReference,
   composerReferenceEnabled,
   onFileContextMenu,
+  rowAction,
   activePath,
   compact,
 }: {
@@ -2602,6 +2681,7 @@ function UntrackedTreeNode({
   onAddComposerReference?: (path: string) => void;
   composerReferenceEnabled: boolean;
   onFileContextMenu?: (path: string, x: number, y: number, trackable?: boolean, isDir?: boolean) => void;
+  rowAction?: ReviewRowAction;
   activePath?: string;
   compact: boolean;
 }) {
@@ -2652,6 +2732,26 @@ function UntrackedTreeNode({
           <img className="review-tree-icon" src={getFileIcon(node.path)} alt="" />
         )}
         <span className="review-tree-name">{node.name}</span>
+        {rowAction && (
+          <button
+            type="button"
+            className="review-row-action"
+            aria-label={`${rowAction.ariaLabel} ${node.name}`}
+            title={rowAction.title ?? rowAction.label}
+            disabled={rowAction.pendingPath === node.path}
+            onClick={(event) => {
+              event.preventDefault();
+              event.stopPropagation();
+              void rowAction.onClick(node.path);
+            }}
+          >
+            {rowAction.pendingPath === node.path ? (
+              <span className="review-menu-spinner" aria-hidden="true" />
+            ) : (
+              <span>{rowAction.label}</span>
+            )}
+          </button>
+        )}
       </div>
       {isDir && isExpanded && (
         <div className="review-tree-children">
@@ -2668,6 +2768,7 @@ function UntrackedTreeNode({
               onAddComposerReference={onAddComposerReference}
               composerReferenceEnabled={composerReferenceEnabled}
               onFileContextMenu={onFileContextMenu}
+              rowAction={rowAction}
               activePath={activePath}
               compact={compact}
             />

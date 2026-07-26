@@ -152,26 +152,72 @@
 }
 
 .permission-request {
+  position: relative;
   display: flex;
   flex-direction: column;
   width: 100%;
   max-height: min(72dvh, 760px);
   overflow: hidden;
-  border: 1px solid color-mix(in srgb, var(--border-focus) 42%, var(--border-strong));
-  border-radius: var(--radius-md);
+  isolation: isolate;
+  border: 1px solid color-mix(in srgb, var(--warning) 28%, var(--border-strong));
+  border-radius: 14px;
   background:
     linear-gradient(
       180deg,
-      color-mix(in srgb, var(--surface-muted-bg) 92%, var(--accent-soft)),
-      color-mix(in srgb, var(--surface-bg) 86%, var(--app-bg))
+      color-mix(in srgb, var(--warning-soft) 42%, var(--surface-bg)) 0%,
+      color-mix(in srgb, var(--surface-bg) 88%, var(--app-bg)) 48%,
+      color-mix(in srgb, var(--surface-muted-bg) 70%, var(--app-bg)) 100%
     );
   box-shadow:
-    var(--shadow-elevated),
-    inset 0 1px 0 color-mix(in srgb, var(--text-strong) 5%, transparent);
+    0 18px 40px rgba(0, 0, 0, 0.28),
+    0 0 0 1px color-mix(in srgb, var(--warning) 10%, transparent),
+    inset 0 1px 0 color-mix(in srgb, var(--text-strong) 7%, transparent);
+}
+
+.permission-request::before {
+  content: "";
+  position: absolute;
+  inset: 0 0 auto;
+  height: 1px;
+  background: linear-gradient(
+    90deg,
+    transparent 0%,
+    color-mix(in srgb, var(--warning) 55%, transparent) 22%,
+    color-mix(in srgb, var(--accent-hover) 42%, transparent) 58%,
+    transparent 100%
+  );
+  opacity: 0.9;
+  pointer-events: none;
 }
 
 .permission-request.is-plan-approval {
   max-height: min(64dvh, 720px);
+  border-color: color-mix(in srgb, var(--accent-hover) 28%, var(--border-strong));
+  background:
+    linear-gradient(
+      180deg,
+      color-mix(in srgb, var(--accent-soft) 48%, var(--surface-bg)) 0%,
+      color-mix(in srgb, var(--surface-bg) 90%, var(--app-bg)) 52%,
+      color-mix(in srgb, var(--surface-muted-bg) 72%, var(--app-bg)) 100%
+    );
+  box-shadow:
+    0 18px 40px rgba(0, 0, 0, 0.28),
+    0 0 0 1px color-mix(in srgb, var(--accent-hover) 12%, transparent),
+    inset 0 1px 0 color-mix(in srgb, var(--text-strong) 7%, transparent);
+}
+
+.permission-request.is-plan-approval::before {
+  background: linear-gradient(
+    90deg,
+    transparent 0%,
+    color-mix(in srgb, var(--accent-hover) 58%, transparent) 28%,
+    color-mix(in srgb, var(--accent) 36%, transparent) 64%,
+    transparent 100%
+  );
+}
+
+.permission-request.is-input {
+  border-color: color-mix(in srgb, var(--accent-hover) 24%, var(--border-strong));
 }
 
 .permission-request-header {
@@ -180,7 +226,46 @@
   align-items: flex-start;
   justify-content: space-between;
   gap: 14px;
-  padding: 11px 12px 8px;
+  padding: 14px 14px 10px;
+}
+
+.permission-request-headline {
+  display: flex;
+  min-width: 0;
+  align-items: flex-start;
+  gap: 10px;
+}
+
+.permission-request-icon {
+  display: inline-flex;
+  width: 30px;
+  height: 30px;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  margin-top: 1px;
+  border: 1px solid color-mix(in srgb, var(--warning) 34%, var(--border-strong));
+  border-radius: 10px;
+  background:
+    linear-gradient(
+      180deg,
+      color-mix(in srgb, var(--warning-soft) 70%, transparent),
+      color-mix(in srgb, var(--surface-bg) 55%, transparent)
+    );
+  color: var(--warning);
+  box-shadow: inset 0 1px 0 color-mix(in srgb, var(--text-strong) 8%, transparent);
+}
+
+.permission-request.is-plan-approval .permission-request-icon,
+.permission-request.is-input .permission-request-icon {
+  border-color: color-mix(in srgb, var(--accent-hover) 34%, var(--border-strong));
+  background:
+    linear-gradient(
+      180deg,
+      color-mix(in srgb, var(--accent-soft) 78%, transparent),
+      color-mix(in srgb, var(--surface-bg) 55%, transparent)
+    );
+  color: var(--accent-hover);
 }
 
 .permission-request-copy {
@@ -188,63 +273,142 @@
 }
 
 .permission-request-eyebrow {
-  color: var(--accent-hover);
-  font-size: var(--font-size-shell-label);
+  color: var(--warning);
+  font-size: 11px;
   font-weight: 700;
-  letter-spacing: var(--letter-spacing-shell);
+  letter-spacing: 0.04em;
+  line-height: 1.2;
   text-transform: uppercase;
+}
+
+.permission-request.is-plan-approval .permission-request-eyebrow,
+.permission-request.is-input .permission-request-eyebrow {
+  color: var(--accent-hover);
 }
 
 .permission-request-title {
   min-width: 0;
+  margin-top: 3px;
   overflow: hidden;
   color: var(--text-strong);
   font-family: var(--font-chat);
-  font-size: 13.5px;
-  font-weight: 650;
+  font-size: 14px;
+  font-weight: 700;
   line-height: 1.35;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.permission-request-count {
+.permission-request-subtitle {
+  margin-top: 3px;
+  color: var(--text-soft);
+  font-size: 12px;
+  font-weight: 550;
+  line-height: 1.35;
+}
+
+.permission-request-count,
+.permission-request-badge {
   flex-shrink: 0;
-  padding: 4px 8px;
+  padding: 5px 9px;
+  border: 1px solid color-mix(in srgb, var(--warning) 28%, var(--border-subtle));
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--warning-soft) 55%, transparent);
+  color: var(--warning);
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1;
+  white-space: nowrap;
+}
+
+.permission-request.is-plan-approval .permission-request-count,
+.permission-request.is-plan-approval .permission-request-badge,
+.permission-request.is-input .permission-request-count,
+.permission-request.is-input .permission-request-badge {
+  border-color: color-mix(in srgb, var(--accent-hover) 28%, var(--border-subtle));
+  background: color-mix(in srgb, var(--accent-soft) 62%, transparent);
+  color: var(--accent-hover);
+}
+
+.permission-request-body {
+  display: grid;
+  gap: 8px;
+  margin: 0 14px 10px;
+  min-height: 0;
+}
+
+.permission-request-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.permission-request-meta-item {
+  display: inline-flex;
+  max-width: 100%;
+  min-width: 0;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 8px;
   border: 1px solid var(--border-subtle);
   border-radius: 999px;
-  color: var(--accent-hover);
-  font-size: var(--font-size-shell-label);
+  background: color-mix(in srgb, var(--app-bg) 48%, transparent);
+}
+
+.permission-request-meta-label {
+  flex: 0 0 auto;
+  color: var(--text-soft);
+  font-size: 10px;
   font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.permission-request-meta-value {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 1.3;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .permission-request-detail {
-  margin: 0 12px 9px;
-  padding: 8px 9px;
-  max-height: min(46vh, 560px);
+  margin: 0;
+  padding: 11px 12px;
+  max-height: min(34vh, 320px);
   overflow: auto;
-  border: 1px solid var(--border-subtle);
-  border-radius: 9px;
-  background: color-mix(in srgb, var(--app-bg) 42%, transparent);
-  color: var(--text-muted);
+  border: 1px solid color-mix(in srgb, var(--border-strong) 70%, transparent);
+  border-radius: 12px;
+  background:
+    linear-gradient(
+      180deg,
+      color-mix(in srgb, var(--app-bg) 78%, transparent),
+      color-mix(in srgb, var(--app-bg) 58%, transparent)
+    );
+  color: color-mix(in srgb, var(--text-strong) 88%, var(--text-muted));
   font-family: var(--font-mono);
-  font-size: 11.5px;
-  line-height: 1.45;
+  font-size: 12px;
+  line-height: 1.55;
   overscroll-behavior: contain;
   overflow-wrap: anywhere;
   scrollbar-gutter: stable;
   white-space: pre-wrap;
+  box-shadow: inset 0 1px 0 color-mix(in srgb, var(--text-strong) 4%, transparent);
 }
 
 .permission-request-plan-list {
   display: flex;
   flex: 0 1 auto;
   flex-direction: column;
-  gap: 4px;
+  gap: 5px;
   max-height: min(24dvh, 260px);
   margin: 0;
   overflow: auto;
   overscroll-behavior: contain;
-  padding: 0 10px 8px;
+  padding: 0 14px 10px;
   scrollbar-gutter: stable;
   list-style: none;
 }
@@ -254,10 +418,11 @@
   grid-template-columns: 52px minmax(0, 1fr);
   align-items: center;
   gap: 9px;
-  min-height: 32px;
-  padding: 6px 8px;
+  min-height: 34px;
+  padding: 7px 9px;
   border: 1px solid transparent;
-  border-radius: 9px;
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--app-bg) 28%, transparent);
   color: var(--text-muted);
 }
 
@@ -284,18 +449,19 @@
   min-width: 0;
   overflow: hidden;
   font-size: 12.5px;
-  font-weight: 550;
+  font-weight: 600;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
 .permission-request-proposal {
+  display: flex;
+  flex-direction: column;
   max-height: min(28vh, 220px);
-  margin: 0 12px 9px;
-  padding: 9px 10px;
-  overflow: auto;
+  margin: 0 14px 10px;
+  overflow: hidden;
   border: 1px solid var(--border-subtle);
-  border-radius: 9px;
+  border-radius: 12px;
   background: color-mix(in srgb, var(--app-bg) 45%, transparent);
   color: var(--text-muted);
   font-size: 12.5px;
@@ -307,16 +473,33 @@
   max-height: min(36dvh, 420px);
 }
 
-.permission-request-proposal .md-heading:first-child {
+.permission-request-proposal-label {
+  padding: 10px 12px 0;
+  color: var(--text-soft);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+}
+
+.permission-request-proposal-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+  padding: 8px 12px 12px;
+  color: var(--text-muted);
+}
+
+.permission-request-proposal .md-heading:first-child,
+.permission-request-proposal-body .md-heading:first-child {
   margin-top: 0;
 }
 
 .permission-request-guidance {
   display: grid;
-  gap: 8px;
-  margin: 0 12px 10px;
+  gap: 7px;
+  margin: 0 14px 12px;
   color: var(--text-secondary);
-  font-size: 13px;
+  font-size: 12px;
   font-weight: 700;
 }
 
@@ -326,28 +509,34 @@
 }
 
 .permission-request-guidance textarea {
-  min-height: 76px;
+  min-height: 78px;
   resize: vertical;
-  border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-sm);
-  padding: 10px 12px;
+  border: 1px solid color-mix(in srgb, var(--border-strong) 72%, transparent);
+  border-radius: 12px;
+  padding: 11px 12px;
   color: var(--text-primary);
-  background: color-mix(in srgb, var(--app-bg) 70%, transparent);
+  background:
+    linear-gradient(
+      180deg,
+      color-mix(in srgb, var(--app-bg) 72%, transparent),
+      color-mix(in srgb, var(--app-bg) 58%, transparent)
+    );
   font: inherit;
   line-height: 1.45;
   outline: none;
+  transition: border-color var(--transition-fast), box-shadow var(--transition-fast);
 }
 
 .permission-request-guidance textarea:focus {
   border-color: color-mix(in srgb, var(--accent) 58%, transparent);
-  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 18%, transparent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 16%, transparent);
 }
 
 .permission-input-form {
   display: grid;
   gap: 10px;
   max-height: min(46vh, 520px);
-  margin: 0 12px 10px;
+  margin: 0 14px 12px;
   overflow: auto;
   scrollbar-gutter: stable;
 }
@@ -355,10 +544,10 @@
 .permission-input-question {
   min-width: 0;
   margin: 0;
-  padding: 10px;
-  border: 1px solid var(--border-subtle);
-  border-radius: 9px;
-  background: color-mix(in srgb, var(--app-bg) 40%, transparent);
+  padding: 12px;
+  border: 1px solid color-mix(in srgb, var(--border-strong) 68%, transparent);
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--app-bg) 42%, transparent);
 }
 
 .permission-input-question legend {
@@ -370,8 +559,10 @@
 
 .permission-input-header {
   color: var(--accent-hover);
-  font-size: var(--font-size-shell-label);
+  font-size: 11px;
   font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
 }
 
 .permission-input-prompt {
@@ -383,23 +574,51 @@
 
 .permission-input-options {
   display: grid;
-  gap: 7px;
-  margin-top: 10px;
+  gap: 8px;
+  margin-top: 11px;
 }
 
 .permission-input-option {
   display: grid;
   grid-template-columns: 16px minmax(0, 1fr);
   align-items: flex-start;
-  gap: 8px;
+  gap: 10px;
   min-width: 0;
+  padding: 10px 11px;
+  border: 1px solid color-mix(in srgb, var(--border-strong) 58%, transparent);
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--surface-bg) 42%, transparent);
   color: var(--text-muted);
   font-size: 12.5px;
   line-height: 1.4;
+  cursor: pointer;
+  transition:
+    border-color var(--transition-fast),
+    background var(--transition-fast),
+    color var(--transition-fast),
+    box-shadow var(--transition-fast);
+}
+
+.permission-input-option:hover {
+  border-color: var(--border-strong);
+  background: var(--interactive-hover);
+  color: var(--text-strong);
+}
+
+.permission-input-option.is-selected {
+  border-color: color-mix(in srgb, var(--accent-hover) 42%, transparent);
+  background: color-mix(in srgb, var(--accent-soft) 58%, transparent);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent-hover) 12%, transparent);
+  color: var(--text-strong);
 }
 
 .permission-input-option input {
   margin: 2px 0 0;
+  accent-color: var(--accent-hover);
+}
+
+.permission-input-option-copy {
+  min-width: 0;
 }
 
 .permission-input-option-label {
@@ -424,62 +643,111 @@
 }
 
 .permission-input-custom input {
-  min-height: 32px;
-  border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-sm);
-  padding: 0 10px;
+  min-height: 36px;
+  border: 1px solid color-mix(in srgb, var(--border-strong) 72%, transparent);
+  border-radius: 10px;
+  padding: 0 11px;
   background: color-mix(in srgb, var(--app-bg) 70%, transparent);
   color: var(--text-primary);
   font: inherit;
   outline: none;
+  transition: border-color var(--transition-fast), box-shadow var(--transition-fast);
 }
 
 .permission-input-custom input:focus {
   border-color: color-mix(in srgb, var(--accent) 58%, transparent);
-  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 18%, transparent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 16%, transparent);
 }
 
 .permission-request-actions {
   display: flex;
   flex: 0 0 auto;
   flex-wrap: wrap;
-  gap: 7px;
-  padding: 0 12px 12px;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 0 14px 14px;
 }
 
 .permission-request-action {
-  min-height: 30px;
-  padding: 0 12px;
-  border: 1px solid var(--border-subtle);
-  border-radius: 999px;
-  background: color-mix(in srgb, var(--surface-bg) 78%, var(--app-bg));
+  min-height: 34px;
+  padding: 0 14px;
+  border: 1px solid color-mix(in srgb, var(--border-strong) 72%, transparent);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--surface-bg) 72%, var(--app-bg));
   color: var(--text-muted);
   cursor: pointer;
-  font-size: var(--font-size-shell-meta);
+  font-family: var(--font-chat);
+  font-size: 12.5px;
   font-weight: 700;
-  transition: background var(--transition-fast), border-color var(--transition-fast), color var(--transition-fast);
+  line-height: 1;
+  transition:
+    background var(--transition-fast),
+    border-color var(--transition-fast),
+    color var(--transition-fast),
+    box-shadow var(--transition-fast),
+    transform var(--transition-fast);
 }
 
 .permission-request-action:hover:not(:disabled) {
   border-color: var(--border-strong);
   background: var(--interactive-hover);
   color: var(--text-strong);
+  transform: translateY(-1px);
 }
 
-.permission-request-action.is-primary,
+.permission-request-action.is-primary {
+  border-color: color-mix(in srgb, var(--accent-hover) 46%, transparent);
+  background:
+    linear-gradient(
+      180deg,
+      color-mix(in srgb, var(--accent-hover) 92%, white 8%) 0%,
+      var(--accent) 100%
+    );
+  color: #0b0d10;
+  box-shadow:
+    0 0 0 4px color-mix(in srgb, var(--accent) 14%, transparent),
+    0 10px 22px rgba(0, 0, 0, 0.22),
+    inset 0 1px 0 rgba(255, 255, 255, 0.34);
+}
+
+.permission-request-action.is-primary:hover:not(:disabled) {
+  border-color: color-mix(in srgb, var(--accent-hover) 58%, transparent);
+  color: #0b0d10;
+  box-shadow:
+    0 0 0 5px color-mix(in srgb, var(--accent) 18%, transparent),
+    0 12px 26px rgba(0, 0, 0, 0.26),
+    inset 0 1px 0 rgba(255, 255, 255, 0.42);
+}
+
 .permission-request-action.is-always {
-  border-color: rgba(94, 214, 143, 0.34);
+  border-color: color-mix(in srgb, var(--success) 42%, transparent);
+  background: color-mix(in srgb, var(--success-soft) 70%, transparent);
   color: var(--success);
 }
 
+.permission-request-action.is-always:hover:not(:disabled) {
+  border-color: color-mix(in srgb, var(--success) 58%, transparent);
+  background: color-mix(in srgb, var(--success-soft) 88%, transparent);
+  color: color-mix(in srgb, var(--success) 86%, white 14%);
+}
+
 .permission-request-action.is-danger {
-  border-color: rgba(244, 110, 110, 0.34);
+  border-color: color-mix(in srgb, var(--danger) 38%, transparent);
+  background: color-mix(in srgb, var(--danger-soft) 48%, transparent);
   color: var(--danger);
+}
+
+.permission-request-action.is-danger:hover:not(:disabled) {
+  border-color: color-mix(in srgb, var(--danger) 52%, transparent);
+  background: color-mix(in srgb, var(--danger-soft) 72%, transparent);
+  color: color-mix(in srgb, var(--danger) 86%, white 14%);
 }
 
 .permission-request-action:disabled {
   cursor: not-allowed;
   opacity: 0.55;
+  transform: none;
+  box-shadow: none;
 }
 
 .agent-plan {
@@ -981,10 +1249,19 @@
   width: min(1080px, calc(100vw - 64px));
   max-height: min(88vh, 900px);
   overflow: hidden;
-  border: 1px solid var(--border-strong);
+  border: 1px solid color-mix(in srgb, var(--accent-hover) 24%, var(--border-strong));
   border-radius: 18px;
-  background: #171819;
-  box-shadow: 0 28px 90px rgba(0, 0, 0, 0.48);
+  background:
+    linear-gradient(
+      180deg,
+      color-mix(in srgb, var(--accent-soft) 34%, var(--surface-bg)) 0%,
+      color-mix(in srgb, var(--surface-bg) 92%, var(--app-bg)) 42%,
+      color-mix(in srgb, var(--surface-muted-bg) 78%, var(--app-bg)) 100%
+    );
+  box-shadow:
+    0 28px 90px rgba(0, 0, 0, 0.48),
+    0 0 0 1px color-mix(in srgb, var(--accent-hover) 10%, transparent),
+    inset 0 1px 0 color-mix(in srgb, var(--text-strong) 7%, transparent);
 }
 
 .plan-approval-header {
@@ -994,14 +1271,40 @@
   gap: 16px;
   padding: 20px 22px 16px;
   border-bottom: 1px solid var(--border-subtle);
-  background: color-mix(in srgb, var(--surface-muted-bg) 78%, var(--app-bg));
+  background: color-mix(in srgb, var(--surface-muted-bg) 58%, transparent);
+}
+
+.plan-approval-headline {
+  display: flex;
+  min-width: 0;
+  align-items: flex-start;
+  gap: 12px;
+}
+
+.plan-approval-icon {
+  display: inline-flex;
+  width: 34px;
+  height: 34px;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid color-mix(in srgb, var(--accent-hover) 34%, var(--border-strong));
+  border-radius: 11px;
+  background:
+    linear-gradient(
+      180deg,
+      color-mix(in srgb, var(--accent-soft) 78%, transparent),
+      color-mix(in srgb, var(--surface-bg) 55%, transparent)
+    );
+  color: var(--accent-hover);
+  box-shadow: inset 0 1px 0 color-mix(in srgb, var(--text-strong) 8%, transparent);
 }
 
 .plan-approval-eyebrow {
   color: var(--accent-hover);
-  font-size: var(--font-size-shell-label);
+  font-size: 11px;
   font-weight: 700;
-  letter-spacing: var(--letter-spacing-shell);
+  letter-spacing: 0.04em;
   text-transform: uppercase;
 }
 
@@ -1014,13 +1317,22 @@
   letter-spacing: 0;
 }
 
+.plan-approval-subtitle {
+  margin: 5px 0 0;
+  color: var(--text-soft);
+  font-size: 12.5px;
+  font-weight: 550;
+  line-height: 1.4;
+}
+
 .plan-approval-count {
   flex-shrink: 0;
   padding: 5px 9px;
-  border: 1px solid var(--border-subtle);
+  border: 1px solid color-mix(in srgb, var(--accent-hover) 28%, var(--border-subtle));
   border-radius: 999px;
-  color: var(--text-muted);
-  font-size: var(--font-size-shell-label);
+  background: color-mix(in srgb, var(--accent-soft) 62%, transparent);
+  color: var(--accent-hover);
+  font-size: 11px;
   font-weight: 700;
 }
 
@@ -1139,35 +1451,64 @@
 .plan-approval-action {
   min-height: 36px;
   padding: 0 16px;
-  border: 1px solid var(--border-subtle);
+  border: 1px solid color-mix(in srgb, var(--border-strong) 72%, transparent);
   border-radius: 10px;
-  background: transparent;
+  background: color-mix(in srgb, var(--surface-bg) 72%, var(--app-bg));
   color: var(--text-muted);
   cursor: pointer;
   font-family: var(--font-chat);
   font-size: 13px;
   font-weight: 700;
+  transition:
+    background var(--transition-fast),
+    border-color var(--transition-fast),
+    color var(--transition-fast),
+    box-shadow var(--transition-fast),
+    transform var(--transition-fast);
 }
 
 .plan-approval-action:hover:not(:disabled) {
+  border-color: var(--border-strong);
   background: var(--interactive-hover);
   color: var(--text-strong);
+  transform: translateY(-1px);
 }
 
 .plan-approval-action-primary {
-  border-color: color-mix(in srgb, var(--accent-hover) 48%, transparent);
-  background: color-mix(in srgb, var(--accent-hover) 18%, transparent);
-  color: var(--accent-hover);
+  border-color: color-mix(in srgb, var(--accent-hover) 46%, transparent);
+  background:
+    linear-gradient(
+      180deg,
+      color-mix(in srgb, var(--accent-hover) 92%, white 8%) 0%,
+      var(--accent) 100%
+    );
+  color: #0b0d10;
+  box-shadow:
+    0 0 0 4px color-mix(in srgb, var(--accent) 14%, transparent),
+    0 10px 22px rgba(0, 0, 0, 0.22),
+    inset 0 1px 0 rgba(255, 255, 255, 0.34);
+}
+
+.plan-approval-action-primary:hover:not(:disabled) {
+  border-color: color-mix(in srgb, var(--accent-hover) 58%, transparent);
+  color: #0b0d10;
+  box-shadow:
+    0 0 0 5px color-mix(in srgb, var(--accent) 18%, transparent),
+    0 12px 26px rgba(0, 0, 0, 0.26),
+    inset 0 1px 0 rgba(255, 255, 255, 0.42);
 }
 
 .plan-approval-action-danger {
-  border-color: rgba(244, 110, 110, 0.34);
+  border-color: color-mix(in srgb, var(--danger) 38%, transparent);
+  background: color-mix(in srgb, var(--danger-soft) 48%, transparent);
   color: var(--danger);
 }
 
 .plan-approval-action:disabled {
   cursor: not-allowed;
   opacity: 0.55;
+  transform: none;
+  box-shadow: none;
 }
 
 @media (max-width: 720px) {
@@ -2398,4 +2739,85 @@
 
 :root[data-theme="light"] .composer-disconnected {
   background: #ffffff;
+}
+
+:root[data-theme="light"] .permission-request {
+  border-color: color-mix(in srgb, var(--warning) 34%, rgba(32, 33, 36, 0.14));
+  background:
+    linear-gradient(
+      180deg,
+      color-mix(in srgb, var(--warning-soft) 70%, #fff) 0%,
+      #ffffff 46%,
+      #f7f7f5 100%
+    );
+  box-shadow:
+    0 18px 40px rgba(32, 33, 36, 0.10),
+    0 0 0 1px color-mix(in srgb, var(--warning) 10%, transparent),
+    inset 0 1px 0 rgba(255, 255, 255, 0.9);
+}
+
+:root[data-theme="light"] .permission-request.is-plan-approval,
+:root[data-theme="light"] .permission-request.is-input {
+  border-color: color-mix(in srgb, var(--accent-hover) 28%, rgba(32, 33, 36, 0.14));
+  background:
+    linear-gradient(
+      180deg,
+      color-mix(in srgb, var(--accent-soft) 68%, #fff) 0%,
+      #ffffff 48%,
+      #f7f7f5 100%
+    );
+  box-shadow:
+    0 18px 40px rgba(32, 33, 36, 0.10),
+    0 0 0 1px color-mix(in srgb, var(--accent-hover) 10%, transparent),
+    inset 0 1px 0 rgba(255, 255, 255, 0.9);
+}
+
+:root[data-theme="light"] .permission-request-detail,
+:root[data-theme="light"] .permission-request-guidance textarea,
+:root[data-theme="light"] .permission-input-custom input,
+:root[data-theme="light"] .permission-input-question,
+:root[data-theme="light"] .permission-request-meta-item,
+:root[data-theme="light"] .permission-request-proposal {
+  border-color: rgba(32, 33, 36, 0.12);
+  background: #f7f7f5;
+}
+
+:root[data-theme="light"] .permission-input-option {
+  border-color: rgba(32, 33, 36, 0.12);
+  background: #ffffff;
+}
+
+:root[data-theme="light"] .permission-input-option.is-selected {
+  border-color: color-mix(in srgb, var(--accent-hover) 36%, transparent);
+  background: color-mix(in srgb, var(--accent-soft) 58%, #fff);
+}
+
+:root[data-theme="light"] .permission-request-action.is-primary,
+:root[data-theme="light"] .plan-approval-action-primary {
+  border-color: color-mix(in srgb, var(--accent-hover) 70%, transparent);
+  background: var(--accent-hover);
+  color: #ffffff;
+  box-shadow: 0 10px 22px color-mix(in srgb, var(--accent) 16%, transparent);
+}
+
+:root[data-theme="light"] .permission-request-action.is-primary:hover:not(:disabled),
+:root[data-theme="light"] .plan-approval-action-primary:hover:not(:disabled) {
+  border-color: color-mix(in srgb, var(--accent-hover) 80%, transparent);
+  background: color-mix(in srgb, var(--accent-hover) 88%, #000 12%);
+  color: #ffffff;
+}
+
+:root[data-theme="light"] .plan-approval-modal {
+  border-color: color-mix(in srgb, var(--accent-hover) 24%, rgba(32, 33, 36, 0.14));
+  background:
+    linear-gradient(
+      180deg,
+      color-mix(in srgb, var(--accent-soft) 58%, #fff) 0%,
+      #ffffff 46%,
+      #f7f7f5 100%
+    );
+  box-shadow:
+    0 28px 90px rgba(32, 33, 36, 0.16),
+    0 0 0 1px color-mix(in srgb, var(--accent-hover) 10%, transparent),
+    inset 0 1px 0 rgba(255, 255, 255, 0.9);
 }

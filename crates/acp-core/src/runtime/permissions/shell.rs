@@ -67,9 +67,33 @@ pub(in crate::runtime) fn shell_command_prefers_apply_patch_for_writes(
     workspace_root: &str,
     command: &str,
 ) -> bool {
-    shell_command_directly_mutates_files(command)
-        && !shell_command_write_is_apply_patch_exception(command)
-        && shell_command_write_paths_prefer_apply_patch(workspace_root, command)
+    if !shell_command_directly_mutates_files(command)
+        || shell_command_write_is_apply_patch_exception(command)
+    {
+        return false;
+    }
+
+    // Prefer apply_patch when we can prove a patchable workspace path is the
+    // write target.
+    if shell_command_write_paths_prefer_apply_patch(workspace_root, command) {
+        return true;
+    }
+
+    // If the command is clearly a python/node scripted file writer but we
+    // failed to recover a static path (dynamic joins, wrapped Path(...)
+    // assignments, etc.), still prefer apply_patch so it is not auto-allowed.
+    // Leave explicit non-patchable targets (lockfiles/binaries) alone.
+    let extracted = extract_write_paths_from_command_text(command);
+    extracted.is_empty() && shell_command_is_scripted_source_file_writer(command)
+}
+
+fn shell_command_is_scripted_source_file_writer(command: &str) -> bool {
+    let lower = command.to_ascii_lowercase();
+    lower.contains(".write_text(")
+        || lower.contains(".write_bytes(")
+        || lower.contains("writefile(")
+        || lower.contains("writefilesync(")
+        || write_paths::python_open_uses_write_mode(command)
 }
 
 fn shell_command_write_is_apply_patch_exception(command: &str) -> bool {

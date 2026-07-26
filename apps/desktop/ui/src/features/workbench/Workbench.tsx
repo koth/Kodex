@@ -35,6 +35,7 @@ import { TabBar } from "./TabBar";
 import { GlobalChrome } from "./GlobalChrome";
 import { RemoteOpenPanel } from "./RemoteOpenPanel";
 import { ThreadHeader } from "./ThreadHeader";
+import { WorkspaceSearchControl } from "../search/WorkspaceSearchControl";
 import { ThreadSidebarShell } from "./ThreadSidebarShell";
 import {
   SettingsPage,
@@ -87,6 +88,16 @@ function ContextDockToggleIcon() {
       <circle cx="7" cy="16" r="1.7" />
       <line x1="12" y1="8" x2="18" y2="8" />
       <line x1="12" y1="16" x2="18" y2="16" />
+    </svg>
+  );
+}
+
+function TerminalToggleIcon() {
+  return (
+    <svg aria-hidden="true" focusable="false" viewBox="0 0 24 24">
+      <rect x="4" y="5" width="16" height="14" rx="2" />
+      <path d="m8 10 3 2-3 2" />
+      <path d="M13 15h3" />
     </svg>
   );
 }
@@ -1134,16 +1145,10 @@ export function Workbench() {
    <div className="workbench">
      <GlobalChrome
         workspace={snapshot.workspace}
-        remoteWorkspace={isRemoteWorkspace}
         sidebarCollapsed={sidebarCollapsed}
-        refreshing={gitRefreshing}
         rightPanelCollapsed={rightPanelCollapsed}
-        terminalDockVisible={terminalDockActive}
         onToggleSidebar={handleToggleThreads}
-        onToggleTerminal={terminalDockAvailable ? handleToggleTerminalDock : () => undefined}
-        onRefreshGit={handleRefreshGit}
         onToggleRightPanel={handleToggleRightPanel}
-        onFileOpen={handleSearchFileOpen}
       />
 
       <div className="workbench-content" style={leftSidebarStyle}>
@@ -1197,19 +1202,48 @@ export function Workbench() {
             )}
             <ThreadHeader
               session={snapshot.session}
-              planToggle={
-                <button
-                  type="button"
-                  className={`thread-header-plan-toggle ${
-                    contextDockVisible ? "is-active" : ""
-                  }`}
-                  aria-label={contextDockVisible ? "折叠环境信息" : "展开环境信息"}
-                  aria-expanded={contextDockVisible}
-                  title={contextDockVisible ? "折叠环境信息" : "展开环境信息"}
-                  onClick={handleContextDockToggle}
-                >
-                  <ContextDockToggleIcon />
-                </button>
+              actions={
+                <>
+                  <WorkspaceSearchControl onFileOpen={handleSearchFileOpen} />
+                  {terminalDockAvailable && (
+                    <button
+                      type="button"
+                      className={`thread-header-action-btn ${
+                        terminalDockActive ? "is-active" : ""
+                      }`}
+                      aria-label={
+                        terminalDockActive
+                          ? "隐藏终端"
+                          : isRemoteWorkspace
+                            ? "打开远程终端"
+                            : "打开终端"
+                      }
+                      aria-pressed={terminalDockActive}
+                      title={
+                        terminalDockActive
+                          ? "隐藏终端"
+                          : isRemoteWorkspace
+                            ? "打开远程终端"
+                            : "打开终端"
+                      }
+                      onClick={handleToggleTerminalDock}
+                    >
+                      <TerminalToggleIcon />
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    className={`thread-header-action-btn ${
+                      contextDockVisible ? "is-active" : ""
+                    }`}
+                    aria-label={contextDockVisible ? "折叠环境信息" : "展开环境信息"}
+                    aria-expanded={contextDockVisible}
+                    title={contextDockVisible ? "折叠环境信息" : "展开环境信息"}
+                    onClick={handleContextDockToggle}
+                  >
+                    <ContextDockToggleIcon />
+                  </button>
+                </>
               }
             />
             {sessionArchiveToast && (

@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
   Ban,
   Check,
@@ -6,13 +6,17 @@ import {
   Circle,
   ClipboardList,
   FileDiff,
+  FileWarning,
   Gauge,
   GitBranch,
   GitCommitHorizontal,
   Laptop,
   Loader2,
+  MessageCircleQuestion,
   Plus,
   Server,
+  ShieldAlert,
+  Terminal,
 } from "lucide-react";
 import type {
   AgentPlanEntry,
@@ -379,13 +383,17 @@ export function PermissionRequestPanel({
     setCustomAnswers({});
   }, [request?.requestId]);
 
+  const detailSummary = useMemo(
+    () => summarizePermissionDetails(request?.details ?? null, request?.title ?? ""),
+    [request?.details, request?.title],
+  );
+
   if (!request) return null;
 
   const canAct = !!onPermissionSelect;
   const completed = entries.filter((entry) => entry.status === "completed").length;
   const showEntries = request.isPlanApproval && entries.length > 0;
   const visibleEntries = sortAgentPlanEntries(entries);
-  const details = request.details?.trim();
   const planApprovalActions = request.isPlanApproval ? planApprovalActionOptions(request.options) : null;
   const actionOptions = planApprovalActions ?? request.options;
   const replanOption = request.isPlanApproval ? findPlanReplanOption(request.options) : null;
@@ -403,26 +411,80 @@ export function PermissionRequestPanel({
   const inputComplete = hasInputQuestions
     ? request.input!.questions.every((question) => (inputResponse?.answers[question.id] ?? []).length > 0)
     : false;
+  const eyebrow = request.isPlanApproval
+    ? "待确认计划"
+    : hasInputQuestions
+      ? "需要回答"
+      : "需要权限";
+  const title = request.isPlanApproval
+    ? "接受计划后将切换到执行"
+    : hasInputQuestions
+      ? request.title || "智能体需要你的选择"
+      : detailSummary.headline || request.title;
+  const subtitle = request.isPlanApproval
+    ? "审阅步骤后再决定是否进入执行阶段"
+    : hasInputQuestions
+      ? "回答后智能体才会继续"
+      : detailSummary.subtitle;
+  const Icon = request.isPlanApproval
+    ? ClipboardList
+    : hasInputQuestions
+      ? MessageCircleQuestion
+      : detailSummary.kind === "command"
+        ? Terminal
+        : detailSummary.kind === "path"
+          ? FileWarning
+          : ShieldAlert;
+  const orderedActionOptions = request.isPlanApproval
+    ? actionOptions
+    : orderPermissionActionOptions(actionOptions);
 
   return (
     <section
-      className={`permission-request ${request.isPlanApproval ? "is-plan-approval" : ""}`}
+      className={[
+        "permission-request",
+        request.isPlanApproval ? "is-plan-approval" : "",
+        hasInputQuestions ? "is-input" : "",
+        !request.isPlanApproval && !hasInputQuestions ? "is-permission" : "",
+      ]
+        .filter(Boolean)
+        .join(" ")}
       aria-label={request.isPlanApproval ? "待确认计划" : "权限请求"}
     >
       <div className="permission-request-header">
-        <div className="permission-request-copy">
-          <div className="permission-request-eyebrow">
-            {request.isPlanApproval ? "待确认计划" : "需要权限"}
-          </div>
-          <div className="permission-request-title">
-            {request.isPlanApproval ? "接受计划后将切换到执行" : request.title}
+        <div className="permission-request-headline">
+          <span className="permission-request-icon" aria-hidden="true">
+            <Icon size={16} strokeWidth={2.1} />
+          </span>
+          <div className="permission-request-copy">
+            <div className="permission-request-eyebrow">{eyebrow}</div>
+            <div className="permission-request-title">{title}</div>
+            {subtitle && <div className="permission-request-subtitle">{subtitle}</div>}
           </div>
         </div>
-        {showEntries && <span className="permission-request-count">{completed}/{entries.length}</span>}
+        {showEntries ? (
+          <span className="permission-request-count">{completed}/{entries.length}</span>
+        ) : (
+          <span className="permission-request-badge">等待确认</span>
+        )}
       </div>
 
-      {!request.isPlanApproval && !hasInputQuestions && details && (
-        <div className="permission-request-detail">{details}</div>
+      {!request.isPlanApproval && !hasInputQuestions && detailSummary.body && (
+        <div className="permission-request-body">
+          {detailSummary.meta.length > 0 && (
+            <div className="permission-request-meta">
+              {detailSummary.meta.map((item) => (
+                <div className="permission-request-meta-item" key={`${item.label}:${item.value}`}>
+                  <span className="permission-request-meta-label">{item.label}</span>
+                  <code className="permission-request-meta-value" title={item.value}>
+                    {item.value}
+                  </code>
+                </div>
+              ))}
+            </div>
+          )}
+          <pre className="permission-request-detail">{detailSummary.body}</pre>
+        </div>
       )}
 
       {showEntries && (
@@ -441,7 +503,10 @@ export function PermissionRequestPanel({
 
       {request.planText && (
         <div className="permission-request-proposal">
-          <MarkdownBody content={request.planText} />
+          <div className="permission-request-proposal-label">计划内容</div>
+          <div className="permission-request-proposal-body">
+            <MarkdownBody content={request.planText} />
+          </div>
         </div>
       )}
 
@@ -503,7 +568,7 @@ export function PermissionRequestPanel({
         </>
       ) : (
         <div className="permission-request-actions">
-          {actionOptions.map((option) => (
+          {orderedActionOptions.map((option) => (
             <button
               key={option.id}
               type="button"
@@ -560,11 +625,17 @@ export function PlanApprovalModal({
         aria-labelledby="plan-approval-title"
       >
         <div className="plan-approval-header">
-          <div>
-            <div className="plan-approval-eyebrow">待确认计划</div>
-            <h2 className="plan-approval-title" id="plan-approval-title">
-              接受计划后将切换到执行
-            </h2>
+          <div className="plan-approval-headline">
+            <span className="plan-approval-icon" aria-hidden="true">
+              <ClipboardList size={18} strokeWidth={2.1} />
+            </span>
+            <div>
+              <div className="plan-approval-eyebrow">待确认计划</div>
+              <h2 className="plan-approval-title" id="plan-approval-title">
+                接受计划后将切换到执行
+              </h2>
+              <p className="plan-approval-subtitle">审阅步骤后再决定是否进入执行阶段</p>
+            </div>
           </div>
           <span className="plan-approval-count">{completed}/{entries.length}</span>
         </div>
@@ -656,7 +727,10 @@ function PermissionInputQuestionField({
           {question.options.map((option) => {
             const selected = selectedAnswers.includes(option.label);
             return (
-              <label className="permission-input-option" key={option.label}>
+              <label
+                className={`permission-input-option${selected ? " is-selected" : ""}`}
+                key={option.label}
+              >
                 <input
                   type={question.multi_select ? "checkbox" : "radio"}
                   name={`permission-input-${question.id}`}
@@ -673,7 +747,7 @@ function PermissionInputQuestionField({
                     onAnswersChange([option.label]);
                   }}
                 />
-                <span>
+                <span className="permission-input-option-copy">
                   <span className="permission-input-option-label">{option.label}</span>
                   {option.description && (
                     <span className="permission-input-option-description">{option.description}</span>
@@ -842,7 +916,7 @@ function permissionOptionLabel(option: PermissionOption, isPlanApproval?: boolea
   if (requiresPermissionGuidance(option)) {
     return option.id.toLowerCase() === "timed_out" ? "超时并补充说明" : "拒绝并补充说明";
   }
-  return option.label || option.id;
+  return localizePermissionOptionLabel(option);
 }
 
 function requiresPermissionGuidance(option: PermissionOption) {
@@ -885,4 +959,249 @@ function planApprovalActionClass(option: PermissionOption) {
   if (tone === "is-primary") return "plan-approval-action-primary";
   if (tone === "is-danger") return "plan-approval-action-danger";
   return "";
+}
+
+function localizePermissionOptionLabel(option: PermissionOption) {
+  const id = option.id.toLowerCase();
+  const label = option.label.trim();
+  const normalized = label.toLowerCase();
+
+  if (
+    id === "allow_always" ||
+    normalized === "always allow" ||
+    normalized === "yes, don't ask again" ||
+    normalized === "yes, don’t ask again" ||
+    normalized.includes("don't ask again") ||
+    normalized.includes("don’t ask again")
+  ) {
+    return "始终允许";
+  }
+  if (
+    id === "allow" ||
+    id === "allow_once" ||
+    id === "approved" ||
+    id === "default" ||
+    normalized === "allow" ||
+    normalized === "yes" ||
+    normalized === "yes, proceed" ||
+    normalized === "approve"
+  ) {
+    return "允许";
+  }
+  if (
+    id === "reject" ||
+    id === "deny" ||
+    id === "denied" ||
+    id === "abort" ||
+    id === "cancel" ||
+    normalized === "reject" ||
+    normalized === "deny" ||
+    normalized === "cancel" ||
+    normalized === "no"
+  ) {
+    return "拒绝";
+  }
+
+  return label || option.id;
+}
+
+function orderPermissionActionOptions(options: PermissionOption[]) {
+  const rank = (option: PermissionOption) => {
+    const tone = permissionOptionTone(option, false);
+    if (tone === "is-danger") return 0;
+    if (tone === "is-neutral") return 1;
+    if (tone === "is-always") return 2;
+    if (tone === "is-primary") return 3;
+    return 4;
+  };
+
+  return options
+    .map((option, index) => ({ option, index }))
+    .sort((left, right) => {
+      const delta = rank(left.option) - rank(right.option);
+      return delta !== 0 ? delta : left.index - right.index;
+    })
+    .map(({ option }) => option);
+}
+
+interface PermissionDetailMeta {
+  label: string;
+  value: string;
+}
+
+interface PermissionDetailSummary {
+  kind: "command" | "path" | "generic";
+  headline: string;
+  subtitle: string | null;
+  meta: PermissionDetailMeta[];
+  body: string | null;
+}
+
+function summarizePermissionDetails(details: string | null, title: string): PermissionDetailSummary {
+  const trimmedDetails = details?.trim() ?? "";
+  const trimmedTitle = stripCodeFence(title).trim();
+  if (!trimmedDetails) {
+    return {
+      kind: looksLikeCommand(trimmedTitle) ? "command" : "generic",
+      headline: trimmedTitle || "选择权限",
+      subtitle: looksLikeCommand(trimmedTitle) ? "智能体请求执行命令" : "智能体请求继续操作",
+      meta: [],
+      body: null,
+    };
+  }
+
+  const lines = trimmedDetails
+    .split(/\r?\n/)
+    .map((line) => line.trimEnd())
+    .filter((line, index, all) => !(line.trim() === "" && all[index - 1]?.trim() === ""));
+
+  let command: string | null = null;
+  let path: string | null = null;
+  const residual: string[] = [];
+  let capturingCommand = false;
+  let capturingPaths = false;
+  const commandLines: string[] = [];
+
+  for (const rawLine of lines) {
+    const line = rawLine.trim();
+    if (!line) {
+      if (capturingCommand && commandLines.length > 0) {
+        capturingCommand = false;
+      }
+      if (!capturingCommand) {
+        residual.push("");
+      }
+      continue;
+    }
+
+    const inlineCommand = line.match(/^Command:\s*(.*)$/i)?.[1]?.trim() ?? null;
+    if (inlineCommand !== null || /^Command:\s*$/i.test(line)) {
+      capturingCommand = true;
+      capturingPaths = false;
+      if (inlineCommand) {
+        commandLines.push(inlineCommand);
+      }
+      continue;
+    }
+
+    const inlinePath = line.match(/^Path:\s*(.+)$/i)?.[1]?.trim() ?? null;
+    if (inlinePath) {
+      capturingCommand = false;
+      capturingPaths = false;
+      path = path ?? inlinePath;
+      continue;
+    }
+
+    if (/^Paths:\s*$/i.test(line)) {
+      capturingCommand = false;
+      capturingPaths = true;
+      continue;
+    }
+
+    const listPath = line.match(/^Paths:\s*-\s*(.+)$/i)?.[1]?.trim()
+      ?? (capturingPaths ? line.replace(/^-\s*/, "").trim() : null);
+    if (listPath && (capturingPaths || /^Paths:/i.test(line))) {
+      capturingCommand = false;
+      capturingPaths = true;
+      path = path ?? listPath;
+      continue;
+    }
+
+    if (capturingCommand) {
+      commandLines.push(rawLine);
+      continue;
+    }
+
+    capturingPaths = false;
+    residual.push(rawLine);
+  }
+
+  if (commandLines.length > 0) {
+    command = commandLines.join("\n").trim();
+  }
+
+  if (!command && looksLikeCommand(trimmedDetails) && !/^Path:/im.test(trimmedDetails)) {
+    command = trimmedDetails;
+  }
+
+  if (!path) {
+    path = extractFirstPathLike(trimmedDetails);
+  }
+
+  const residualBody = residual
+    .join("\n")
+    .replace(/^\n+|\n+$/g, "")
+    .trim();
+
+  const body = command
+    ? command
+    : residualBody || (!path ? trimmedDetails : null);
+
+  const kind = command ? "command" : path ? "path" : "generic";
+  const headline =
+    kind === "command"
+      ? compactPermissionHeadline(command ?? trimmedTitle, 88)
+      : kind === "path"
+        ? compactPermissionHeadline(path ?? trimmedTitle, 72)
+        : compactPermissionHeadline(trimmedTitle || body || "选择权限", 88);
+
+  const subtitle =
+    kind === "command"
+      ? path
+        ? "请求执行命令，并触及工作区路径"
+        : "智能体请求执行命令"
+      : kind === "path"
+        ? "智能体请求访问文件"
+        : "智能体请求继续操作";
+
+  const meta: PermissionDetailMeta[] = [];
+  if (path) {
+    meta.push({ label: "路径", value: path });
+  }
+  if (command && body !== command) {
+    meta.push({ label: "命令", value: compactPermissionHeadline(command, 96) });
+  }
+
+  return {
+    kind,
+    headline,
+    subtitle,
+    meta,
+    body,
+  };
+}
+
+function stripCodeFence(value: string) {
+  return value.replace(/^`+|`+$/g, "");
+}
+
+function looksLikeCommand(value: string) {
+  const text = stripCodeFence(value).trim();
+  if (!text) return false;
+  if (/\n/.test(text)) return true;
+  return /^(sudo\s+)?(find|ls|cat|rm|mv|cp|chmod|chown|curl|wget|python|python3|node|npm|pnpm|yarn|cargo|git|rg|grep|sed|awk|bash|zsh|sh|powershell|pwsh)\b/i.test(
+    text,
+  ) || /[|><]/.test(text) || /\s-{1,2}[A-Za-z]/.test(text);
+}
+
+function extractFirstPathLike(value: string) {
+  const patterns = [
+    /(?:^|[\s"'`])((?:[A-Za-z]:)?(?:\/|\\)[^\s"'`]+)/,
+    /(?:^|[\s"'`])((?:\.\.?\/)[^\s"'`]+)/,
+  ];
+  for (const pattern of patterns) {
+    const match = value.match(pattern);
+    if (match?.[1]) {
+      return match[1].replace(/[),.;]+$/, "");
+    }
+  }
+  return null;
+}
+
+function compactPermissionHeadline(value: string, maxLength: number) {
+  const normalized = stripCodeFence(value).replace(/\s+/g, " ").trim();
+  if (normalized.length <= maxLength) {
+    return normalized;
+  }
+  return `${normalized.slice(0, Math.max(0, maxLength - 1)).trimEnd()}…`;
 }

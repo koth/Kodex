@@ -1,16 +1,7 @@
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { GlobalChrome } from "./GlobalChrome";
-import { fsSearch } from "../../lib/tauri";
 import type { WorkspaceDescriptor } from "../../types";
-
-vi.mock("../../lib/tauri", async () => {
-  const actual = await vi.importActual<typeof import("../../lib/tauri")>("../../lib/tauri");
-  return {
-    ...actual,
-    fsSearch: vi.fn(),
-  };
-});
 
 vi.mock("./WindowControls", () => ({
   WindowControls: () => null,
@@ -23,73 +14,34 @@ const localWorkspace: WorkspaceDescriptor = {
   location: { kind: "local" },
 };
 
-const remoteWorkspace: WorkspaceDescriptor = {
-  id: "remote",
-  name: "project",
-  root: "ssh://alice@devbox/srv/project",
-  location: {
-    kind: "remote_linux",
-    ssh_target: "alice@devbox",
-    ssh_port: 2222,
-    remote_path: "/srv/project",
-  },
-};
-
-function renderChrome(options: {
-  workspace?: WorkspaceDescriptor;
-  remoteWorkspace?: boolean;
-  onToggleTerminal?: () => void;
-  onRefreshGit?: () => void;
-}) {
-  render(
-    <GlobalChrome
-      workspace={options.workspace ?? localWorkspace}
-      remoteWorkspace={options.remoteWorkspace ?? false}
-      sidebarCollapsed={false}
-      refreshing={false}
-      rightPanelCollapsed={false}
-      terminalDockVisible={false}
-      onToggleSidebar={vi.fn()}
-      onToggleTerminal={options.onToggleTerminal ?? vi.fn()}
-      onRefreshGit={options.onRefreshGit ?? vi.fn()}
-      onToggleRightPanel={vi.fn()}
-      onFileOpen={vi.fn()}
-    />,
-  );
-}
-
 describe("GlobalChrome", () => {
   afterEach(() => {
     cleanup();
     vi.clearAllMocks();
   });
 
-  it("enables remote terminal for remote workspaces and keeps search and git available", () => {
-    const onToggleTerminal = vi.fn();
-    const onRefreshGit = vi.fn();
+  it("keeps shell toggles and omits project-scoped search/terminal controls", () => {
+    const onToggleSidebar = vi.fn();
+    const onToggleRightPanel = vi.fn();
 
-    renderChrome({
-      workspace: remoteWorkspace,
-      remoteWorkspace: true,
-      onToggleTerminal,
-      onRefreshGit,
-    });
+    render(
+      <GlobalChrome
+        workspace={localWorkspace}
+        sidebarCollapsed={false}
+        rightPanelCollapsed={false}
+        onToggleSidebar={onToggleSidebar}
+        onToggleRightPanel={onToggleRightPanel}
+      />,
+    );
 
-    const terminal = screen.getByRole("button", { name: "打开远程终端" });
-    const search = screen.getByRole("button", { name: "搜索工作区" });
-    const git = screen.getByRole("button", { name: "刷新 Git 状态" });
+    expect(screen.queryByRole("button", { name: "搜索工作区" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "打开终端" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "打开远程终端" })).toBeNull();
 
-    expect(terminal).not.toBeDisabled();
-    expect(search).not.toBeDisabled();
-    expect(git).not.toBeDisabled();
+    fireEvent.click(screen.getByRole("button", { name: "隐藏项目栏" }));
+    fireEvent.click(screen.getByRole("button", { name: "隐藏右侧栏" }));
 
-    fireEvent.click(terminal);
-    fireEvent.click(search);
-    fireEvent.click(git);
-
-    expect(onToggleTerminal).toHaveBeenCalledOnce();
-    expect(onRefreshGit).toHaveBeenCalledOnce();
-    expect(screen.getByPlaceholderText("搜索文件...")).toBeInTheDocument();
-    expect(fsSearch).not.toHaveBeenCalled();
+    expect(onToggleSidebar).toHaveBeenCalledOnce();
+    expect(onToggleRightPanel).toHaveBeenCalledOnce();
   });
 });

@@ -288,6 +288,113 @@ fn apply_patch_policy_rejects_python_read_modify_write_with_markup_in_replace_bo
 }
 
 #[test]
+fn apply_patch_policy_rejects_multiline_python_path_assignment_writes() {
+    let root = temp_workspace("apply-patch-python-multiline-path");
+    let command = "python3 - <<'PY'\nfrom pathlib import Path\npath =\nPath('apps/desktop/ui/src/features/workbench/Workbench.css')\ntext = path.read_text()\npath.write_text(text)\nprint('css updated')\nPY";
+    let request = execute_request(json!({
+        "command": command
+    }));
+
+    assert_eq!(
+        decide_permission_with_edit_policy(
+            PermissionPolicyMode::Build,
+            AgentEditPolicy::PreferApplyPatch,
+            root.to_str().unwrap(),
+            &request,
+        ),
+        PermissionDecision::SelectWithGuidance(
+            "reject".to_string(),
+            apply_patch_retry_guidance().to_string(),
+        ),
+    );
+    assert!(shell_command_prefers_apply_patch_for_writes(
+        root.to_str().unwrap(),
+        command,
+    ));
+}
+
+#[test]
+fn apply_patch_redirects_scripted_source_writes_even_for_opt_out_agents() {
+    // Regression: agents whose command basename used to opt out of apply_patch
+    // guidance (claude-*/ghe-codex/glm) must still be redirected when they try
+    // to write a patchable source file via a shell heredoc, instead of reaching
+    // a plain approval prompt.
+    let root = temp_workspace("apply-patch-opt-out-agent");
+    let command = "python3 - <<'PY'\nfrom pathlib import Path\nPath('apps/desktop/ui/src/features/workbench/ThreadHeader.tsx').write_text('x')\nPY";
+    let request = execute_request(json!({ "command": command }));
+
+    let agent_command = r#"C:\Users\yvonchen\.kodex\bin\claude-agent-acp.exe"#;
+    let edit_policy = crate::events::agent_edit_policy_for_command(agent_command);
+    assert_eq!(edit_policy, AgentEditPolicy::PreferApplyPatch);
+
+    assert_eq!(
+        decide_permission_with_edit_policy(
+            PermissionPolicyMode::Build,
+            edit_policy,
+            root.to_str().unwrap(),
+            &request,
+        ),
+        PermissionDecision::SelectWithGuidance(
+            "reject".to_string(),
+            apply_patch_retry_guidance().to_string(),
+        ),
+    );
+}
+
+#[test]
+fn apply_patch_redirects_abs_path_triple_quoted_python_heredoc() {
+    // Reproduces a real bypass: the agent submits shell execution as an argv
+    // array (`["/bin/zsh", "-lc", "python3 - <<'PY'..."]`) with an absolute
+    // workspace target and a triple-quoted multi-line payload. The broker
+    // must still reject + guide to apply_patch, not auto-allow.
+    let root = temp_workspace("apply-patch-abs-triple-quoted");
+    let target = root.join("apps/desktop/ui/src/features/workbench/ThreadHeader.tsx");
+    fs::create_dir_all(target.parent().expect("parent path")).expect("dir created");
+    fs::write(&target, "// old\n").expect("seed file");
+
+    let path = target.to_str().expect("utf8 path");
+    let payload = "import type { ReactNode } from \"react\";\nimport type { SessionSummary } from \"../../types\";\n\ninterface Props {\n  session: SessionSummary;\n  actions?: ReactNode;\n}\n";
+    let script = format!(
+        "python3 - <<'PY'\nfrom pathlib import Path\n\n# ThreadHeader: drop center slot\nPath('{path}').write_text('''{payload}''')\nPY"
+    );
+    let request = execute_request(json!({ "command": ["/bin/zsh", "-lc", script] }));
+
+    assert_eq!(
+        decide_permission_with_edit_policy(
+            PermissionPolicyMode::Build,
+            AgentEditPolicy::PreferApplyPatch,
+            root.to_str().unwrap(),
+            &request,
+        ),
+        PermissionDecision::SelectWithGuidance(
+            "reject".to_string(),
+            apply_patch_retry_guidance().to_string(),
+        ),
+    );
+}
+
+#[test]
+fn apply_patch_policy_rejects_scripted_python_writes_without_static_path() {
+    let root = temp_workspace("apply-patch-python-dynamic");
+    let request = execute_request(json!({
+        "command": "python - <<'PY'\nfrom pathlib import Path\np=Path.cwd() / 'generated.ts'\np.write_text('ok', encoding='utf-8')\nPY"
+    }));
+
+    assert_eq!(
+        decide_permission_with_edit_policy(
+            PermissionPolicyMode::Build,
+            AgentEditPolicy::PreferApplyPatch,
+            root.to_str().unwrap(),
+            &request,
+        ),
+        PermissionDecision::SelectWithGuidance(
+            "reject".to_string(),
+            apply_patch_retry_guidance().to_string(),
+        ),
+    );
+}
+
+#[test]
 fn apply_patch_policy_rejects_patchable_direct_edit_tools_with_guidance() {
     let root = temp_workspace("apply-patch-edit-policy");
     let request = edit_request(json!({

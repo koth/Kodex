@@ -91,12 +91,14 @@ function MarkdownBody({ content, workspaceRoot, onFilePathClick, changedFiles, c
       ? normalizeFilePathSeparators(workspaceRoot).replace(/[\\/]+$/, "")
       : "";
 
-// Pass 0: changeset + turn candidate pool. A candidate's matchTail
-    //  (`Composer.tsx`, `commands/fs.rs` or `app-core / state.rs`) is matched
-    //  as an ordered segment subsequence against each candidate path — the
-    //  fragment is never split into a basename prefix. Hits only produce a
-    //  better path to probe; existence is always confirmed via fsPathExists
-    //  so stale/hallucinated pool entries cannot become dead links.
+    // Pass 0: changeset + turn candidate pool. A candidate's matchTail
+    //  (`Composer.tsx`, `commands/fs.rs` or `app-core / src / state.rs`) must
+    //  be a contiguous trailing run of a source path's segments — the whole
+    //  fragment is matched, never just the basename, so a deeper sibling like
+    //  `.../runtime/permissions/tests.rs` cannot capture `runtime/tests.rs`.
+    //  Hits only produce a better path to probe; existence is always confirmed
+    //  via fsPathExists so stale/hallucinated pool entries cannot become dead
+    //  links.
     const poolResolved = new Map<string, string>();
     const matchSources = [
       ...(changedFiles ?? []),
@@ -106,6 +108,11 @@ function MarkdownBody({ content, workspaceRoot, onFilePathClick, changedFiles, c
       for (const [key, resolved] of candidates) {
         if (poolResolved.has(key) || !resolved.matchTail) continue;
         const tail = resolved.matchTail.replace(/\\/g, "/");
+        // `pathMatchesFragment` only accepts contiguous trailing runs, so at
+        // most one shape of fragment matches a given candidate — but several
+        // candidates may end in the same fragment. Pick the strongest (fewest
+        // leading segments dropped); ties keep the earliest source.
+        let best: { rank: number; relative: string } | null = null;
         for (const sourcePath of matchSources) {
           // Candidate paths harvested from shell output can carry a trailing
           // `:line[:col]` reference. Strip it before matching and joining so
@@ -114,15 +121,19 @@ function MarkdownBody({ content, workspaceRoot, onFilePathClick, changedFiles, c
           const normalized = sourcePath
             .replace(/\\/g, "/")
             .replace(/:\d+(?::\d+)?$/, "");
-          if (!pathMatchesFragment(normalized, tail)) continue;
+          const rank = rankFragmentMatch(normalized, tail);
+          if (rank === null) continue;
+          // Strict improvement only, so the earliest source wins ties.
+          if (best !== null && rank >= best.rank) continue;
           // Keep the open/probe target workspace-relative. Absolute pool
           // entries (shell cwd dumps) are stripped against the workspace root
           // so the editor never receives a synthetic absolute path that later
           // fails strip-on-click.
           const relative = toWorkspaceRelativePath(normalized, root || undefined);
-          if (relative) poolResolved.set(key, relative);
-          break;
+          if (!relative) continue;
+          best = { rank, relative };
         }
+        if (best) poolResolved.set(key, best.relative);
       }
     }
 
@@ -543,12 +554,27 @@ function toWorkspaceRelativePath(path: string, workspaceRoot?: string) {
   return stripWorkspaceRootPrefix(normalized, workspaceRoot).replace(/\\/g, "/");
 }
 
-/** A path fragment (`app-core/state.rs`) matches a candidate path when its
- *  segments appear in order inside the candidate's segments and the fragment
- *  ends on the candidate's file name. This lets `app-core / state.rs` match
- *  `crates/app-core/src/state.rs` without ever splitting the fragment into
- *  a bare basename. */
+/** A path fragment matches a candidate path when it is a CONTIGUOUS trailing
+ *  run of the candidate's segments — every fragment segment lines up, in
+ *  order, against the candidate's final segments. The whole fragment is
+ *  considered, not just the trailing file name, so `runtime/tests.rs` matches
+ *  `.../runtime/tests.rs` but NOT `.../runtime/permissions/tests.rs` (a
+ *  different file that merely happens to share `runtime` and `tests.rs`).
+ *  Leading directories may still be dropped, which is the safe abbreviation:
+ *  `commands/fs.rs` hits `apps/desktop/src-tauri/src/commands/fs.rs`. Returns
+ *  a boolean for backward compatibility; use {@link rankFragmentMatch} when
+ *  disambiguating between several matching candidates. */
 export function pathMatchesFragment(candidatePath: string, fragment: string) {
+  return rankFragmentMatch(candidatePath, fragment) !== null;
+}
+
+/** Rank how well `candidatePath` matches a relative `fragment`. Lower is
+ *  better; `null` means the fragment is not a contiguous trailing run of the
+ *  candidate's segments. The rank is the candidate's segment count, so when
+ *  several candidates end in the same fragment the one that drops the FEWEST
+ *  leading segments (the most specific, shallowest match) wins; ties keep the
+ *  earliest source. */
+export function rankFragmentMatch(candidatePath: string, fragment: string): number | null {
   const candidateSegments = candidatePath
     .split("/")
     .filter(Boolean)
@@ -557,18 +583,15 @@ export function pathMatchesFragment(candidatePath: string, fragment: string) {
     .split("/")
     .filter(Boolean)
     .map((segment) => segment.replace(/:\d+(?::\d+)?$/, ""));
-  if (fragmentSegments.length === 0) return false;
-  if (fragmentSegments.length > candidateSegments.length) return false;
-  const fileSegment = fragmentSegments[fragmentSegments.length - 1];
-  if (candidateSegments[candidateSegments.length - 1] !== fileSegment) return false;
-  let cursor = 0;
-  for (const segment of candidateSegments) {
-    if (segment === fragmentSegments[cursor]) {
-      cursor += 1;
-      if (cursor === fragmentSegments.length) return true;
-    }
+  if (fragmentSegments.length === 0) return null;
+  if (fragmentSegments.length > candidateSegments.length) return null;
+  // The whole fragment must line up contiguously against the candidate's
+  // trailing segments — no intermediate directories may be skipped.
+  const offset = candidateSegments.length - fragmentSegments.length;
+  for (let index = 0; index < fragmentSegments.length; index++) {
+    if (candidateSegments[offset + index] !== fragmentSegments[index]) return null;
   }
-  return false;
+  return candidateSegments.length;
 }
 
 export default memo(MarkdownBody);

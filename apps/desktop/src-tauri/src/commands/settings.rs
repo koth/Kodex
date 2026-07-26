@@ -16,7 +16,6 @@ use workspace_model::{
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
 
-const CODEX_ACP_NPM_PACKAGE: &str = "@zed-industries/codex-acp@latest";
 const CLAUDE_AGENT_ACP_NPM_PACKAGE: &str = "@agentclientprotocol/claude-agent-acp@latest";
 const BUNDLED_CODEX_ACP_RESOURCE_DIR: &str = "bundled-codex-acp";
 const BUNDLED_CLAUDE_AGENT_ACP_RESOURCE_DIR: &str = "bundled-claude-agent-acp";
@@ -774,11 +773,19 @@ fn install_codex_acp(
     paths: &app_core::AppPaths,
     bundled_binary: Option<&Path>,
 ) -> Result<String, String> {
-    if let Some(source) = bundled_binary.filter(|path| path.is_file()) {
-        return install_codex_acp_from_bundled_binary(paths, source);
-    }
-
-    install_codex_acp_from_npm(paths)
+    let source = bundled_binary
+        .filter(|path| path.is_file())
+        .ok_or_else(|| {
+            "No bundled codex-acp binary in the Maju app package. Rebuild \
+             the app with `npm --prefix apps/desktop/ui run desktop:build` \
+             (which vendors the patched codex-acp into the bundle) and \
+             reinstall Maju. Falling back to the upstream npm package is \
+             disabled because it does not contain the Kodex patches (shell \
+             file-write permission routing), so it would let scripted shell \
+             writes bypass the host permission broker."
+                .to_string()
+        })?;
+    install_codex_acp_from_bundled_binary(paths, source)
 }
 
 fn install_claude_agent_acp(
@@ -1057,65 +1064,6 @@ fn install_codex_acp_from_bundled_binary(
     Ok(format!("Codex 已从安装包安装到 {}", target.display()))
 }
 
-fn install_codex_acp_from_npm(paths: &app_core::AppPaths) -> Result<String, String> {
-    let temp_dir = unique_install_temp_dir();
-    fs::create_dir_all(&temp_dir).map_err(|e| {
-        format!(
-            "Failed to create temporary installer directory {}: {e}",
-            temp_dir.display()
-        )
-    })?;
-
-    let npm = if cfg!(windows) { "npm.cmd" } else { "npm" };
-    let temp_prefix = temp_dir.to_string_lossy().to_string();
-    let output = Command::new(npm)
-        .args([
-            "install",
-            "--prefix",
-            &temp_prefix,
-            "--no-save",
-            "--omit=dev",
-            CODEX_ACP_NPM_PACKAGE,
-        ])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .no_window()
-        .output()
-        .map_err(|e| format!("Failed to start npm installer for codex-acp: {e}"))?;
-
-    if !output.status.success() {
-        let _ = fs::remove_dir_all(&temp_dir);
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        let details = if !stderr.is_empty() { stderr } else { stdout };
-        return Err(if details.is_empty() {
-            "codex-acp installer failed without output".to_string()
-        } else {
-            details
-        });
-    }
-
-    let binary_name = codex_acp_binary_name();
-    let source = match find_named_file(&temp_dir, binary_name) {
-        Some(source) => source,
-        None => {
-            let _ = fs::remove_dir_all(&temp_dir);
-            return Err(format!("Downloaded package did not contain {binary_name}"));
-        }
-    };
-    let target = match install_codex_acp_binary(paths, &source) {
-        Ok(target) => target,
-        Err(error) => {
-            let _ = fs::remove_dir_all(&temp_dir);
-            return Err(error);
-        }
-    };
-
-    let _ = fs::remove_dir_all(&temp_dir);
-    Ok(format!("Codex 已安装到 {}", target.display()))
-}
-
 fn install_codex_acp_binary(paths: &app_core::AppPaths, source: &Path) -> Result<PathBuf, String> {
     let target = app_core::settings::codex_acp_binary_path(paths);
     install_managed_binary(paths, source, &target)
@@ -1244,9 +1192,96 @@ fn terminate_processes_using_executable(target: &Path) -> Result<(), String> {
     }
 }
 
-#[cfg(not(windows))]
-fn terminate_processes_using_executable(_target: &Path) -> Result<(), String> {
-    Ok(())
+#[cfg(target_os = "macos")]
+fn terminate_processes_using_executable(target: &Path) -> Result<(), String> {
+    terminate_processes_using_executable_unix(target, "lsof")
+}
+
+#[cfg(target_os = "linux")]
+fn terminate_processes_using_executable(target: &Path) -> Result<(), String> {
+    terminate_processes_using_executable_unix(target, "fuser")
+}
+
+/// Stop any process holding `target` open so a `fs::copy` into that path can
+/// succeed. On macOS `lsof -t <path>` lists the PIDs with the file open (txt
+/// or any fd); on Linux `fuser <path>` does the same. We SIGTERM first and
+/// escalate to SIGKILL after a short grace period so a stuck agent does not
+/// prevent Maju from installing a patched bundled binary on startup. Uses
+/// the external `kill` utility to avoid pulling a signal crate dependency.
+#[cfg(unix)]
+fn terminate_processes_using_executable_unix(target: &Path, lister: &str) -> Result<(), String> {
+    let target_arg = target
+        .canonicalize()
+        .unwrap_or_else(|_| target.to_path_buf())
+        .to_string_lossy()
+        .to_string();
+
+    let pids = list_pids_holding_path(lister, &target_arg)?;
+    if pids.is_empty() {
+        return Ok(());
+    }
+
+    send_signal(&pids, "TERM")?;
+    std::thread::sleep(std::time::Duration::from_millis(200));
+    let _ = send_signal(&pids, "KILL");
+    std::thread::sleep(std::time::Duration::from_millis(100));
+
+    let remaining = list_pids_holding_path(lister, &target_arg)?;
+    if remaining.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "Processes still holding {} after SIGKILL: {:?}",
+            target.display(),
+            remaining
+        ))
+    }
+}
+
+#[cfg(unix)]
+fn send_signal(pids: &[i32], signal: &str) -> Result<(), String> {
+    let mut failures = Vec::new();
+    for pid in pids {
+        let status = Command::new("kill")
+            .args(["-s", signal, &pid.to_string()])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .no_window()
+            .status();
+        if let Err(error) = status {
+            failures.push(format!("kill -s {signal} {pid}: {error}"));
+        }
+    }
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        Err(failures.join("; "))
+    }
+}
+
+#[cfg(unix)]
+fn list_pids_holding_path(lister: &str, path: &str) -> Result<Vec<i32>, String> {
+    let (program, args): (&str, Vec<&str>) = if lister == "lsof" {
+        ("lsof", vec!["-t", path])
+    } else {
+        ("fuser", vec![path])
+    };
+    let output = Command::new(program)
+        .args(&args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .no_window()
+        .output()
+        .map_err(|e| format!("Failed to start {program} to find processes holding {path}: {e}"))?;
+
+    let text = String::from_utf8_lossy(&output.stdout);
+    let pids = text
+        .split_whitespace()
+        .filter_map(|token| token.parse::<i32>().ok())
+        .collect::<Vec<_>>();
+    Ok(pids)
 }
 
 fn bundled_codex_acp_binary(app: &AppHandle) -> Option<PathBuf> {
@@ -1288,10 +1323,6 @@ fn claude_agent_acp_binary_name() -> &'static str {
     }
 }
 
-fn unique_install_temp_dir() -> PathBuf {
-    unique_install_temp_dir_named("kodex-codex-acp-install")
-}
-
 fn unique_install_temp_dir_named(prefix: &str) -> PathBuf {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -1316,26 +1347,6 @@ fn copy_dir(source: &Path, target: &Path) -> std::io::Result<()> {
         }
     }
     Ok(())
-}
-
-fn find_named_file(root: &Path, file_name: &str) -> Option<PathBuf> {
-    let mut stack = vec![root.to_path_buf()];
-    while let Some(dir) = stack.pop() {
-        let entries = fs::read_dir(&dir).ok()?;
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_dir() {
-                stack.push(path);
-            } else if path
-                .file_name()
-                .and_then(|name| name.to_str())
-                .is_some_and(|name| name.eq_ignore_ascii_case(file_name))
-            {
-                return Some(path);
-            }
-        }
-    }
-    None
 }
 
 trait CommandNoWindow {
