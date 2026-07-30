@@ -32,7 +32,11 @@
       "assetProtocol": {
         "enable": true,
         "scope": [
-          "$HOME/.kodex/attachments/**"
+          "$HOME/.kodex/attachments/**",
+          "$HOME/.kodex/companion/**",
+          "$HOME/.vrm/**",
+          "**/*.vrm",
+          "**/*.vrma"
         ]
       }
     }

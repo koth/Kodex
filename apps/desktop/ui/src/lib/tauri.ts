@@ -450,6 +450,10 @@ export async function fsPathExists(paths: string[]): Promise<boolean[]> {
   return invoke<boolean[]>("fs_path_exists", { paths });
 }
 
+export async function companionStageModel(sourcePath: string): Promise<string> {
+  return invoke<string>("companion_stage_model", { sourcePath });
+}
+
 export async function fsFindByName(names: string[]): Promise<(string | null)[]> {
   return invoke<(string | null)[]>("fs_find_by_name", { names });
 }

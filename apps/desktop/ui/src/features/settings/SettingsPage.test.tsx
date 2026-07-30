@@ -2693,52 +2693,56 @@ describe("SettingsPage LSP settings", () => {
     expect(imageSection).not.toBeNull();
     const imageControls = within(imageSection as HTMLElement);
 
-    const providerSelect = imageControls.getByLabelText("image_view_provider");
-    const modelSelect = imageControls.getByLabelText("image_view_model");
+    // Custom dropdown: trigger button opens a listbox of options.
+    const providerTrigger = imageControls.getByRole("button", {
+      name: "image_view_provider",
+    });
+    const modelTrigger = imageControls.getByRole("button", {
+      name: "image_view_model",
+    });
 
     // Save button is disabled when nothing has changed from the saved state.
     expect(
       imageControls.getByRole("button", { name: "保存识图配置" }),
     ).toBeDisabled();
 
+    // Initial model list mirrors the saved provider (timiai).
+    fireEvent.click(modelTrigger);
+    let modelListbox = await screen.findByRole("listbox", {
+      name: "image_view_model",
+    });
+    expect(modelListbox.textContent).toContain("gpt-5.5");
+    expect(modelListbox.textContent).toContain("claude-opus-4.8");
+    // Close via the mousedown-outside listener.
+    fireEvent.mouseDown(document.body);
+
     // Only providers with a resolved key are offered; DeepSeek (no key) is
-    // hidden from the image view source list.
-    const providerOptions = (
-      providerSelect as HTMLSelectElement
-    ).textContent;
-    expect(providerOptions).toContain("TimiAI");
-    expect(providerOptions).toContain("CommandCode");
-    expect(providerOptions).not.toContain("DeepSeek");
+    // hidden from the image view source list. Switching to CommandCode must
+    // refresh the model list immediately — the cascade the bug broke.
+    fireEvent.click(providerTrigger);
+    const providerListbox = await screen.findByRole("listbox", {
+      name: "image_view_provider",
+    });
+    expect(providerListbox.textContent).toContain("TimiAI");
+    expect(providerListbox.textContent).toContain("CommandCode");
+    expect(providerListbox.textContent).not.toContain("DeepSeek");
+    fireEvent.click(
+      within(providerListbox).getByRole("button", { name: "CommandCode" }),
+    );
 
-    // Initial draft mirrors the saved provider (timiai); its catalog models
-    // populate the model picker before any save.
-    expect(providerSelect).toHaveValue("timiai");
-    expect(
-      (modelSelect as HTMLSelectElement).textContent,
-    ).toContain("gpt-5.5");
-    expect(
-      (modelSelect as HTMLSelectElement).textContent,
-    ).toContain("claude-opus-4.8");
-
-    // Switching the provider dropdown must refresh the model list immediately,
-    // without saving first — this is the cascade the bug broke.
-    fireEvent.change(providerSelect, { target: { value: "commandcode" } });
-    expect(providerSelect).toHaveValue("commandcode");
-    // The draft model resets when the provider changes.
-    expect(modelSelect).toHaveValue("");
-    expect(
-      (modelSelect as HTMLSelectElement).textContent,
-    ).toContain("claude-sonnet-4-6");
-    expect(
-      (modelSelect as HTMLSelectElement).textContent,
-    ).toContain("deepseek/deepseek-v4-pro");
+    fireEvent.click(modelTrigger);
+    modelListbox = await screen.findByRole("listbox", {
+      name: "image_view_model",
+    });
+    expect(modelListbox.textContent).toContain("claude-sonnet-4-6");
+    expect(modelListbox.textContent).toContain("deepseek/deepseek-v4-pro");
     // The previous provider's exclusive model must no longer be offered.
-    expect(
-      (modelSelect as HTMLSelectElement).textContent,
-    ).not.toContain("gpt-5.4");
+    expect(modelListbox.textContent).not.toContain("gpt-5.4");
 
     // Selecting a model and saving persists the draft provider + model.
-    fireEvent.change(modelSelect, { target: { value: "claude-sonnet-4-6" } });
+    fireEvent.click(
+      within(modelListbox).getByRole("button", { name: "claude-sonnet-4-6" }),
+    );
     fireEvent.click(
       imageControls.getByRole("button", { name: "保存识图配置" }),
     );

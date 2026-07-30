@@ -794,6 +794,9 @@ export function ConversationTimeline({
   const userScrolledUp = useRef(false);
   const manualScrollIntent = useRef(false);
   const stickCorrectionActive = useRef(false);
+  /** 原生滚动条拖拽中（pointerdown 在滚动条上 → pointerup）。期间禁止吸底，
+      否则 ResizeObserver/布局效应会把 thumb 拽回底部造成抖动。 */
+  const scrollbarDragging = useRef(false);
   const visibleSessionId = useRef(snapshot.session.id);
   const [visibleCount, setVisibleCount] = useState(INITIAL_TIMELINE_WINDOW);
   const [expandedCollapseGroups, setExpandedCollapseGroups] = useState<Set<string>>(
@@ -890,9 +893,29 @@ export function ConversationTimeline({
     const markScrollbarDragIntent = (event: PointerEvent) => {
       // Clicking the scrollbar track/thumb is a user scroll gesture. Content
       // clicks should not unpin follow mode.
-      if (event.target === el) unpinFromUser();
+      if (event.target === el) {
+        unpinFromUser();
+        scrollbarDragging.current = true;
+      }
+    };
+    const clearScrollbarDrag = () => {
+      if (!scrollbarDragging.current) return;
+      scrollbarDragging.current = false;
+      // 松手时以最终停留位置裁决：明确停在底部才恢复 follow；
+      // 拖拽途中经过底部附近不算数，避免临界抖动导致的误吸。
+      if (isNearBottom(el)) {
+        userScrolledUp.current = false;
+        manualScrollIntent.current = false;
+      } else {
+        userScrolledUp.current = true;
+      }
     };
     const handleScroll = () => {
+      if (scrollbarDragging.current) {
+        // 拖拽途中的位置变化全部忽略，由松手时统一裁决，
+        // 避免 thumb 掠过底部时 userScrolledUp 被意外清零。
+        return;
+      }
       if (isNearBottom(el)) {
         userScrolledUp.current = false;
         manualScrollIntent.current = false;
@@ -915,6 +938,8 @@ export function ConversationTimeline({
     el.addEventListener("pointerdown", markScrollbarDragIntent);
     el.addEventListener("keydown", markKeyboardIntent);
     el.addEventListener("scroll", handleScroll, { passive: true });
+    window.addEventListener("pointerup", clearScrollbarDrag);
+    window.addEventListener("pointercancel", clearScrollbarDrag);
     return () => {
       el.removeEventListener("wheel", markWheelIntent);
       el.removeEventListener("touchstart", markTouchStart);
@@ -922,6 +947,8 @@ export function ConversationTimeline({
       el.removeEventListener("pointerdown", markScrollbarDragIntent);
       el.removeEventListener("keydown", markKeyboardIntent);
       el.removeEventListener("scroll", handleScroll);
+      window.removeEventListener("pointerup", clearScrollbarDrag);
+      window.removeEventListener("pointercancel", clearScrollbarDrag);
       if (timelineScrollController?.stickToBottom === scrollToBottom) {
         timelineScrollController = null;
       }
@@ -945,7 +972,7 @@ export function ConversationTimeline({
   // refresh) can reflow the center column without bumping timeline revision.
   // While sticky, re-pin after commit/layout so we don't stay stranded.
   useLayoutEffect(() => {
-    if (userScrolledUp.current) return;
+    if (userScrolledUp.current || scrollbarDragging.current) return;
     scrollToBottom();
   });
 
@@ -956,7 +983,7 @@ export function ConversationTimeline({
     let frame = 0;
     let timeout = 0;
     const scheduleStick = () => {
-      if (userScrolledUp.current) return;
+      if (userScrolledUp.current || scrollbarDragging.current) return;
       cancelAnimationFrame(frame);
       window.clearTimeout(timeout);
       // Wait for the workbench split/right-panel layout to settle. Clicking

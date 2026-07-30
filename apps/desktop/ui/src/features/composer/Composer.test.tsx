@@ -336,6 +336,50 @@ describe("Composer", () => {
     expect(screen.getByRole("button", { name: /Model.*deepseek-v4-pro/ })).toBeDisabled();
   });
 
+  it("removes an attachment pasted in another session of the same workspace", async () => {
+    const { setComposerDraftAttachments } = await import("./composer-draft-store");
+    const imageAttachment = {
+      id: "img-1",
+      name: "screenshot.png",
+      displayName: "screenshot.png",
+      mimeType: "image/png",
+      data: "abc",
+      text: null,
+      uri: null,
+      kind: "image" as const,
+      path: null,
+      startLine: null,
+      endLine: null,
+      previewUrl: "data:image/png;base64,abc",
+      thumbnailData: null,
+      thumbnailMimeType: null,
+    };
+
+    // Session A (running) — user pastes an image here.
+    const sessionA = makeSnapshot({
+      session: { ...makeSnapshot().session, id: "s-a", status: "Streaming" },
+      prompt_capabilities: { image: true, embedded_context: true, session_steer: false },
+    });
+    const viewA = render(<Composer snapshot={sessionA} onStateChange={vi.fn()} />);
+    setComposerDraftAttachments("/repo", [imageAttachment]);
+    await screen.findByRole("button", { name: "移除 screenshot.png" });
+    viewA.unmount();
+
+    // Switch to session B (idle) in the same workspace — the shared draft
+    // still shows the image. The user clicks remove here.
+    const sessionB = makeSnapshot({
+      session: { ...makeSnapshot().session, id: "s-b", status: "Idle" },
+    });
+    render(<Composer snapshot={sessionB} onStateChange={vi.fn()} />);
+
+    const removeButton = await screen.findByRole("button", { name: "移除 screenshot.png" });
+    fireEvent.click(removeButton);
+
+    await waitFor(() => {
+      expect(screen.queryByRole("button", { name: "移除 screenshot.png" })).not.toBeInTheDocument();
+    });
+  });
+
   it("splits BYOK model choices by provider in the composer controls", async () => {
     vi.mocked(sessionSetConfigControl).mockResolvedValue({ hydrated: true, controls: [] });
     const snapshot = makeSnapshot({

@@ -9,6 +9,8 @@ import {
   X,
 } from "lucide-react";
 import { ModelEntrySelect } from "./ModelEntrySelect";
+import { SettingsSelect } from "./SettingsSelect";
+import { CompanionSettingsSection } from "../companion/ui/CompanionSettingsSection";
 import type {
   AgentCliId,
   AgentInstallResult,
@@ -96,6 +98,7 @@ export type SettingsPane =
   | "general"
   | "web"
   | "image"
+  | "companion"
   | "archive"
   | "remote"
   | "usage"
@@ -2711,42 +2714,34 @@ export function SettingsPage({
           </div>
           <label className="settings-field settings-provider-source-field">
             <span>识图模型来源（BYOK provider）</span>
-            <select
-              aria-label="image_view_provider"
-              className="settings-provider-native-select"
+            <SettingsSelect
+              ariaLabel="image_view_provider"
               value={imageViewDraftProvider}
               disabled={busyImage}
-              onChange={(event) => {
-                setImageViewDraftProvider(event.currentTarget.value);
+              placeholder="— 选择 provider —"
+              options={byokProfiles.map((profile) => ({
+                value: profile.id,
+                label: profile.label,
+              }))}
+              onChange={(next) => {
+                setImageViewDraftProvider(next);
                 setImageViewDraftModel("");
               }}
-            >
-              <option value="">— 选择 provider —</option>
-              {byokProfiles.map((profile) => (
-                <option key={profile.id} value={profile.id}>
-                  {profile.label}
-                </option>
-              ))}
-            </select>
+            />
           </label>
           <label className="settings-field settings-provider-source-field">
             <span>识图模型</span>
-            <select
-              aria-label="image_view_model"
-              className="settings-provider-native-select"
+            <SettingsSelect
+              ariaLabel="image_view_model"
               value={imageViewDraftModel}
               disabled={busyImage || !imageViewDraftProvider}
-              onChange={(event) =>
-                setImageViewDraftModel(event.currentTarget.value)
-              }
-            >
-              <option value="">— 选择模型 —</option>
-              {imageViewModelOptions.map((model: string) => (
-                <option key={model} value={model}>
-                  {model}
-                </option>
-              ))}
-            </select>
+              placeholder="— 选择模型 —"
+              options={imageViewModelOptions.map((model: string) => ({
+                value: model,
+                label: model,
+              }))}
+              onChange={setImageViewDraftModel}
+            />
           </label>
           <div className="settings-provider-config-actions">
             {imageMessage && (
@@ -2789,25 +2784,25 @@ export function SettingsPage({
           </div>
           <label className="settings-field settings-provider-source-field">
             <span>协议</span>
-            <select
-              aria-label="image_generate_protocol"
-              className="settings-provider-native-select"
+            <SettingsSelect
+              ariaLabel="image_generate_protocol"
               value={imageGenDraftProtocol}
               disabled={busyImage}
-              onChange={(event) =>
-                setImageGenDraftProtocol(
-                  event.currentTarget.value as ImageGenerateProtocol,
-                )
+              options={[
+                {
+                  value: "openai_images",
+                  label: "OpenAI images/generations + images/edits",
+                },
+                {
+                  value: "chat_completions",
+                  label: "OpenAI chat/completions（内联图片输出）",
+                },
+                { value: "gemini", label: "Google Gemini generateContent" },
+              ]}
+              onChange={(next) =>
+                setImageGenDraftProtocol(next as ImageGenerateProtocol)
               }
-            >
-              <option value="openai_images">
-                OpenAI images/generations + images/edits
-              </option>
-              <option value="chat_completions">
-                OpenAI chat/completions（内联图片输出）
-              </option>
-              <option value="gemini">Google Gemini generateContent</option>
-            </select>
+            />
           </label>
           <label className="settings-field settings-provider-source-field">
             <span>Base URL</span>
@@ -4138,6 +4133,13 @@ export function SettingsPage({
           </button>
           <button
             type="button"
+            className={`settings-nav-item ${activePane === "companion" ? "is-active" : ""}`}
+            onClick={() => setActivePane("companion")}
+          >
+            陪伴角色
+          </button>
+          <button
+            type="button"
             className={`settings-nav-item ${activePane === "usage" ? "is-active" : ""}`}
             onClick={() => setActivePane("usage")}
           >
@@ -4441,6 +4443,7 @@ export function SettingsPage({
         )}
 
         {activePane === "web" && renderWebToolsSection()}
+        {activePane === "companion" && <CompanionSettingsSection />}
 
         {activePane === "image" && renderImageSection()}
 
@@ -5019,6 +5022,7 @@ function UsageDailyChart({ buckets }: { buckets: UsageDailyBucket[] }) {
 
 function settingsPaneTitle(pane: SettingsPane): string {
   if (pane === "archive") return "已归档";
+  if (pane === "companion") return "陪伴角色";
   if (pane === "remote") return "远程";
   if (pane === "web") return "Web 工具";
   if (pane === "image") return "图像能力";
@@ -5030,6 +5034,8 @@ function settingsPaneTitle(pane: SettingsPane): string {
 
 function settingsPaneDescription(pane: SettingsPane): string {
   if (pane === "archive") return "查看、恢复或删除保留在本地的已归档对话。";
+  if (pane === "companion")
+    return "配置工作台的 3D 陪伴角色：人设强度、模型资产与显示偏好。";
   if (pane === "remote")
     return "管理远程 Linux 开发机，并在打开远程目录前验证 SSH。";
   if (pane === "web")

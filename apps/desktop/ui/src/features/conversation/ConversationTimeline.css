@@ -676,13 +676,14 @@
 }
 
 .msg-content-assistant {
-  --md-text: color-mix(in srgb, var(--text-muted) 76%, var(--text-soft));
-  --md-strong: color-mix(in srgb, var(--text-strong) 58%, var(--text-muted));
-  --md-soft: color-mix(in srgb, var(--text-soft) 92%, var(--text-muted));
-  /* Inline code pops against the dark surface with the theme accent so
-     identifiers / paths stay scannable inside prose. */
-  --md-code-text: color-mix(in srgb, var(--accent-hover) 78%, var(--text-strong));
-  --md-code-bg: color-mix(in srgb, var(--accent) 9%, transparent);
+  --md-text: var(--text-muted);
+  --md-strong: var(--text-strong);
+  --md-soft: var(--text-muted);
+  /* Inline code carries no background pill — it stands out purely by color.
+     A muted steel-blue reads clearly on the dark surface without the harsh
+     glare of a saturated bright blue. */
+  --md-code-text: #9db8d6;
+  --md-code-bg: color-mix(in srgb, var(--accent) 20%, transparent);
   --md-code-block-bg: color-mix(in srgb, var(--app-bg) 88%, var(--surface-bg));
   --md-code-border: color-mix(in srgb, var(--accent) 20%, transparent);
   --md-table-border: color-mix(in srgb, var(--border-subtle) 48%, transparent);
@@ -849,13 +850,13 @@
 
 .md-inline-code {
   font-family: var(--font-mono);
-  font-size: 0.86em;
-  font-weight: 450;
-  background: color-mix(in srgb, var(--accent) 7%, transparent);
+  font-size: 0.92em;
+  font-weight: 400;
+  background: transparent;
   color: var(--md-code-text, var(--text-muted));
-  padding: 0.5px 4px;
+  padding: 0;
   border: none;
-  border-radius: 3px;
+  border-radius: 0;
 }
 
 .md-file-path {
@@ -1018,7 +1019,7 @@
 
 :root[data-theme="light"] .md-inline-code {
   color: var(--md-code-text);
-  background: color-mix(in srgb, var(--accent) 6%, transparent);
+  background: transparent;
   border: none;
 }
 

@@ -155,40 +155,59 @@ impl Application {
         };
 
         let prompt = format!(
-            "在当前 Git 仓库里查看已暂存的变更，然后输出一条详细的 commit message。\n\
-             建议先用只读命令建立全局视图，再按需深入细节，例如：\n\
-             - `git status --short`\n\
-             - `git diff --staged --stat`\n\
-             - `git diff --staged --name-status`\n\
-             - `git diff --staged`（内容过长或被截断时，再对关键文件用 `git diff --staged -- <path>`）\n\
-             - 必要时用 `git log -8 --oneline` 参考近期提交风格\n\
+            "你是 commit message 生成器。请直接在回复正文里给我一条 commit message，禁止调用任何写文件/编辑/创建文件的工具。\n\
              \n\
-             输出格式必须是完整的多行 commit message：\n\
-             1. 第一行：约定式提交标题（如 feat/fix/refactor/docs/test/chore: 描述），不超过 72 个字符，概括这次提交的核心意图\n\
+             第一步：用尽量少的只读命令了解已暂存变更。推荐一次性执行：\n\
+             - `git diff --staged` 看完整 staged diff（若太长才改用 `--stat` + `--name-status`）\n\
+             - 可选 `git log -5 --oneline` 参考提交风格\n\
+             不要逐个文件反复跑 `git diff --staged -- <path>`，一次看全即可。\n\
+             \n\
+             第二步：看完后立即在回复正文输出 commit message，到此就结束，不要再做任何操作。\n\
+             \n\
+             格式：\n\
+             1. 第一行：约定式提交标题（feat/fix/refactor/docs/test/chore: 描述），≤72 字符\n\
              2. 空一行\n\
-             3. 正文：用 2-6 条 `- ` 项目符号详细说明改动，覆盖：\n\
-                - 改了什么模块/文件/能力\n\
-                - 为什么改、解决了什么问题\n\
-                - 关键行为变化、兼容性或风险点（如有）\n\
-                - 测试/验证情况（如能从 diff 看出）\n\
+             3. 正文：2-6 条 `- ` 项目符号，说明改了什么、为什么改、关键影响\n\
              \n\
-             要求：\n\
-             - 尽量详细，优先写清动机与影响，不要只写空泛的 one-liner\n\
-             - 只输出 commit message 本身，不要任何解释、前后缀、引号、代码块或 markdown 标题\n\
-             - 不要输出思考过程、计划步骤或“Let me…”/“I now have…”这类旁白\n\
-             - 不要包在 ``` 代码围栏里\n\
-             - 只允许只读查看命令，不要 stage/unstage/commit/push，也不要修改任何文件。"
+             铁律（违反则任务失败）：\n\
+             - 把 commit message 作为普通文本直接写在回复里，不要调用任何工具来创建、写入或保存文件（包括但不限于 write_file / edit_file / apply_patch / shell 重定向）\n\
+             - 不要把结果保存到文件，不要创建 commit_message.txt 之类的文件\n\
+             - 不要包在 ``` 代码围栏里，不要加引号、标签、markdown 标题\n\
+             - 不要输出思考过程、“Let me…”/“Generated…”等旁白\n\
+             - 只允许只读命令，禁止 stage/unstage/commit/push 或任何修改操作\n\
+             - 全部内容就是这一条 commit message 本身。"
         );
 
         progress("正在启动 AI 会话…");
         let mut handle =
             SessionHandle::start(config).map_err(|e| format!("无法启动 AI 会话：{e}"))?;
-        // Read-only permission: inspection commands such as `git diff` /
-        // `git status` are auto-approved; mutating commands stay blocked.
-        let _ = handle.set_permission_mode("plan");
+        crate::startup_perf::mark("commit-gen/handle_started", "session handle created");
+        // The throwaway session does NOT inherit the visible session's model —
+        // `SessionConfig.model` only carries a display label, so without an
+        // explicit `set_model` the agent falls back to the default baked into
+        // `config.toml`. That default frequently points at a model the BYOK
+        // proxy can't serve, stalling the task with zero events until the
+        // 120s timeout ("仍在等待 AI 响应…"). Push the current model first.
+        if let Some((model_id, provider)) = self.current_model_for_background_session() {
+            crate::startup_perf::mark(
+                "commit-gen/set_model",
+                format!("model={model_id:?} provider={provider:?}"),
+            );
+            if let Err(error) = handle.set_model(model_id, provider) {
+                crate::startup_perf::mark("commit-gen/set_model_failed", error.to_string());
+            }
+        } else {
+            crate::startup_perf::mark("commit-gen/set_model_skipped", "no model resolved");
+        }
+        // Full access: the生成任务无权限 UI，plan/readonly 模式下任何触发
+        // `Ask` 的命令都会让 broker 无限阻塞等用户回答（死锁，表现为
+        // "仍在等待 AI 响应" 永不结束）。Full access 下 broker 直接放行，
+        // 只读约束由 prompt（"只允许只读命令"）在 agent 层面保证。
+        let _ = handle.set_permission_mode("full-access");
 
         progress("正在查看已暂存的变更…");
         let task = handle.send_prompt_async(prompt);
+        crate::startup_perf::mark("commit-gen/prompt_dispatched", "prompt sent to worker");
         let collected = match task {
             Ok(mut task) => {
                 // Only keep assistant text emitted after the latest tool call.
@@ -196,15 +215,39 @@ impl Application {
                 // draft is not polluted with chain-of-thought preamble.
                 let mut text = String::new();
                 let mut run_error: Option<String> = None;
+                // 非阻塞轮询 + 超时 + 心跳：ACP agent 可能长时间无响应
+                // （网络/模型挂起/权限阻塞），同步 wait_for_events 会让整个
+                // 任务假死，UI 只剩一句不再更新的进度。这里改为 try_recv
+                // 轮询，定期发心跳进度，并在超时后主动放弃。
+                const GENERATE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+                const HEARTBEAT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
+                const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(50);
+                let started_at = std::time::Instant::now();
+                let mut last_heartbeat = started_at;
+                let mut heartbeat_count = 0u32;
                 while !task.is_finished() {
-                    match task.wait_for_events(&mut handle) {
+                    if started_at.elapsed() > GENERATE_TIMEOUT {
+                        crate::startup_perf::mark(
+                            "commit-gen/timeout",
+                            format!("no response after {}s, collected_len={}", GENERATE_TIMEOUT.as_secs(), text.len()),
+                        );
+                        run_error = Some(format!(
+                            "生成超时（{} 秒无响应），请检查 AI 服务后重试",
+                            GENERATE_TIMEOUT.as_secs()
+                        ));
+                        break;
+                    }
+                    match task.collect_ready_events(&mut handle) {
                         Ok(events) => {
                             for event in &events {
                                 match event {
                                     ClientEvent::MessageChunk {
                                         role: workspace_model::MessageRole::Assistant,
                                         content,
-                                    } => text.push_str(content),
+                                    } => {
+                                        text.push_str(content);
+                                        crate::startup_perf::mark("commit-gen/chunk", format!("len={}", text.len()));
+                                    }
                                     ClientEvent::ToolStarted { name, summary, .. } => {
                                         text.clear();
                                         let label = if summary.is_empty() {
@@ -212,9 +255,22 @@ impl Application {
                                         } else {
                                             summary.clone()
                                         };
+                                        crate::startup_perf::mark("commit-gen/tool", label.clone());
                                         progress(&format!("正在执行：{label}"));
+                                        last_heartbeat = std::time::Instant::now();
+                                        // The prompt forbids write tools — catch a
+                                        // misbehaving agent that saves the message
+                                        // to a file instead of emitting it as text,
+                                        // which would otherwise stall until timeout
+                                        // with `collected_len=0`.
+                                        if is_write_tool(name) {
+                                            run_error = Some(format!(
+                                                "AI 尝试写入文件（{name}）而非直接输出结果，已中止"
+                                            ));
+                                        }
                                     }
                                     ClientEvent::Interrupted { reason } => {
+                                        crate::startup_perf::mark("commit-gen/interrupted", reason.clone());
                                         run_error = Some(reason.clone());
                                     }
                                     _ => {}
@@ -226,6 +282,14 @@ impl Application {
                             break;
                         }
                     }
+                    // 心跳：长时间无事件时让 UI 知道任务仍存活
+                    if last_heartbeat.elapsed() >= HEARTBEAT_INTERVAL {
+                        heartbeat_count += 1;
+                        let dots = ".".repeat((heartbeat_count % 3 + 1) as usize);
+                        progress(&format!("仍在等待 AI 响应{dots}（已等待 {} 秒）", started_at.elapsed().as_secs()));
+                        last_heartbeat = std::time::Instant::now();
+                    }
+                    std::thread::sleep(POLL_INTERVAL);
                 }
                 for event in task.into_events() {
                     match &event {
@@ -259,6 +323,28 @@ impl Application {
 /// Normalize an AI-produced commit message into a multi-line draft.
 /// Keeps the subject + body, strips thinking preamble / code fences / labels /
 /// surrounding quotes.
+/// Detect tools that create/modify files. The commit-gen prompt forbids these
+/// Detect tools that create/modify files. The commit-gen prompt forbids these
+/// (the agent must emit the message as assistant text, not save it to disk);
+/// returning true lets the loop bail out instead of stalling to timeout.
+fn is_write_tool(name: &str) -> bool {
+    let lower = name.trim().to_ascii_lowercase();
+    const WRITE_TOOLS: &[&str] = &[
+        "write_file",
+        "writefile",
+        "create_file",
+        "createfile",
+        "edit_file",
+        "editfile",
+        "apply_patch",
+        "applypatch",
+        "str_replace_editor",
+        "rewrite_file",
+        "write_to_file",
+    ];
+    WRITE_TOOLS.iter().any(|tool| lower == *tool || lower.contains(tool))
+}
+
 fn sanitize_generated_commit_message(raw: &str) -> String {
     let mut text = raw.replace("\r\n", "\n").replace('\r', "\n");
     text = text.trim().to_string();

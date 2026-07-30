@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useMemo, useRef } from "react";
+import { useState, useEffect, useCallback, useMemo, useRef, lazy, Suspense } from "react";
 
 import type { UiSnapshot, AppTheme, ToolInvocation, PermissionInputResponse, WorkspaceDescriptor, AgentPlanEntry } from "../../types";
 import {
@@ -61,6 +61,11 @@ import {
   reviewableTurnChangeSetSignature,
 } from "./autoReview";
 import "./Workbench.css";
+
+// 陪伴角色：懒加载，未启用时零成本（spec: companion-rendering）
+const CompanionLayer = lazy(() =>
+  import("../companion/CompanionLayer").then((module) => ({ default: module.CompanionLayer })),
+);
 
 const INITIAL_REVIEW_PANEL_ACTIVE_TAB: ReviewPanelActiveTab = {
   kind: "base",
@@ -1466,6 +1471,9 @@ export function Workbench() {
             </div>
           )}
           {updateNotice}
+          <Suspense fallback={null}>
+            <CompanionLayer />
+          </Suspense>
         </div>
       </div>
     </div>

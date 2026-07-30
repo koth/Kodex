@@ -139,6 +139,23 @@ Recommended structure:
 
 The file list remains on the right. The selected diff should render in the center through Monaco diff mode where space is available.
 
+### Companion Character
+
+The workbench hosts an optional 3D companion character (yandere-style persona) as a self-contained floating layer.
+
+Recommended structure:
+
+- `features/companion/state` — pure state machine (`companionStateMachine`), session-event bridge (`companionBridge`), settings persistence (`companionSettingsStore`), React controller (`useCompanion`)
+- `features/companion/persona` — three-tier intensity line corpus (`lines.ts`) and deduplicating picker (`pickLine.ts`)
+- `features/companion/scene` — R3F Canvas wrapper (`CompanionCanvas`), VRM renderer (`CompanionAvatar`), procedural placeholder (`PlaceholderAvatar`), asset hook (`useVrmModel`)
+- `features/companion/ui` — speech bubble and settings section
+
+Key boundaries:
+
+- Consumes only existing `UiSnapshot` / `UiSnapshotPatch` Tauri events (same source as `useWorkbenchSnapshot`); no new backend commands.
+- Lazily loaded via `React.lazy` from `Workbench`; zero cost when disabled.
+- Degrades gracefully: WebGL 3D → static portrait → bubble-only.
+
 Diff identity is explicit. Review and timeline surfaces must open diffs by `change_set_id + path`, not by path alone. Persisted sources such as agent turns, overall agent conversation, and manual edits use the stored historical base/target text. Live Git sources use current repository tree pairs only: staged `HEAD -> index`, unstaged `index -> worktree`, and untracked `empty -> worktree`.
 
 ## Editing Design

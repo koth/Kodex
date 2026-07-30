@@ -524,7 +524,7 @@ impl Application {
         });
     }
 
-    pub(super) fn current_model_provider_for_persistence(&self) -> Option<String> {
+pub(super) fn current_model_provider_for_persistence(&self) -> Option<String> {
         let authoritative = self.authoritative_model_selection.as_ref();
         let pending = self.pending_model_restore.as_ref();
         let candidates = [
@@ -544,13 +544,59 @@ impl Application {
             }
         }
 
-        let model_control =
+let model_control =
             self.ui.session_config.controls.iter().find(|control| {
                 control.category == workspace_model::SessionConfigCategory::Model
             })?;
 
         infer_current_model_provider(model_control)
             .and_then(|provider| real_provider(&provider).map(str::to_string))
+    }
+
+    /// Resolve the (model_id, provider) pair the agent should be told to use.
+    ///
+    /// Background tasks (e.g. commit-message generation) spawn a throwaway
+    /// `SessionHandle` that does NOT inherit the visible session's model. The
+    /// `SessionConfig.model` field only carries a display label, so without an
+    /// explicit `set_model` the agent falls back to whatever default is baked
+    /// into `config.toml` — which often points at a dead/unprovisioned model
+    /// and stalls the whole task ("仍在等待 AI 响应" until timeout).
+    ///
+    /// This mirrors the main session's restore path
+    /// (`restore_pending_model_selection`): prefer the authoritative
+    /// selection set when the user picked a model, fall back to a pending
+    /// restore, then to the current session-config control value.
+    pub(super) fn current_model_for_background_session(
+        &self,
+    ) -> Option<(String, Option<String>)> {
+        if let Some(selection) = self.authoritative_model_selection.as_ref() {
+            let provider = selection
+                .provider
+                .as_deref()
+                .and_then(real_provider)
+                .map(str::to_string)
+                .or_else(|| provider_from_model_value(&selection.value).map(str::to_string));
+            return Some((selection.value.clone(), provider));
+        }
+        if let Some(selection) = self.pending_model_restore.as_ref() {
+            let provider = selection
+                .provider
+                .as_deref()
+                .and_then(real_provider)
+                .map(str::to_string)
+                .or_else(|| provider_from_model_value(&selection.value).map(str::to_string));
+            return Some((selection.value.clone(), provider));
+        }
+        let model_control = self
+            .ui
+            .session_config
+            .controls
+            .iter()
+            .find(|control| control.category == workspace_model::SessionConfigCategory::Model)?;
+        let value_id = current_model_value(model_control).to_string();
+        let provider = infer_current_model_provider(model_control)
+            .and_then(|provider| real_provider(&provider).map(str::to_string));
+        Some(model_request_value_and_provider(&value_id, provider))
     }
 }
 

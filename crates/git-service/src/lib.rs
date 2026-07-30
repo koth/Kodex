@@ -105,13 +105,28 @@ impl GitService {
             if !relevant {
                 continue;
             }
-            let status_path_buf = PathBuf::from(status_path);
+            // git status 对 rename 返回 "old -> new" 形式，对未跟踪目录
+            // 可能带尾斜杠；统一规范化后再匹配。保持精确匹配语义
+            // （不做目录前缀递归，与 does_not_recurse_into_a_directory 契约一致）。
+            let normalized_status = status_path
+                .rsplit(" -> ")
+                .next()
+                .unwrap_or(status_path)
+                .trim_end_matches('/');
+            let status_path_buf = PathBuf::from(normalized_status);
             if requested.contains(&status_path_buf) {
                 to_stage.push(status_path_buf);
             }
         }
 
         if to_stage.is_empty() {
+            // 静默返回会让前端误以为成功（"点击暂存但没反应"）。
+            // 请求的路径在 git status 中无任何匹配时打日志，便于定位
+            // 路径规范化/状态过滤的边界问题。
+            eprintln!(
+                "[git-service] stage_status_paths: 请求的路径在 git status 中无匹配: {:?}",
+                requested
+            );
             return Ok(());
         }
 
@@ -198,7 +213,8 @@ impl GitService {
     /// binary so credential helpers / SSH agents work the same as the CLI.
     pub fn push(path: impl AsRef<Path>) -> anyhow::Result<String> {
         let path = path.as_ref();
-        let output = std::process::Command::new("git")
+        let mut command = std::process::Command::new("git");
+        command
             .arg("-C")
             .arg(path)
             .args(["push", "--porcelain"])
@@ -208,9 +224,16 @@ impl GitService {
             .env(
                 "GIT_SSH_COMMAND",
                 "ssh -o BatchMode=yes -o ConnectTimeout=20 -o StrictHostKeyChecking=accept-new",
-            )
-            .output()
-            .context("无法启动 git push")?;
+            );
+        // Windows: hide the transient console window that `git.exe` (and its
+        // ssh/credential-helper children) would otherwise flash on push.
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            const CREATE_NO_WINDOW: u32 = 0x08000000;
+            command.creation_flags(CREATE_NO_WINDOW);
+        }
+        let output = command.output().context("无法启动 git push")?;
         let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
         if !output.status.success() {
@@ -827,7 +850,26 @@ mod tests {
         assert!(snapshot
             .changed_files
             .iter()
-            .all(|f| !f.path.to_str().unwrap_or("").ends_with("clean.rs")));
+            .all(|f| !matches!(f.section, ChangeSection::Staged)));
+    }
+
+    #[test]
+    fn stage_status_paths_stages_worktree_rename() {
+        let (dir, repo) = setup_repo();
+        commit_file(&repo, "old.rs", "fn a() {}\n");
+        // Rename in the worktree (not staged): git status reports the
+        // worktree rename. The frontend sends the *new* path; the backend
+        // must normalize "old -> new" (or the new path) and stage it.
+        fs::rename(dir.path().join("old.rs"), dir.path().join("new.rs")).unwrap();
+        drop(repo);
+
+        GitService::stage_status_paths(dir.path(), &["new.rs".to_string()]).unwrap();
+
+        let snapshot = GitService::open(dir.path()).unwrap();
+        assert!(snapshot
+            .changed_files
+            .iter()
+            .any(|f| matches!(f.section, ChangeSection::Staged)));
     }
 
     #[test]

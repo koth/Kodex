@@ -1833,8 +1833,20 @@
   position: absolute;
   top: -7px;
   right: -7px;
+  z-index: 5;
+  /* Enlarge the hit area without changing the visual 20px size so the
+     button is easy to click and never occluded by the preview button. */
+  padding: 0;
+  margin: 0;
   background: rgba(28, 30, 31, 0.92);
   box-shadow: 0 6px 16px rgba(0, 0, 0, 0.26);
+}
+
+/* Invisible enlarged hit target around the small remove button. */
+.composer-image-remove::before {
+  content: "";
+  position: absolute;
+  inset: -8px;
 }
 
 .composer-attachment-remove:hover {

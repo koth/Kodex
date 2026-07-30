@@ -1,6 +1,7 @@
 import { useState, useRef, useCallback, useMemo, useEffect } from "react";
 import type { AvailableCommand, SessionConfigControl, UiSnapshot, UserPromptContent } from "../../types";
 import { editorGetContent, sessionCancel, sessionSendPrompt, sessionReconnect, sessionSetConfigControl } from "../../lib/tauri";
+import { invoke } from "@tauri-apps/api/core";
 import { composerDraftKey, useComposerDraft, type ComposerAttachmentDraft } from "./composer-draft-store";
 import { MentionMenu } from "./MentionMenu";
 import { useMention, type MentionKind } from "./use-mention";
@@ -394,11 +395,19 @@ export function Composer({
     setControlError(null);
     try {
       const nextAttachments = await Promise.all(files.map(readAttachment));
+      invoke("debug_log_event", {
+        tag: "paste-write",
+        payload: JSON.stringify({
+          workspaceRoot: snapshot.workspace.root,
+          sessionId: snapshot.session.id,
+          draftOwnerKey,
+        }),
+      }).catch(() => undefined);
       setAttachments((current) => [...current, ...nextAttachments]);
     } catch (error) {
       setControlError(String(error));
     }
-  }, [imageInputEnabled, turnActive]);
+  }, [draftOwnerKey, imageInputEnabled, snapshot.session.id, snapshot.workspace.root, turnActive]);
 
   const handleCancel = useCallback(async () => {
     if (!turnActive || cancelling) return;

@@ -97,6 +97,20 @@ pub fn fs_reveal(state: State<'_, AppState>, path: String, select: bool) -> Resu
     })
 }
 
+#[tauri::command]
+pub fn debug_log_event(tag: String, payload: String) -> Result<(), String> {
+    use std::io::Write;
+    let paths = app_core::AppPaths::resolve().map_err(|e| e.to_string())?;
+    paths.ensure_standard_dirs().map_err(|e| e.to_string())?;
+    let file = paths.logs_dir().join("paste-diag.log");
+    let mut handle = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&file)
+        .map_err(|e| format!("Cannot open diag log: {e}"))?;
+    writeln!(handle, "[{tag}] {payload}").map_err(|e| format!("Cannot write diag log: {e}"))
+}
+
 /// Cheap existence check used by the chat renderer to decide whether an
 /// inline-code span is a real, openable workspace file before rendering it
 /// as a clickable link. Returns false for anything outside the workspace,
@@ -113,6 +127,52 @@ pub async fn fs_path_exists(app: AppHandle, paths: Vec<String>) -> Result<Vec<bo
     })
     .await
     .map_err(|e| format!("Path exists task failed: {e}"))?
+}
+
+/// 将用户选择的 VRM 模型复制到受控资产目录（$HOME/.kodex/companion/），
+/// 返回可直接用于 asset 协议加载的绝对路径。
+/// 该目录已在 tauri.conf.json 的 assetProtocol.scope 白名单内，
+/// 避免「convertFileSrc + 任意路径」在 Windows 下的 scope 匹配不确定性。
+#[tauri::command]
+pub async fn companion_stage_model(source_path: String) -> Result<String, String> {
+    tokio::task::spawn_blocking(move || {
+        let source = Path::new(&source_path);
+        if !source.exists() {
+            return Err(format!("源文件不存在: {source_path}"));
+        }
+        let extension = source
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .map(|ext| ext.to_lowercase())
+            .unwrap_or_default();
+        if extension != "vrm" && extension != "vrma" {
+            return Err(format!("仅支持 .vrm / .vrma 文件，当前: .{extension}"));
+        }
+        let size_mb = source
+            .metadata()
+            .map(|meta| meta.len() as f64 / 1_048_576.0)
+            .unwrap_or(0.0);
+        if size_mb > 64.0 {
+            return Err(format!("模型文件过大（{size_mb:.1}MB > 64MB），请压缩贴图后重试"));
+        }
+
+        let paths = app_core::AppPaths::resolve().map_err(|e| e.to_string())?;
+        let companion_dir = paths.root().join("companion");
+        std::fs::create_dir_all(&companion_dir)
+            .map_err(|e| format!("无法创建资产目录 {}: {e}", companion_dir.display()))?;
+
+        let file_name = source
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or_else(|| "无法解析文件名".to_string())?;
+        let target = companion_dir.join(file_name);
+        std::fs::copy(source, &target)
+            .map_err(|e| format!("复制到受控目录失败 {}: {e}", target.display()))?;
+
+        Ok(target.to_string_lossy().into_owned())
+    })
+    .await
+    .map_err(|e| format!("Stage model task failed: {e}"))?
 }
 
 fn ensure_local_workspace(app: &app_core::Application) -> Result<(), String> {

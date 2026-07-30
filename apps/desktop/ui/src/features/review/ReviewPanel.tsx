@@ -3,7 +3,7 @@ import type { Dispatch, ReactNode, SetStateAction } from "react";
 import { MultiFileDiff } from "@pierre/diffs/react";
 import { GitCommitHorizontal } from "lucide-react";
 import type { UiSnapshot, ChangedFile, ChangeSection, DiffStats, FileEntry, ChangeSetSummary, FileChangeSummary, FileChangeRecord, AppTheme } from "../../types";
-import { fsListDir, gitStage, gitUnstage, reviewRejectPatch, sessionListChangeSets, sessionListChangeSetFiles, sessionGetChangeSetFileDiff } from "../../lib/tauri";
+import { fsListDir, fsReveal, gitStage, gitUnstage, reviewRejectPatch, sessionListChangeSets, sessionListChangeSetFiles, sessionGetChangeSetFileDiff } from "../../lib/tauri";
 import { CommitDialog } from "../changes/CommitDialog";
 import { DiffTab } from "../editor/DiffTab";
 import {
@@ -855,13 +855,13 @@ function GitChangesTree({
       reject = false,
       isDir = false,
     ) => {
-      if (!canSendToContext && !trackable && !action && !reject) return;
       const width = 190;
       const items =
         (canSendToContext ? 1 : 0) +
         (trackable ? 1 : 0) +
         (action ? 1 : 0) +
-        (reject ? 1 : 0);
+        (reject ? 1 : 0) +
+        1;
       const height = items * 40 + 10;
       setContextMenu({
         path,
@@ -881,6 +881,15 @@ function GitChangesTree({
     setContextMenu(null);
     onAddComposerReference(path);
   }, [canSendToContext, onAddComposerReference]);
+
+  const handleRevealPath = useCallback(async (path: string) => {
+    setContextMenu(null);
+    try {
+      await fsReveal(path, true);
+    } catch (e) {
+      setContextMenuError(String(e));
+    }
+  }, []);
 
   const handleTrackFile = useCallback(
     async (path: string) => {
@@ -1118,6 +1127,7 @@ function GitChangesTree({
           onStageFile={handleStageFile}
           onUnstageFile={handleUnstageFile}
           onRejectFile={handleRejectFile}
+          onReveal={handleRevealPath}
         />
       )}
       {groupMenu && (
@@ -1173,6 +1183,7 @@ function ReviewFileContextMenu({
   onStageFile,
   onUnstageFile,
   onRejectFile,
+  onReveal,
 }: {
   menu: ReviewFileContextMenuState;
   canSendToContext: boolean;
@@ -1183,6 +1194,7 @@ function ReviewFileContextMenu({
   onStageFile?: (path: string) => void;
   onUnstageFile?: (path: string) => void;
   onRejectFile?: (path: string) => void;
+  onReveal?: (path: string) => void;
 }) {
   const busy = pendingPath != null;
   const isDirTrack = menu.trackable && menu.isDir;
@@ -1251,6 +1263,16 @@ function ReviewFileContextMenu({
           onClick={() => onRejectFile(menu.path)}
         >
           撤销改动
+        </button>
+      )}
+      {onReveal && (
+        <button
+          type="button"
+          role="menuitem"
+          disabled={busy}
+          onClick={() => onReveal(menu.path)}
+        >
+          {menu.isDir ? "在文件浏览器中打开" : "打开所在位置"}
         </button>
       )}
     </div>
@@ -2223,13 +2245,13 @@ function FileGroup({
         onFileContextMenu(path, x, y, isDir);
         return;
       }
-      if (!canSendToContext) return;
       const width = 190;
-      const height = 50;
+      const height = canSendToContext ? 90 : 50;
       setContextMenu({
         path,
         x: Math.min(x, window.innerWidth - width - 8),
         y: Math.min(y, window.innerHeight - height - 8),
+        isDir,
       });
     },
     [canSendToContext, onFileContextMenu],
@@ -2240,6 +2262,11 @@ function FileGroup({
     setContextMenu(null);
     onAddComposerReference(path);
   }, [canSendToContext, onAddComposerReference]);
+
+  const handleReveal = useCallback((path: string) => {
+    setContextMenu(null);
+    fsReveal(path, true).catch((e) => console.error(String(e)));
+  }, []);
 
   if (files.length === 0) return null;
 
@@ -2304,6 +2331,7 @@ function FileGroup({
           canSendToContext={canSendToContext}
           onSendToContext={handleSendToContext}
           onTrackFile={() => undefined}
+          onReveal={handleReveal}
         />
       )}
     </div>
@@ -2586,14 +2614,15 @@ function UntrackedTree({
         onFileContextMenu(path, x, y, trackable, isDir);
         return;
       }
-      if (!canSendToContext && !trackable) return;
       const width = 190;
-      const height = canSendToContext && trackable ? 88 : 50;
+      const items = (canSendToContext ? 1 : 0) + (trackable ? 1 : 0) + 1;
+      const height = items * 40 + 10;
       setContextMenu({
         path,
         x: Math.min(x, window.innerWidth - width - 8),
         y: Math.min(y, window.innerHeight - height - 8),
         trackable,
+        isDir,
       });
     },
     [canSendToContext, onFileContextMenu],
@@ -2604,6 +2633,11 @@ function UntrackedTree({
     setContextMenu(null);
     onAddComposerReference(path);
   }, [canSendToContext, onAddComposerReference]);
+
+  const handleReveal = useCallback((path: string) => {
+    setContextMenu(null);
+    fsReveal(path, true).catch((e) => console.error(String(e)));
+  }, []);
 
   if (files.length === 0) return null;
 
@@ -2648,6 +2682,7 @@ function UntrackedTree({
               canSendToContext={canSendToContext}
               onSendToContext={handleSendToContext}
               onTrackFile={handleTrackFile}
+              onReveal={handleReveal}
             />
           )}
         </div>

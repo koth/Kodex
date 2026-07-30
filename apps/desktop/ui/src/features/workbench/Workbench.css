@@ -441,9 +441,10 @@ body.is-resizing-left-sidebar .sidebar-resizer-hit::after {
   position: absolute;
   top: 0;
   bottom: 0;
-  left: -8px;
+  /* 热区偏向面板侧，让出内容区右缘的 8px 滚动条，避免遮挡滚动条拖拽 */
+  left: -2px;
   z-index: 8;
-  width: 16px;
+  width: 10px;
   padding: 0;
   border: 0;
   background: transparent;
@@ -455,7 +456,7 @@ body.is-resizing-left-sidebar .sidebar-resizer-hit::after {
   position: absolute;
   top: 12px;
   bottom: 12px;
-  left: 7px;
+  left: 4px;
   width: 1px;
   border-radius: 999px;
   background: color-mix(in srgb, var(--border-subtle) 72%, transparent);

@@ -77,7 +77,9 @@
   --font-display: 'SF Pro Display', 'SF Pro Text', 'Segoe UI Variable Display', BlinkMacSystemFont, -apple-system, ui-sans-serif, 'Segoe UI', 'Noto Sans SC', 'Helvetica Neue', Arial, 'Microsoft YaHei UI', 'Microsoft YaHei', sans-serif;
   --font-sans: 'SF Pro Text', 'Segoe UI Variable Text', BlinkMacSystemFont, -apple-system, ui-sans-serif, 'Segoe UI', 'Noto Sans SC', 'Helvetica Neue', Arial, 'Microsoft YaHei UI', 'Microsoft YaHei', sans-serif;
   --font-chat: 'Noto Sans SC', 'SF Pro Text', 'Segoe UI Variable Text', BlinkMacSystemFont, -apple-system, ui-sans-serif, 'Segoe UI', 'Helvetica Neue', Arial, 'Microsoft YaHei UI', 'Microsoft YaHei', sans-serif;
-  --font-mono: 'SFMono-Regular', 'Cascadia Mono', 'JetBrains Mono', 'Consolas', monospace;
+  /* Prefer Cascadia Code on Windows — it is ClearType-tuned and stays crisp
+     at small sizes where Consolas blurs. */
+  --font-mono: 'Cascadia Code', 'SFMono-Regular', 'JetBrains Mono', 'Cascadia Mono', 'Consolas', monospace;
   --font-size-shell-label: 10px;
   --font-size-shell-meta: 11px;
   --font-size-thread-row: 12px;
@@ -319,8 +321,11 @@ html, body, #root {
   font-weight: 400;
   font-size: 13px;
   line-height: 1.5;
-  -webkit-font-smoothing: antialiased;
-  text-rendering: optimizeLegibility;
+  /* Use the platform default rasterizer. `antialiased` thins glyph strokes on
+     dark surfaces and `optimizeLegibility` adds kerning work that softens
+     small CJK text — both read as "blurry" on Windows dark themes. */
+  -webkit-font-smoothing: auto;
+  text-rendering: auto;
   -webkit-user-select: text;
   user-select: text;
 }

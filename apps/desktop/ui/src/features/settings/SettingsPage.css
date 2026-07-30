@@ -645,6 +645,10 @@
   font-size: 11px;
 }
 
+.settings-select-placeholder {
+  color: var(--text-muted);
+}
+
 .settings-provider-select-trigger:disabled {
   cursor: default;
   opacity: 0.62;
@@ -670,6 +674,14 @@
   background: color-mix(in srgb, var(--app-bg) 48%, transparent);
   color: var(--text-strong);
   font: inherit;
+  /* Native <select> dropdowns are painted by the OS/WebView — declaring a
+     dark color-scheme makes the popup list render dark instead of the
+     glaring light default. */
+  color-scheme: dark;
+}
+
+:root[data-theme="light"] .settings-provider-native-select {
+  color-scheme: light;
 }
 
 .settings-provider-native-select:disabled {

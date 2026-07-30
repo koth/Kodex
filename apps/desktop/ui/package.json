@@ -21,6 +21,9 @@
   "dependencies": {
     "@monaco-editor/react": "^4.6.0",
     "@pierre/diffs": "^1.1.20",
+    "@pixiv/three-vrm": "^3.5.5",
+    "@react-three/drei": "^9.122.0",
+    "@react-three/fiber": "^8.18.0",
     "@tauri-apps/api": "^2.0.0",
     "@tauri-apps/plugin-dialog": "^2.7.0",
     "@tauri-apps/plugin-process": "^2.0.0",
@@ -34,6 +37,7 @@
     "react-markdown": "^9.0.1",
     "react-syntax-highlighter": "^15.6.1",
     "remark-gfm": "^4.0.1",
+    "three": "^0.185.1",
     "tm-grammars": "^1.31.15",
     "vscode-oniguruma": "^2.0.1",
     "vscode-textmate": "^9.3.2"
@@ -45,6 +49,7 @@
     "@types/react": "^18.3.12",
     "@types/react-dom": "^18.3.1",
     "@types/react-syntax-highlighter": "^15.5.13",
+    "@types/three": "^0.185.1",
     "@vitejs/plugin-react": "^4.3.4",
     "jsdom": "^29.1.1",
     "typescript": "^5.7.2",
