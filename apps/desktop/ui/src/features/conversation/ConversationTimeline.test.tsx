@@ -1297,6 +1297,34 @@ describe("ThinkingIndicator", () => {
     );
   });
 
+  it("opens generated assistant images in the original preview dialog", () => {
+    const snapshot = makeSnapshot({
+      timeline: [{ Message: "msg-1" }],
+      messages: [
+        {
+          id: "msg-1",
+          role: "Assistant",
+          body: "![生成的图片](data:image/png;base64,generated)",
+        },
+      ],
+    });
+
+    const { container } = render(
+      <ConversationTimeline snapshot={snapshot} onPermissionSelect={() => {}} />,
+    );
+    const currentTimeline = within(container);
+
+    fireEvent.click(currentTimeline.getByRole("button", { name: "预览 生成的图片" }));
+    const dialog = within(document.body).getByRole("dialog", { name: "图片预览：生成的图片" });
+    expect(within(dialog).getByAltText("生成的图片")).toHaveAttribute(
+      "src",
+      "data:image/png;base64,generated",
+    );
+
+    fireEvent.click(within(dialog).getByRole("button", { name: "关闭图片预览" }));
+    expect(within(document.body).queryByRole("dialog", { name: "图片预览：生成的图片" })).not.toBeInTheDocument();
+  });
+
   it("windows long timelines so initial render only mounts the latest entries", () => {
     const messages = Array.from({ length: 120 }, (_, index) => ({
       id: `msg-${index}`,

@@ -1,6 +1,6 @@
 use tauri::{AppHandle, Emitter};
 use terminal_service::TerminalServiceEvent;
-use workspace_model::{RemoteOpenProgressEvent, UiSnapshot, UiSnapshotPatch};
+use workspace_model::{ProxyRetryStatus, RemoteOpenProgressEvent, UiSnapshot, UiSnapshotPatch};
 
 pub fn emit_ui_snapshot(app: &AppHandle, snapshot: &UiSnapshot) {
     let _ = app.emit("ui:snapshot", snapshot);
@@ -30,4 +30,11 @@ pub fn emit_terminal_event(app: &AppHandle, event: TerminalServiceEvent) {
 
 pub fn emit_remote_open_progress(app: &AppHandle, progress: &RemoteOpenProgressEvent) {
     let _ = app.emit("remote_open:progress", progress);
+}
+
+/// Push the current upstream-retry status (or `None` when no retry is in
+/// flight) to the frontend so it can render/clear the retry animation. The
+/// snapshot bridge calls this each wake when the value changes.
+pub fn emit_proxy_retry_status(app: &AppHandle, status: Option<&ProxyRetryStatus>) {
+    let _ = app.emit("proxy:retry", status);
 }

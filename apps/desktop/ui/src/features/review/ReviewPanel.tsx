@@ -6,6 +6,7 @@ import type { UiSnapshot, ChangedFile, ChangeSection, DiffStats, FileEntry, Chan
 import { fsListDir, fsReveal, gitStage, gitUnstage, reviewRejectPatch, sessionListChangeSets, sessionListChangeSetFiles, sessionGetChangeSetFileDiff } from "../../lib/tauri";
 import { CommitDialog } from "../changes/CommitDialog";
 import { DiffTab } from "../editor/DiffTab";
+import type { TimelineTurnChangeSet } from "../conversation/ConversationTimeline";
 import {
   buildPierreDiff,
   pierreDiffOptions,
@@ -208,6 +209,7 @@ interface Props {
   focusRequest?: { changeSetId: string; token: number; path?: string } | null;
   preferredChangeSet?: ReviewPreferredChangeSet | null;
   onPreferredChangeSetChange?: Dispatch<SetStateAction<ReviewPreferredChangeSet | null>>;
+  liveTurnChangeSet?: TimelineTurnChangeSet | null;
 }
 
 export function ReviewPanel({
@@ -229,6 +231,7 @@ export function ReviewPanel({
   focusRequest,
   preferredChangeSet: controlledPreferredChangeSet,
   onPreferredChangeSetChange,
+  liveTurnChangeSet,
 }: Props) {
   const [internalActiveTab, setInternalActiveTab] = useState<ReviewPanelActiveTab>({
     kind: "base",
@@ -383,6 +386,58 @@ export function ReviewPanel({
     () => lastReviewableAssistantMessageId(snapshot.messages, snapshot.timeline, inActiveTurn),
     [inActiveTurn, snapshot.messages, snapshot.timeline],
   );
+  const effectiveChangeSetState = useMemo(() => {
+    if (
+      !liveTurnChangeSet ||
+      liveTurnChangeSet.files.length === 0 ||
+      !activeTurnOwner
+    ) {
+      return changeSetState;
+    }
+    if (
+      changeSetState.summaries.some(
+        (summary) => summary.id === liveTurnChangeSet.changeSetId,
+      )
+    ) {
+      return changeSetState;
+    }
+    const added = liveTurnChangeSet.files.reduce(
+      (sum, file) => sum + file.added_lines,
+      0,
+    );
+    const removed = liveTurnChangeSet.files.reduce(
+      (sum, file) => sum + file.removed_lines,
+      0,
+    );
+    const liveSummary: ChangeSetSummary = {
+      id: liveTurnChangeSet.changeSetId,
+      source: "AgentTurn",
+      session_id: snapshot.session.id,
+      workspace_root: snapshot.workspace.root,
+      message_id: null,
+      tool_call_id: null,
+      owner_key: activeTurnOwner,
+      label: "本轮对话",
+      added_lines: added,
+      removed_lines: removed,
+      file_count: liveTurnChangeSet.files.length,
+      updated_at: liveTurnChangeSet.updatedAt,
+      status: "Pending",
+    };
+    return {
+      summaries: [...changeSetState.summaries, liveSummary],
+      filesById: {
+        ...changeSetState.filesById,
+        [liveSummary.id]: liveTurnChangeSet.files,
+      },
+    };
+  }, [
+    activeTurnOwner,
+    changeSetState,
+    liveTurnChangeSet,
+    snapshot.session.id,
+    snapshot.workspace.root,
+  ]);
   const messageOrder = useMemo(
     () => timelineMessageOrder(snapshot.messages, snapshot.timeline),
     [snapshot.messages, snapshot.timeline],
@@ -591,7 +646,7 @@ export function ReviewPanel({
 
       <div className="review-tab-panel review-tab-panel-review" hidden={activeBaseTab !== "Review"}>
         <ReviewChangesView
-          changeSetState={changeSetState}
+          changeSetState={effectiveChangeSetState}
           lastAssistantMessageId={reviewTargetAssistantMessageId}
           activeTurnOwnerKey={activeTurnOwner}
           appTheme={appTheme}
@@ -893,10 +948,15 @@ function GitChangesTree({
 
   const handleTrackFile = useCallback(
     async (path: string) => {
-      const targets = expandToVisibleFiles(path, ["Untracked"]);
+      // Untracked directories are reported by git as a single `dir/` entry —
+      // their children never land in `grouped.Untracked`, so
+      // `expandToVisibleFiles` returns empty and the click previously died
+      // silently here. Fall back to staging the path itself; the backend
+      // re-runs status with `recurse_untracked_dirs(true)` and matches the
+      // real files (including `dir/` normalization).
+      let targets = expandToVisibleFiles(path, ["Untracked"]);
       if (targets.length === 0) {
-        setContextMenu(null);
-        return;
+        targets = [path];
       }
       const accepted = await appConfirm(
         trackConfirmRequest({
@@ -925,11 +985,18 @@ function GitChangesTree({
   );
 
   const handleStageFile = useCallback(
-    async (path: string) => {
-      const targets = expandToVisibleFiles(path, ["Unstaged", "Untracked"]);
-      if (targets.length === 0) {
-        setContextMenu(null);
-        return;
+    async (path: string, sections: ChangeSection[] = ["Unstaged"]) => {
+      // A directory in the 未暂存 group resolves to its status-listed files
+      // in that group only — untracked files under it must NOT be swept in,
+      // since staging them is a different action (跟踪) with its own row.
+      let targets = expandToVisibleFiles(path, sections);
+      // Untracked directories are reported by git as a single `dir/` entry
+      // whose children never land in `grouped.Untracked`, so the track action
+      // falls back to the directory path itself and lets the backend match the
+      // real files. The stage action intentionally does not fall back: a dir
+      // node in 未暂存 always has visible Unstaged children.
+      if (targets.length === 0 && sections.includes("Untracked")) {
+        targets = [path];
       }
       setPendingActionPath(path);
       try {
@@ -1108,7 +1175,7 @@ function GitChangesTree({
             ariaLabel: "跟踪",
             title: "加入 Git 跟踪",
             pendingPath: pendingActionPath,
-            onClick: handleStageFile,
+            onClick: (path) => handleStageFile(path, ["Untracked"]),
           }}
         />
       </div>

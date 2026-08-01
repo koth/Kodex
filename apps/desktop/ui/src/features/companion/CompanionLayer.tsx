@@ -134,8 +134,12 @@ export function CompanionLayer() {
       style={{
         left: `${settings.position.x * 100}%`,
         top: `${settings.position.y * 100}%`,
-        width: COMPANION_WIDTH,
-        height: COMPANION_HEIGHT,
+        // Resize the layout box itself (not a visual transform scale) so an
+        // enlarged avatar never overflows its container and gets clipped by
+        // neighbouring panels. translate(-50%,-50%) from the stylesheet keeps
+        // the box centered on the normalized dock position.
+        width: COMPANION_WIDTH * settings.scale,
+        height: COMPANION_HEIGHT * settings.scale,
       }}
     >
       <SpeechBubble text={bubble} mood={state.mood} onDismiss={dismissBubble} />

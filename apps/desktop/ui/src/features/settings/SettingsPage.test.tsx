@@ -1899,6 +1899,74 @@ describe("SettingsPage LSP settings", () => {
     );
   });
 
+  it("unifies reasoning effort options and folds legacy minimal into low", async () => {
+    vi.mocked(settingsGetAgentSnapshot).mockResolvedValue({
+      ...agentSnapshot,
+      codex_acp: {
+        ...agentSnapshot.codex_acp,
+        provider: "byok",
+        selected_profile_id: "byok",
+        profiles: codexProfiles("byok").map((profile) =>
+          profile.id === "timiai"
+            ? {
+                ...profile,
+                models: ["gpt-5.5"],
+                model_entries: [
+                  { slug: "gpt-5.5", reasoning_effort: "minimal" },
+                ],
+              }
+            : profile,
+        ),
+      },
+    });
+    render(<SettingsPage onBack={vi.fn()} />);
+
+    await openAgentSettingsTab("Codex");
+    await selectByokProvider(/TimiAI/);
+
+    fireEvent.click(
+      screen.getByRole("button", { name: "byok_model_advanced_toggle_0" }),
+    );
+
+    // Legacy `minimal` catalog data renders as the unified Low tier instead of
+    // an unmatched select value.
+    expect(screen.getByLabelText("byok_model_slug_0")).toBeInTheDocument();
+    const reasoning = screen.getByLabelText(
+      "byok_model_reasoning_effort_0",
+    ) as HTMLButtonElement;
+    expect(reasoning).toHaveTextContent("Low");
+
+    fireEvent.click(reasoning);
+    expect(screen.getByRole("option", { name: "Low" })).toBeInTheDocument();
+    expect(screen.getByRole("option", { name: "Medium" })).toBeInTheDocument();
+    expect(screen.getByRole("option", { name: "High" })).toBeInTheDocument();
+    // Max is the xhigh tier; the duplicate Minimal tier is gone.
+    expect(screen.getByRole("option", { name: "Max" })).toBeInTheDocument();
+    expect(
+      screen.queryByRole("option", { name: "Minimal" }),
+    ).not.toBeInTheDocument();
+
+    fireEvent.mouseDown(screen.getByRole("option", { name: "Max" }));
+    fireEvent.click(screen.getByRole("button", { name: "保存模型列表" }));
+
+    await waitFor(() =>
+      expect(settingsSaveProviderModels).toHaveBeenCalledWith(
+        "timiai",
+        [
+          {
+            slug: "gpt-5.5",
+            display_name: null,
+            context_window: null,
+            max_output_tokens: null,
+            supports_image_input: null,
+            reasoning_effort: "xhigh",
+          },
+        ],
+        null,
+      ),
+    );
+  });
+
   it("rejects non-positive integer context window in the BYOK editor", async () => {
     render(<SettingsPage onBack={vi.fn()} />);
 

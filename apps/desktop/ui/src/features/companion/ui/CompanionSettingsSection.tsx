@@ -78,7 +78,7 @@ export function CompanionSettingsSection() {
         }
       }
     } catch (err) {
-      setModelError(err instanceof Error ? err.message : "模型文件选择失败");
+      setModelError(err instanceof Error ? err.message : String(err));
     }
   };
 
@@ -175,6 +175,30 @@ export function CompanionSettingsSection() {
               {modelError && <p className="settings-field-error">{modelError}</p>}
               <p className="companion-setting-hint">
                 自定义模型加载失败时会自动回退到默认头像。模型需 ≤5MB、贴图 ≤2K。
+              </p>
+            </div>
+
+            <div className="companion-setting-group">
+              <div className="companion-scale-head">
+                <span className="companion-setting-label">显示大小</span>
+                <span className="companion-scale-value">
+                  {Math.round(settings.scale * 100)}%
+                </span>
+              </div>
+              <input
+                type="range"
+                className="companion-scale-slider"
+                aria-label="显示大小"
+                min={0.5}
+                max={2}
+                step={0.05}
+                value={settings.scale}
+                onChange={(event) =>
+                  update({ ...settings, scale: Number(event.currentTarget.value) })
+                }
+              />
+              <p className="companion-setting-hint">
+                按比例缩放角色在工作台的展示大小（50% – 200%）。
               </p>
             </div>
           </div>

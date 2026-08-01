@@ -380,6 +380,49 @@ describe("Composer", () => {
     });
   });
 
+  it("removes an attachment after switching workspace in the same component instance", async () => {
+    const { setComposerDraftAttachments } = await import("./composer-draft-store");
+    const imageAttachment = {
+      id: "img-1",
+      name: "screenshot.png",
+      displayName: "screenshot.png",
+      mimeType: "image/png",
+      data: "abc",
+      text: null,
+      uri: null,
+      kind: "image" as const,
+      path: null,
+      startLine: null,
+      endLine: null,
+      previewUrl: "data:image/png;base64,abc",
+      thumbnailData: null,
+      thumbnailMimeType: null,
+    };
+
+    // Workspace A — the composer mounts and caches its remove handler.
+    const workspaceA = makeSnapshot();
+    const { rerender } = render(<Composer snapshot={workspaceA} onStateChange={vi.fn()} />);
+    setComposerDraftAttachments("/repo", [imageAttachment]);
+    await screen.findByRole("button", { name: "移除 screenshot.png" });
+
+    // Switch to workspace B without unmounting the <Composer> instance.
+    const workspaceB = makeSnapshot({
+      workspace: { id: "ws-2", name: "other", root: "/repo-b" },
+    });
+    rerender(<Composer snapshot={workspaceB} onStateChange={vi.fn()} />);
+    setComposerDraftAttachments("/repo-b", [imageAttachment]);
+    await screen.findByRole("button", { name: "移除 screenshot.png" });
+
+    // Removing must target the active workspace's draft, not the one from
+    // the first render (which would silently no-op on screen).
+    const removeButton = screen.getByRole("button", { name: "移除 screenshot.png" });
+    fireEvent.click(removeButton);
+
+    await waitFor(() => {
+      expect(screen.queryByRole("button", { name: "移除 screenshot.png" })).not.toBeInTheDocument();
+    });
+  });
+
   it("splits BYOK model choices by provider in the composer controls", async () => {
     vi.mocked(sessionSetConfigControl).mockResolvedValue({ hydrated: true, controls: [] });
     const snapshot = makeSnapshot({

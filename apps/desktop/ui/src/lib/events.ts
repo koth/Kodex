@@ -1,5 +1,5 @@
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-import type { UiSnapshot, UiSnapshotPatch, SessionSummary, ChatMessage, ToolInvocation, RepositorySnapshot, TerminalOutputEvent, TerminalStatusEvent, TerminalExitEvent, RemoteOpenProgressEvent } from "../types";
+import type { UiSnapshot, UiSnapshotPatch, SessionSummary, ChatMessage, ToolInvocation, RepositorySnapshot, TerminalOutputEvent, TerminalStatusEvent, TerminalExitEvent, RemoteOpenProgressEvent, ProxyRetryStatus } from "../types";
 
 export function onUiSnapshot(callback: (snapshot: UiSnapshot) => void): Promise<UnlistenFn> {
   return listen<UiSnapshot>("ui:snapshot", (event) => callback(event.payload));
@@ -43,4 +43,10 @@ export function onTerminalExit(callback: (exit: TerminalExitEvent) => void): Pro
 
 export function onRemoteOpenProgress(callback: (progress: RemoteOpenProgressEvent) => void): Promise<UnlistenFn> {
   return listen<RemoteOpenProgressEvent>("remote_open:progress", (event) => callback(event.payload));
+}
+
+/** Upstream-retry status pushed by the codex_api_proxy via the snapshot
+ *  bridge. `null` clears the retry animation (no retry in flight). */
+export function onProxyRetry(callback: (status: ProxyRetryStatus | null) => void): Promise<UnlistenFn> {
+  return listen<ProxyRetryStatus | null>("proxy:retry", (event) => callback(event.payload));
 }

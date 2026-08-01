@@ -70,10 +70,11 @@ impl GitService {
     }
 
     /// Stage only the given paths that currently appear in `git status`
-    /// (modified or untracked). The frontend passes the concrete files the
-    /// panel displays (directories are already expanded there), so this never
-    /// recurses into a directory — a path stages only when it is itself
-    /// status-listed, keeping `.gitignore`d and unlisted files out.
+    /// (modified, deleted, renamed or untracked). A file path stages only when
+    /// it is itself status-listed; a directory path stages every status-listed
+    /// file under it. Because candidates always come from `git status`,
+    /// `.gitignore`d and clean files are never swept in — the staged set
+    /// matches exactly what the panel displays.
     pub fn stage_status_paths(path: impl AsRef<Path>, paths: &[String]) -> anyhow::Result<()> {
         let repo = Repository::discover(path).context("未找到 Git 仓库")?;
 
@@ -89,7 +90,9 @@ impl GitService {
             .update_index(true);
         let statuses = repo.statuses(Some(&mut options))?;
 
-        let mut to_stage: Vec<PathBuf> = Vec::new();
+        // (路径, 是否为删除)。已删除文件在工作区不存在，暂存时必须从索引
+        // 移除（remove_path）而非 add_path——后者会因文件不存在报错。
+        let mut to_stage: Vec<(PathBuf, bool)> = Vec::new();
         for entry in statuses.iter() {
             let Some(status_path) = entry.path() else {
                 continue;
@@ -106,16 +109,27 @@ impl GitService {
                 continue;
             }
             // git status 对 rename 返回 "old -> new" 形式，对未跟踪目录
-            // 可能带尾斜杠；统一规范化后再匹配。保持精确匹配语义
-            // （不做目录前缀递归，与 does_not_recurse_into_a_directory 契约一致）。
+            // 可能带尾斜杠；统一规范化后再匹配。
             let normalized_status = status_path
                 .rsplit(" -> ")
                 .next()
                 .unwrap_or(status_path)
                 .trim_end_matches('/');
             let status_path_buf = PathBuf::from(normalized_status);
-            if requested.contains(&status_path_buf) {
-                to_stage.push(status_path_buf);
+            let matched = requested.iter().any(|req| {
+                // 精确匹配：请求某个具体文件。
+                if *req == status_path_buf {
+                    return true;
+                }
+                // 目录匹配：请求目录路径时，暂存该目录下所有 git status
+                // 列出的 worktree 变更（modified/deleted/untracked）。
+                // 由于候选集只来自 git status，.gitignore'd 与干净文件
+                // 天然被排除，与前端面板显示的目录子文件集合保持一致。
+                let prefix = format!("{}/", req.to_string_lossy().replace('\\', "/"));
+                normalized_status.starts_with(&prefix[..])
+            });
+            if matched {
+                to_stage.push((status_path_buf, status.contains(Status::WT_DELETED)));
             }
         }
 
@@ -131,8 +145,12 @@ impl GitService {
         }
 
         let mut index = repo.index().context("无法打开 Git 索引")?;
-        for relative_path in &to_stage {
-            index.add_path(relative_path)?;
+        for (relative_path, is_deleted) in &to_stage {
+            if *is_deleted {
+                index.remove_path(relative_path)?;
+            } else {
+                index.add_path(relative_path)?;
+            }
         }
         index.write().context("无法写入 Git 索引")
     }
@@ -820,21 +838,89 @@ mod tests {
     }
 
     #[test]
-    fn stage_status_paths_does_not_recurse_into_a_directory() {
-        let (dir, repo) = setup_repo();
-        fs::create_dir_all(dir.path().join("src")).unwrap();
-        commit_file(&repo, "src/tracked.rs", "fn a() {}\n");
-        fs::write(dir.path().join("src/tracked.rs"), "fn a() { changed }\n").unwrap();
+    fn stage_status_paths_stages_untracked_directory_entry() {
+        let dir = tempdir().unwrap();
+        let repo = Repository::init(dir.path()).unwrap();
+        fs::create_dir_all(dir.path().join("newdir/sub")).unwrap();
+        fs::write(dir.path().join("newdir/a.txt"), "a\n").unwrap();
+        fs::write(dir.path().join("newdir/sub/b.txt"), "b\n").unwrap();
         drop(repo);
 
-        // A bare directory path stages nothing — only explicit file paths do.
-        GitService::stage_status_paths(dir.path(), &["src".to_string()]).unwrap();
+        // git reports an untracked dir as a single `newdir/` entry; the
+        // frontend falls back to sending the bare path when no visible file
+        // targets expand from it. The backend must still stage every real
+        // file under that directory.
+        GitService::stage_status_paths(dir.path(), &["newdir".to_string()]).unwrap();
+
+        let snapshot = GitService::open(dir.path()).unwrap();
+        let staged: Vec<&str> = snapshot
+            .changed_files
+            .iter()
+            .filter(|f| matches!(f.section, ChangeSection::Staged))
+            .map(|f| f.path.to_str().unwrap_or(""))
+            .collect();
+        assert!(staged.iter().any(|p| p.ends_with("newdir/a.txt")));
+        assert!(staged.iter().any(|p| p.ends_with("newdir/sub/b.txt")));
+    }
+
+    #[test]
+    fn stage_status_paths_stages_untracked_directory_with_trailing_slash() {
+        let dir = tempdir().unwrap();
+        let repo = Repository::init(dir.path()).unwrap();
+        fs::create_dir_all(dir.path().join("newdir")).unwrap();
+        fs::write(dir.path().join("newdir/a.txt"), "a\n").unwrap();
+        drop(repo);
+
+        // git status lists untracked dirs with a trailing slash; stripping it
+        // before matching keeps the stage path consistent with the frontend's
+        // normalized node path.
+        GitService::stage_status_paths(dir.path(), &["newdir/".to_string()]).unwrap();
 
         let snapshot = GitService::open(dir.path()).unwrap();
         assert!(snapshot
             .changed_files
             .iter()
-            .all(|f| !matches!(f.section, ChangeSection::Staged)));
+            .any(|f| matches!(f.section, ChangeSection::Staged)));
+    }
+
+    #[test]
+    fn stage_status_paths_directory_stages_only_status_listed_files() {
+        let (dir, repo) = setup_repo();
+        // 目录下：一个已修改的已跟踪文件、一个干净文件、一个 .gitignore'd
+        // 文件、以及目录外的另一个已修改文件。请求目录路径时，后端只应暂存
+        // 目录内 git status 列出的变更（tracked.rs），干净/ignored/目录外
+        // 文件都必须保持原状。
+        fs::create_dir_all(dir.path().join("src")).unwrap();
+        commit_file(&repo, "src/tracked.rs", "fn a() {}\n");
+        commit_file(&repo, "src/clean.rs", "fn clean() {}\n");
+        commit_file(&repo, "other.rs", "fn other() {}\n");
+        fs::write(dir.path().join("src/tracked.rs"), "fn a() { changed }\n").unwrap();
+        fs::write(dir.path().join("other.rs"), "fn other() { changed }\n").unwrap();
+        fs::write(dir.path().join(".gitignore"), "ignored.log\n").unwrap();
+        fs::write(dir.path().join("src/ignored.log"), "noise\n").unwrap();
+        drop(repo);
+
+        GitService::stage_status_paths(dir.path(), &["src".to_string()]).unwrap();
+
+        let snapshot = GitService::open(dir.path()).unwrap();
+        let staged: Vec<&str> = snapshot
+            .changed_files
+            .iter()
+            .filter(|f| matches!(f.section, ChangeSection::Staged))
+            .map(|f| f.path.to_str().unwrap_or(""))
+            .collect();
+        // 目录内 status 列出的变更被暂存。
+        assert!(staged.iter().any(|p| p.ends_with("src/tracked.rs")));
+        // 干净文件、ignored 文件、目录外变更都不会被扫进来。
+        assert!(!staged.iter().any(|p| p.ends_with("src/clean.rs")));
+        assert!(!staged.iter().any(|p| p.ends_with("ignored.log")));
+        assert!(!staged.iter().any(|p| p.ends_with("other.rs")));
+        // 目录外的变更仍然停留在未暂存区。
+        assert!(snapshot
+            .changed_files
+            .iter()
+            .any(|f| matches!(f.section, ChangeSection::Unstaged)
+                && f.path.to_str().unwrap_or("").ends_with("other.rs")));
     }
 
     #[test]
@@ -870,6 +956,32 @@ mod tests {
             .changed_files
             .iter()
             .any(|f| matches!(f.section, ChangeSection::Staged)));
+    }
+
+    #[test]
+    fn stage_status_paths_stages_worktree_delete() {
+        let (dir, repo) = setup_repo();
+        commit_file(&repo, "gone.rs", "fn a() {}\n");
+        // 删除一个已跟踪文件（未暂存）。工作区里文件已不存在，暂存必须
+        // 用 remove_path 记录这次删除，而不是 add_path（会因文件不存在报错）。
+        fs::remove_file(dir.path().join("gone.rs")).unwrap();
+        drop(repo);
+
+        GitService::stage_status_paths(dir.path(), &["gone.rs".to_string()]).unwrap();
+
+        let snapshot = GitService::open(dir.path()).unwrap();
+        // 删除被暂存后，文件出现在已暂存区（change_type 为 Deleted），
+        // 且不再出现在未暂存区。
+        assert!(snapshot
+            .changed_files
+            .iter()
+            .any(|f| matches!(f.section, ChangeSection::Staged)
+                && f.path.to_str().unwrap_or("").ends_with("gone.rs")));
+        assert!(snapshot
+            .changed_files
+            .iter()
+            .all(|f| !(matches!(f.section, ChangeSection::Unstaged)
+                && f.path.to_str().unwrap_or("").ends_with("gone.rs"))));
     }
 
     #[test]

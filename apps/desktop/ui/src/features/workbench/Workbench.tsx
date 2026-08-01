@@ -1143,6 +1143,7 @@ export function Workbench() {
       focusRequest={reviewFocusRequest}
       preferredChangeSet={reviewPreferredChangeSet}
       onPreferredChangeSetChange={setReviewPreferredChangeSet}
+      liveTurnChangeSet={liveTurnChangeSet}
     />
   );
 

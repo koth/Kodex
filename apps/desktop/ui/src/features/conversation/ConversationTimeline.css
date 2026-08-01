@@ -832,13 +832,32 @@
 
 .md-image {
   display: block;
-  width: 64px;
-  height: 64px;
+  width: min(320px, 72vw);
+  max-width: 100%;
+  max-height: 320px;
   margin: 4px 0;
   border: 1px solid var(--border-subtle);
   border-radius: 16px;
   background: var(--surface-muted-bg);
   object-fit: contain;
+}
+
+.md-image-button {
+  display: block;
+  padding: 0;
+  border: 0;
+  border-radius: 16px;
+  background: transparent;
+  cursor: zoom-in;
+}
+
+.md-image-button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.md-image-button:hover .md-image {
+  border-color: var(--border-strong);
 }
 
 .md-blockquote {
@@ -1093,5 +1112,40 @@
   .thinking-active {
     animation: none;
     opacity: 1;
+  }
+}
+
+/* ── Upstream retry indicator ── */
+.proxy-retry-indicator {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 0 4px var(--msg-text-column);
+  font-size: 12.5px;
+  font-weight: 400;
+  color: var(--text-muted, var(--accent));
+}
+
+.proxy-retry-spinner {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  border: 2px solid currentColor;
+  border-right-color: transparent;
+  animation: proxy-retry-spin 0.7s linear infinite;
+  flex: 0 0 auto;
+}
+
+@keyframes proxy-retry-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .proxy-retry-spinner {
+    animation: none;
+    border: 2px solid currentColor;
+    border-top-color: transparent;
   }
 }

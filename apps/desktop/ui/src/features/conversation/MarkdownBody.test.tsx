@@ -100,6 +100,22 @@ describe("MarkdownBody", () => {
     expect(screen.getByRole("button", { name: "已复制代码" })).toBeInTheDocument();
   });
 
+  it("reports image clicks for large previews", () => {
+    const onImagePreview = vi.fn();
+    render(
+      <MarkdownBody
+        content="![生成的图片](data:image/png;base64,aaaa)"
+        onImagePreview={onImagePreview}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "预览 生成的图片" }));
+    expect(onImagePreview).toHaveBeenCalledWith(
+      "data:image/png;base64,aaaa",
+      "生成的图片",
+    );
+  });
+
   it("renders existing inline-code file paths as clickable links with line numbers", async () => {
     const onFilePathClick = vi.fn();
     const root = "D:\\work\\kodex";

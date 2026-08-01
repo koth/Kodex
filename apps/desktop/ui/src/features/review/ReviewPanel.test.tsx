@@ -1103,6 +1103,45 @@ describe("ReviewPanel scoped change sets", () => {
     expect(onRefresh).toHaveBeenCalled();
   });
 
+  it("staging an Unstaged directory only stages tracked modifications, not untracked files", async () => {
+    const onRefresh = vi.fn();
+    render(
+      <ReviewPanel
+        snapshot={makeSnapshot({
+          repository: {
+            branch: "main",
+            head: "abc",
+            changed_files: [
+              makeChangedFile("src/a.ts", "Unstaged"),
+              makeChangedFile("src/untracked.ts", "Untracked"),
+            ],
+          },
+        })}
+        refreshing={false}
+        hydrated
+        onRefresh={onRefresh}
+        onFileSelect={() => {}}
+        onFileOpen={() => {}}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: /Git/ }));
+
+    // The 未暂存 group shows the `src` directory (via tracked a.ts); its
+    // inline stage action must target only the tracked modification and leave
+    // the untracked sibling file alone.
+    const stageDir = await screen.findByRole("button", { name: "暂存 src" });
+    fireEvent.click(stageDir);
+
+    await waitFor(() =>
+      expect(gitStage).toHaveBeenCalledWith(["src/a.ts"]),
+    );
+    expect(gitStage).not.toHaveBeenCalledWith(
+      expect.arrayContaining(["src/untracked.ts"]),
+    );
+    expect(onRefresh).toHaveBeenCalled();
+  });
+
   it("shows a hover commit action only when staged changes exist", async () => {
     const { rerender } = render(
       <ReviewPanel

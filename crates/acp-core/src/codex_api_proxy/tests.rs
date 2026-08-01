@@ -67,6 +67,70 @@ fn converts_responses_request_to_chat_payload() {
     assert_eq!(chat["tool_choice"], "auto");
 }
 
+#[test]
+fn chat_conversion_carries_reasoning_effort_to_openai_style_upstreams() {
+    let payload = json!({
+        "model": "gpt-5.5",
+        "input": "hello",
+        "reasoning": { "effort": "high" },
+        "stream": false
+    });
+
+    let chat = responses_payload_to_chat_payload(payload, "commandcode", "test-session").unwrap();
+
+    assert_eq!(chat["reasoning_effort"], "high");
+}
+
+#[test]
+fn chat_conversion_drops_none_effort_and_reads_legacy_top_level_effort() {
+    // `none` disables thinking; OpenAI-compatible chat endpoints do not accept
+    // a `none` effort value, so the field is omitted.
+    let payload = json!({
+        "model": "gpt-5.5",
+        "input": "hi",
+        "reasoning": { "effort": "none" }
+    });
+    let chat = responses_payload_to_chat_payload(payload, "commandcode", "test-session").unwrap();
+    assert!(chat.get("reasoning_effort").is_none());
+
+    // Legacy top-level `reasoning_effort` is honored as a fallback.
+    let payload = json!({
+        "model": "gpt-5.5",
+        "input": "hi",
+        "reasoning_effort": "medium"
+    });
+    let chat = responses_payload_to_chat_payload(payload, "xiaomi_mimo", "test-session").unwrap();
+    assert_eq!(chat["reasoning_effort"], "medium");
+}
+
+#[test]
+fn kimi_chat_payload_swaps_reasoning_effort_for_output_config() {
+    let value = json!([
+        {
+            "model": "kimi-for-coding",
+            "provider": "kimi_code",
+            "reasoning_effort": "high"
+        }
+    ]);
+    configure_codex_api_proxy_model_provider_map(&value.to_string());
+
+    let payload = json!({
+        "model": "kimi-for-coding",
+        "input": "hi",
+        "reasoning": { "effort": "high" }
+    });
+    let chat = responses_payload_to_chat_payload(payload, "kimi_code", "test-session").unwrap();
+    assert_eq!(chat["reasoning_effort"], "high");
+
+    let normalized = normalize_chat_payload_for_provider(chat, "kimi_code", "test-session");
+    // KimiCode speaks Anthropic-style `output_config.effort`, not the
+    // OpenAI-style `reasoning_effort`.
+    assert!(normalized.get("reasoning_effort").is_none());
+    assert_eq!(normalized["output_config"]["effort"], "high");
+
+    clear_codex_api_proxy_model_provider_map();
+}
+
 /// Streaming chat-completions requests must carry `stream_options.include_usage`
 /// so OpenAI-compatible upstreams (grok/xAI, deepseek, kimi, ...) emit a usage
 /// chunk in the stream. Without it the converter surfaces zero tokens and no
@@ -804,6 +868,27 @@ fn deepseek_requests_preserve_upstream_streaming() {
 }
 
 #[test]
+fn deepseek_uses_responses_endpoint() {
+    // DeepSeek speaks the OpenAI Responses protocol natively, so requests are
+    // forwarded to the responses endpoint rather than downgraded to
+    // chat/completions.
+    assert_eq!(
+        DEEPSEEK_UPSTREAM_RESPONSES_URL,
+        "https://api.deepseek.com/responses"
+    );
+    // The responses payload must pass through unmodified (no chat/completions
+    // downgrade) for the deepseek provider.
+    let payload = json!({
+        "model": "deepseek-v4-pro",
+        "input": [{"type": "message", "role": "user", "content": [{"type": "input_text", "text": "hi"}]}],
+        "stream": true
+    });
+    let prepared = prepare_responses_payload_for_provider(payload, "deepseek");
+    assert_eq!(prepared["stream"], true);
+    assert!(prepared.get("input").is_some());
+}
+
+#[test]
 fn unsupported_provider_aliases_preserve_identity() {
     // Known aliases still canonicalize.
     assert_eq!(normalize_proxy_provider("timi-ai"), "timiai");
@@ -1254,7 +1339,9 @@ fn sanitizes_timiai_responses_payload_extensions() {
     let sanitized = sanitize_timiai_responses_payload(payload);
 
     assert!(sanitized.get("context_management").is_none());
-    assert!(sanitized.get("reasoning").is_none());
+    // The reasoning object is preserved so the Responses→chat converter can
+    // honor the authored effort on the chat upstream.
+    assert_eq!(sanitized["reasoning"]["effort"], "medium");
     assert_eq!(sanitized["model"], "gpt-5.5");
     assert_eq!(sanitized["input"].as_array().unwrap().len(), 2);
     assert_eq!(sanitized["input"][0]["type"], "message");
@@ -1287,7 +1374,7 @@ fn timiai_responses_payload_is_prepared_before_upstream_logging() {
 
     let prepared = prepare_responses_payload_for_provider(payload, "timiai");
 
-    assert!(prepared.get("reasoning").is_none());
+    assert_eq!(prepared["reasoning"]["effort"], "medium");
     assert_eq!(prepared["input"].as_array().unwrap().len(), 1);
     assert_eq!(prepared["input"][0]["phase"], "final_answer");
     assert_eq!(prepared["input"][0]["content"][0]["text"], "done");
@@ -2894,4 +2981,478 @@ fn synthetic_tool_call_id_from_responses_sse(text: &str) -> String {
         }
     }
     String::new()
+}
+
+// ── Upstream retry helper tests ──────────────────────────────────────────────
+
+#[test]
+fn retryable_status_covers_transient_5xx_and_429() {
+    // 429 + the full transient 5xx family are retried.
+    assert!(is_retryable_upstream_status(reqwest::StatusCode::TOO_MANY_REQUESTS));
+    assert!(is_retryable_upstream_status(reqwest::StatusCode::INTERNAL_SERVER_ERROR));
+    assert!(is_retryable_upstream_status(reqwest::StatusCode::BAD_GATEWAY));
+    assert!(is_retryable_upstream_status(reqwest::StatusCode::SERVICE_UNAVAILABLE));
+    assert!(is_retryable_upstream_status(reqwest::StatusCode::GATEWAY_TIMEOUT));
+    // Cloudflare origin/timeout codes (520-524) are retried so a flaky CDN
+    // cannot terminate the request after a single logged attempt.
+    assert!(is_retryable_upstream_status(reqwest::StatusCode::from_u16(520).unwrap()));
+    assert!(is_retryable_upstream_status(reqwest::StatusCode::from_u16(521).unwrap()));
+    assert!(is_retryable_upstream_status(reqwest::StatusCode::from_u16(522).unwrap()));
+    assert!(is_retryable_upstream_status(reqwest::StatusCode::from_u16(523).unwrap()));
+    assert!(is_retryable_upstream_status(reqwest::StatusCode::from_u16(524).unwrap()));
+    // Permanent 5xx and success/4xx (except 429) are NOT retried.
+    assert!(!is_retryable_upstream_status(reqwest::StatusCode::NOT_IMPLEMENTED));
+    assert!(!is_retryable_upstream_status(reqwest::StatusCode::BAD_REQUEST));
+    assert!(!is_retryable_upstream_status(reqwest::StatusCode::UNAUTHORIZED));
+    assert!(!is_retryable_upstream_status(reqwest::StatusCode::OK));
+}
+
+#[test]
+fn retry_reason_maps_status_codes() {
+    assert_eq!(retry_reason_for_status(reqwest::StatusCode::TOO_MANY_REQUESTS), "rate_limited");
+    assert_eq!(retry_reason_for_status(reqwest::StatusCode::INTERNAL_SERVER_ERROR), "internal_server_error");
+    assert_eq!(retry_reason_for_status(reqwest::StatusCode::BAD_GATEWAY), "bad_gateway");
+    assert_eq!(
+        retry_reason_for_status(reqwest::StatusCode::SERVICE_UNAVAILABLE),
+        "service_unavailable"
+    );
+    assert_eq!(
+        retry_reason_for_status(reqwest::StatusCode::GATEWAY_TIMEOUT),
+        "gateway_timeout"
+    );
+}
+
+#[test]
+fn parses_retry_after_integer_seconds() {
+    let mut headers = reqwest::header::HeaderMap::new();
+    assert!(parse_retry_after_seconds(&headers).is_none());
+    headers.insert(reqwest::header::RETRY_AFTER, "5".parse().unwrap());
+    assert_eq!(parse_retry_after_seconds(&headers), Some(5));
+    // Non-integer (HTTP date) values are ignored.
+    headers.insert(
+        reqwest::header::RETRY_AFTER,
+        "Wed, 21 Oct 2026 07:28:00 GMT".parse().unwrap(),
+    );
+    assert_eq!(parse_retry_after_seconds(&headers), None);
+}
+
+#[test]
+fn backoff_grows_exponentially_then_caps() {
+    // Exponential schedule: 500, 1000, 2000, 4000, 8000 (capped).
+    assert!(retry_backoff_duration(1, None) >= std::time::Duration::from_millis(500));
+    assert!(retry_backoff_duration(1, None) < std::time::Duration::from_millis(750));
+    assert!(retry_backoff_duration(2, None) >= std::time::Duration::from_millis(1000));
+    assert!(retry_backoff_duration(3, None) >= std::time::Duration::from_millis(2000));
+    assert!(retry_backoff_duration(4, None) >= std::time::Duration::from_millis(4000));
+    // Capped at 8s even for large attempt counts.
+    assert!(retry_backoff_duration(5, None) <= std::time::Duration::from_millis(8250));
+    assert!(retry_backoff_duration(10, None) <= std::time::Duration::from_millis(8250));
+    // Retry-After overrides the schedule, capped at 8s.
+    assert_eq!(retry_backoff_duration(2, Some(3)), std::time::Duration::from_millis(3000));
+    assert_eq!(retry_backoff_duration(2, Some(30)), std::time::Duration::from_millis(8000));
+}
+
+#[test]
+fn retry_registry_round_trip_is_scoped_to_session() {
+    let session = format!("retry_test_{}", uuid::Uuid::new_v4());
+    // Empty attempt id is a no-op (registry is keyed by attempt id now; the
+    // ACP session id is stored inside the entry).
+    set_proxy_retry_status(
+        "",
+        &session,
+        ProxyRetryStatus {
+            attempt: 1,
+            max_attempts: MAX_UPSTREAM_RETRIES,
+            status_code: Some(429),
+            reason: "rate_limited".to_string(),
+            active: true,
+            provider: Some("deepseek".to_string()),
+        },
+    );
+    assert!(current_proxy_retry_status("").is_none());
+
+    assert!(current_proxy_retry_status(&session).is_none());
+    let attempt_id = format!("attempt_{}", uuid::Uuid::new_v4());
+    set_proxy_retry_status(
+        &attempt_id,
+        &session,
+        ProxyRetryStatus {
+            attempt: 3,
+            max_attempts: MAX_UPSTREAM_RETRIES,
+            status_code: Some(502),
+            reason: "bad_gateway".to_string(),
+            active: true,
+            provider: Some("kimi_code".to_string()),
+        },
+    );
+    let status = current_proxy_retry_status(&session).expect("retry status recorded");
+    assert_eq!(status.attempt, 3);
+    assert_eq!(status.max_attempts, MAX_UPSTREAM_RETRIES);
+    assert_eq!(status.status_code, Some(502));
+    assert_eq!(status.reason, "bad_gateway");
+    assert!(status.active);
+    assert_eq!(status.provider.as_deref(), Some("kimi_code"));
+
+    clear_proxy_retry_status_by_key(&attempt_id);
+    assert!(current_proxy_retry_status(&session).is_none());
+    // Clearing an absent key is a no-op.
+    clear_proxy_retry_status_by_key(&attempt_id);
+}
+
+#[test]
+fn any_active_proxy_retry_status_returns_most_recent_active() {
+    let session_a = format!("any_a_{}", uuid::Uuid::new_v4());
+    let session_b = format!("any_b_{}", uuid::Uuid::new_v4());
+
+    // No entries → None.
+    assert!(any_active_proxy_retry_status().is_none());
+
+    let attempt_a = format!("attempt_a_{}", uuid::Uuid::new_v4());
+    set_proxy_retry_status(
+        &attempt_a,
+        &session_a,
+        ProxyRetryStatus {
+            attempt: 1,
+            max_attempts: MAX_UPSTREAM_RETRIES,
+            status_code: Some(502),
+            reason: "bad_gateway".to_string(),
+            active: true,
+            provider: Some("timiai".to_string()),
+        },
+    );
+    // session_a is the only active one.
+    assert_eq!(
+        any_active_proxy_retry_status().map(|s| s.attempt),
+        Some(1)
+    );
+
+    let attempt_b = format!("attempt_b_{}", uuid::Uuid::new_v4());
+    set_proxy_retry_status(
+        &attempt_b,
+        &session_b,
+        ProxyRetryStatus {
+            attempt: 4,
+            max_attempts: MAX_UPSTREAM_RETRIES,
+            status_code: Some(503),
+            reason: "service_unavailable".to_string(),
+            active: true,
+            provider: Some("deepseek".to_string()),
+        },
+    );
+    // session_b was updated last → it wins.
+    assert_eq!(
+        any_active_proxy_retry_status().map(|s| s.attempt),
+        Some(4)
+    );
+
+    clear_proxy_retry_status_by_key(&attempt_a);
+    clear_proxy_retry_status_by_key(&attempt_b);
+    assert!(any_active_proxy_retry_status().is_none());
+}
+
+// ── End-to-end retry integration tests (tiny mock HTTP server) ───────────────
+
+/// Spawns a blocking mock HTTP server that replies with the given status
+/// sequence (one status per inbound request) and reports how many requests it
+/// actually received. `Connection: close` is sent on non-2xx so reqwest opens
+/// a fresh connection for each retry attempt (avoiding keep-alive reuse
+/// hiding the retry from the accept loop).
+fn mock_upstream_server(
+    statuses: Vec<u16>,
+) -> (u16, std::sync::Arc<std::sync::atomic::AtomicUsize>, std::thread::JoinHandle<()>) {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let counter = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counter_for_thread = counter.clone();
+    let handle = std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { break };
+            // Drain request line + headers + (small) body in one read.
+            let mut buf = [0u8; 8192];
+            let _ = std::io::Read::read(&mut stream, &mut buf);
+            let idx = counter_for_thread.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let status = statuses.get(idx).copied().unwrap_or(200);
+            let resp = if status == 200 {
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 11\r\n\r\n{\"ok\":true}"
+                    .to_string()
+            } else {
+                // Serve any scripted error status verbatim (502, 429, 503,
+                // Cloudflare 524, ...) so retry behaviour across mixed
+                // transient 5xx can be exercised. Only 429 carries Retry-After.
+                let extra = if status == 429 { "Retry-After: 0\r\n" } else { "" };
+                format!(
+                    "HTTP/1.1 {status} Error\r\nContent-Length: 0\r\nConnection: close\r\n{extra}\r\n"
+                )
+            };
+            let _ = std::io::Write::write_all(&mut stream, resp.as_bytes());
+            // Stop once we've answered every scripted status.
+            if idx + 1 >= statuses.len() {
+                break;
+            }
+        }
+    });
+    (port, counter, handle)
+}
+
+#[test]
+fn send_upstream_with_retry_recovers_after_one_transient_502() {
+    // First attempt → 502, second attempt → 200. Proves the retry fires.
+    let (port, counter, handle) = mock_upstream_server(vec![502, 200]);
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let session = format!("retry_recover_{}", uuid::Uuid::new_v4());
+    let response = rt
+        .block_on(async {
+            let client = reqwest::Client::new();
+            send_upstream_with_retry(
+                Some(&session),
+                "test_provider",
+                client
+                    .post(format!("http://127.0.0.1:{port}/test"))
+                    .header("Content-Type", "application/json")
+                    .body(br#"{"q":1}"#.to_vec()),
+            )
+            .await
+        })
+        .expect("retry should recover with 200");
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    // The server must have seen TWO requests (initial + 1 retry).
+    assert_eq!(
+        counter.load(std::sync::atomic::Ordering::SeqCst),
+        2,
+        "expected 1 retry (2 total requests)"
+    );
+    // After success, the registry entry for this session is cleared.
+    assert!(current_proxy_retry_status(&session).is_none());
+    let _ = handle.join();
+}
+
+#[test]
+fn native_responses_request_retries_transient_502() {
+    // Exercises the real DeepSeek native-/responses path (not just the retry
+    // helper): a transient upstream 502 must be retried once and recover.
+    let (port, counter, handle) = mock_upstream_server(vec![502, 200]);
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let payload = json!({
+        "model": "deepseek-v4-pro",
+        "input": "hi",
+        "stream": false
+    });
+    let response = rt
+        .block_on(async {
+            proxy_native_responses_request(
+                payload,
+                "test-key",
+                "deepseek",
+                &format!("http://127.0.0.1:{port}/responses"),
+                Some("acp-sid"),
+            )
+            .await
+        })
+        .expect("request should recover with 200");
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    assert_eq!(
+        counter.load(std::sync::atomic::Ordering::SeqCst),
+        2,
+        "expected 1 retry (2 total requests)"
+    );
+    let _ = handle.join();
+}
+
+#[test]
+fn send_upstream_with_retry_exhausts_on_persistent_502_and_clears_status() {
+    // Every attempt → 502. Should retry up to MAX_UPSTREAM_RETRIES then return
+    // the 502. Total upstream contacts = 1 + MAX_UPSTREAM_RETRIES. The mock
+    // scripts EXACTLY that many responses so its accept loop exits instead of
+    // blocking on a 7th connection that never arrives (which would hang
+    // `handle.join()`).
+    let total = (1 + MAX_UPSTREAM_RETRIES) as usize;
+    let (port, counter, handle) = mock_upstream_server(vec![502; total]);
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let session = format!("retry_exhaust_{}", uuid::Uuid::new_v4());
+    let response = rt
+        .block_on(async {
+            let client = reqwest::Client::new();
+            send_upstream_with_retry(
+                Some(&session),
+                "test_provider",
+                client
+                    .post(format!("http://127.0.0.1:{port}/test"))
+                    .header("Content-Type", "application/json")
+                    .body(br#"{"q":1}"#.to_vec()),
+            )
+            .await
+        })
+        .expect("exhausted retries still return the final response");
+    assert_eq!(response.status(), reqwest::StatusCode::BAD_GATEWAY);
+    assert_eq!(
+        counter.load(std::sync::atomic::Ordering::SeqCst),
+        total,
+        "expected exactly 1 + MAX_UPSTREAM_RETRIES upstream contacts"
+    );
+    // After exhaustion, the registry entry is cleared.
+    assert!(current_proxy_retry_status(&session).is_none());
+    let _ = handle.join();
+}
+
+#[test]
+fn send_upstream_with_retry_continues_across_mixed_transient_5xx() {
+    // Regression for the reported "terminated after attempt 1/5" symptom:
+    // attempt 1 returns 502 (retried), attempt 2 returns a *different*
+    // transient 5xx (here a Cloudflare 524) that must also be retried, then
+    // 503, then 200. With a narrow allow-list the loop would bail out after
+    // the first logged attempt; the expanded transient set keeps retrying.
+    let (port, counter, handle) = mock_upstream_server(vec![502, 524, 503, 200]);
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let session = format!("retry_mixed_{}", uuid::Uuid::new_v4());
+    let response = rt
+        .block_on(async {
+            let client = reqwest::Client::new();
+            send_upstream_with_retry(
+                Some(&session),
+                "test_provider",
+                client
+                    .post(format!("http://127.0.0.1:{port}/test"))
+                    .header("Content-Type", "application/json")
+                    .body(br#"{"q":1}"#.to_vec()),
+            )
+            .await
+        })
+        .expect("mixed transient 5xx should eventually recover with 200");
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    assert_eq!(
+        counter.load(std::sync::atomic::Ordering::SeqCst),
+        4,
+        "expected 3 retries then success (4 total requests)"
+    );
+    assert!(current_proxy_retry_status(&session).is_none());
+    let _ = handle.join();
+}
+
+#[test]
+fn native_anthropic_messages_retry_keys_under_acp_session_id() {
+    // The /messages (Anthropic) path must key the retry registry under the ACP
+    // session id (what app-core's per-session UI lookup uses), NOT the
+    // provider-scoped session id that still feeds upstream headers/reasoning.
+    // Without this, a retrying /messages request could never surface on the
+    // active conversation's UI.
+    let (port, counter, handle) = mock_upstream_server(vec![502, 502, 200]);
+    let url = format!("http://127.0.0.1:{port}/v1/messages");
+    let payload = json!({
+        "model": "claude-3",
+        "stream": false,
+        "max_tokens": 16,
+        "messages": [{ "role": "user", "content": "hi" }],
+    });
+    let (tx, rx) = std::sync::mpsc::channel::<(bool, u16)>();
+    let request_thread = std::thread::spawn(move || {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let result = rt.block_on(async {
+            proxy_native_anthropic_messages_request_with_url(
+                payload,
+                "test-key",
+                "test_native",
+                "provider-scoped-sid",
+                &url,
+                Some("acp-sid"),
+            )
+            .await
+        });
+        let (ok, code) = match result {
+            Ok(resp) => (true, resp.status().as_u16()),
+            Err(_) => (false, 0),
+        };
+        let _ = tx.send((ok, code));
+    });
+
+    // While retries are in flight (502 -> 502 -> 200), the process-global
+    // registry must hold the entry under the ACP id, never the provider id.
+    let mut observed = None;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    while std::time::Instant::now() < deadline {
+        if let Some(status) = current_proxy_retry_status("acp-sid") {
+            observed = Some(status);
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    let status = observed.expect("acp-sid retry entry should appear during the 502 retries");
+    assert!(matches!(status.attempt, 1 | 2), "attempt in retry range, got {}", status.attempt);
+    assert_eq!(status.status_code, Some(502));
+    assert_eq!(status.provider.as_deref(), Some("test_native"));
+    assert!(current_proxy_retry_status("provider-scoped-sid").is_none());
+
+    let (ok, code) = rx.recv().expect("request thread should finish");
+    assert!(ok, "request should recover with 200 after retries");
+    assert_eq!(code, 200);
+    assert_eq!(
+        counter.load(std::sync::atomic::Ordering::SeqCst),
+        3,
+        "expected 2 retries then success (3 total requests)"
+    );
+assert!(current_proxy_retry_status("acp-sid").is_none());
+    let _ = request_thread.join();
+    let _ = handle.join();
+}
+
+#[test]
+fn send_upstream_with_retry_cancellation_clears_registry_entry() {
+    // Regression for the "每次都是正常结束了说异常尝试" leak: when the retry
+    // future is dropped while suspended in a backoff `sleep` (codex-acp
+    // cancellation / session switch), the RAII `RetryGuard` must remove its
+    // registry entry on drop. Previously the manual `clear` calls only ran on
+    // explicit return paths, so a dropped retry left an `active:true`
+    // `transport_error`/`bad_gateway` entry that the UI rendered forever.
+// The mock replies with a single persistent 502 and then exits its accept
+    // loop (1 scripted status → server thread joins). The call would retry on
+    // that 502; we arm a short timeout that drops the future mid-backoff and
+    // then assert the registry is empty for that session.
+    let (port, _counter, handle) = mock_upstream_server(vec![502]);
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let session = format!("retry_cancel_{}", uuid::Uuid::new_v4());
+    let result = rt.block_on(async {
+        let client = reqwest::Client::new();
+        let fut = send_upstream_with_retry(
+            Some(&session),
+            "test_provider",
+            client
+                .post(format!("http://127.0.0.1:{port}/test"))
+                .header("Content-Type", "application/json")
+                .body(br#"{"q":1}"#.to_vec()),
+        );
+        // Drop the future after the first 502 has been received and the guard
+        // has armed — well before the exponential backoff (>=500ms) elapses.
+        let outcome = tokio::time::timeout(
+            std::time::Duration::from_millis(100),
+            fut,
+        )
+        .await;
+        // Timeout fired (Err), meaning the future was dropped mid-backoff.
+        assert!(outcome.is_err(), "future should be dropped mid-backoff");
+    });
+    let _ = result;
+    // After the dropped future's `RetryGuard::drop` ran, no active entry must
+    // remain for this session — the old bug would leave one here forever.
+    assert!(
+        current_proxy_retry_status(&session).is_none(),
+        "dropped retry must not leak an active registry entry"
+    );
+    let _ = handle.join();
 }

@@ -257,10 +257,10 @@ const REASONING_EFFORT_OPTIONS: Array<{
   label: string;
 }> = [
   { value: "none", label: "无 (默认)" },
-  { value: "minimal", label: "Minimal" },
   { value: "low", label: "Low" },
   { value: "medium", label: "Medium" },
   { value: "high", label: "High" },
+  { value: "xhigh", label: "Max" },
 ];
 
 type ModelEntryListEditorProps = {
@@ -522,7 +522,14 @@ function ModelEntryListEditor({
                         <span>Reasoning effort</span>
                         <ModelEntrySelect<ReasoningEffort>
                           aria-label={`byok_model_reasoning_effort_${index}`}
-                          value={entry.reasoning_effort ?? "none"}
+                          // Legacy `minimal` entries fold into the unified
+                          // `low` tier so the select never shows an unmatched
+                          // value for catalogs saved before the merge.
+                          value={
+                            entry.reasoning_effort === "minimal"
+                              ? "low"
+                              : entry.reasoning_effort ?? "none"
+                          }
                           disabled={disabled}
                           onChange={(value) => {
                             updateAt(index, {

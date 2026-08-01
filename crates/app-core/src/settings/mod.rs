@@ -1014,7 +1014,7 @@ fn normalize_model_entries(
             context_window: entry.context_window,
             max_output_tokens: entry.max_output_tokens,
             supports_image_input: entry.supports_image_input,
-            reasoning_effort: entry.reasoning_effort,
+            reasoning_effort: entry.reasoning_effort.map(normalize_reasoning_effort),
         });
     }
     if normalized.is_empty() {
@@ -1024,6 +1024,19 @@ fn normalize_model_entries(
         anyhow::bail!("model list cannot contain more than 200 models");
     }
     Ok(normalized)
+}
+
+/// Fold the legacy `Minimal` reasoning tier into `Low`. The settings UI
+/// exposes a single "Low" option, and for the GPT family `low` is the same
+/// level as Codex's `minimal`, so old `minimal` catalog values normalize to
+/// `low` instead of surfacing a second near-duplicate tier.
+fn normalize_reasoning_effort(
+    effort: workspace_model::ReasoningEffort,
+) -> workspace_model::ReasoningEffort {
+    match effort {
+        workspace_model::ReasoningEffort::Minimal => workspace_model::ReasoningEffort::Low,
+        other => other,
+    }
 }
 
 fn normalize_model_list_url(url: &str) -> Result<String> {
@@ -2015,6 +2028,11 @@ pub fn save_provider_models_with_model_list_url(
     catalog.hidden_providers.remove(&provider);
     save_provider_models_catalog(paths, &catalog)?;
     refresh_codex_model_catalog_after_provider_models_change(paths)?;
+    // Keep the in-process Codex API proxy's per-model provider map (which
+    // carries each model's authored `reasoning_effort`) in sync with the
+    // saved catalog so the kimi output_config.effort injection and any other
+    // effort-driven proxying pick up the new value immediately.
+    sync_codex_api_proxy_model_provider_map_for_paths(paths);
     Ok(settings_snapshot(paths))
 }
 
@@ -3531,6 +3549,7 @@ fn reasoning_effort_description(effort: workspace_model::ReasoningEffort) -> &'s
         workspace_model::ReasoningEffort::Low => "Light reasoning",
         workspace_model::ReasoningEffort::Medium => "Balanced reasoning",
         workspace_model::ReasoningEffort::High => "Deep reasoning",
+        workspace_model::ReasoningEffort::XHigh => "Maximum reasoning",
     }
 }
 

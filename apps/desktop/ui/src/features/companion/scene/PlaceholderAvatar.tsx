@@ -30,7 +30,15 @@ const MOOD_COLORS: Record<CompanionMood, string> = {
 export function PlaceholderAvatar({ mood, gaze, lowPower }: PlaceholderAvatarProps) {
   const groupRef = useRef<THREE.Group>(null);
   const materialRef = useRef<THREE.MeshStandardMaterial>(null);
-  const clockRef = useRef({ time: 0, breathPhase: 0 });
+  const glowRef = useRef<THREE.MeshStandardMaterial>(null);
+  const clockRef = useRef({
+    time: 0,
+    breathPhase: Math.random() * Math.PI * 2,
+    swayPhase: Math.random() * Math.PI * 2,
+    pulsePhase: Math.random() * Math.PI * 2,
+    // 待机小动作：绕自身中垂轴轻微摆动着随机选一个幅度
+    fidgetPhase: Math.random() * Math.PI * 2,
+  });
   const { invalidate } = useThree();
 
   useFrame((_, rawDt) => {
@@ -38,24 +46,56 @@ export function PlaceholderAvatar({ mood, gaze, lowPower }: PlaceholderAvatarPro
     const dt = Math.min(rawDt, 0.1);
     const clock = clockRef.current;
     clock.time += dt;
+    clock.breathPhase += dt * 1.6;
+    clock.swayPhase += dt * 0.8;
+    clock.pulsePhase += dt * (mood === "happy" ? 8 : 3);
+    clock.fidgetPhase += dt * 1.1;
 
     const targetColor = new THREE.Color(MOOD_COLORS[mood]);
     materialRef.current.color.lerp(targetColor, Math.min(1, dt * 4));
     materialRef.current.emissive.lerp(targetColor.clone().multiplyScalar(0.25), Math.min(1, dt * 4));
+    if (glowRef.current) {
+      // 心跳式光晕脉冲：情绪越强脉冲越快/越亮
+      const pulse = (Math.sin(clock.pulsePhase) + 1) / 2;
+      const intensity = 0.35 + pulse * (mood === "happy" || mood === "awaiting_permission" ? 0.8 : 0.45);
+      glowRef.current.emissiveIntensity = THREE.MathUtils.damp(
+        glowRef.current.emissiveIntensity,
+        intensity,
+        4,
+        dt,
+      );
+    }
 
-    // 注视跟随（整体轻微转向）
+    // 注视跟随（整体轻微转向），叠加自然的待机摆动
     const targetYaw = THREE.MathUtils.clamp(gaze.x * 0.4, -0.4, 0.4);
     const targetPitch = THREE.MathUtils.clamp(-gaze.y * 0.2, -0.2, 0.2);
-    groupRef.current.rotation.y = THREE.MathUtils.damp(groupRef.current.rotation.y, targetYaw, 6, dt);
-    groupRef.current.rotation.x = THREE.MathUtils.damp(groupRef.current.rotation.x, targetPitch, 6, dt);
+    const idleYaw = Math.sin(clock.fidgetPhase) * 0.18;
+    const idlePitch = Math.sin(clock.swayPhase) * 0.08;
+    groupRef.current.rotation.y = THREE.MathUtils.damp(
+      groupRef.current.rotation.y,
+      targetYaw + (mood === "idle" ? idleYaw : 0),
+      6,
+      dt,
+    );
+    const pitchTarget =
+      mood === "sleepy"
+        ? 0.3
+        : mood === "thinking"
+          ? targetPitch + 0.12
+          : targetPitch + (mood === "idle" ? idlePitch : 0);
+    groupRef.current.rotation.x = THREE.MathUtils.damp(groupRef.current.rotation.x, pitchTarget, 4, dt);
 
     if (!lowPower) {
-      clock.breathPhase += dt * 1.6;
+      // 呼吸浮沉 + 待机的上下轻盈浮动
+      const floatY = Math.sin(clock.fidgetPhase) * 0.04;
       groupRef.current.position.y = Math.sin(clock.breathPhase) * 0.03;
       if (mood === "happy") {
         groupRef.current.position.y = Math.abs(Math.sin(clock.time * 6)) * 0.12;
-      } else if (mood === "sleepy") {
-        groupRef.current.rotation.x = THREE.MathUtils.damp(groupRef.current.rotation.x, 0.3, 1.5, dt);
+      } else if (mood === "pouty" || mood === "frustrated") {
+        // 泄气：整体沉下去一点
+        groupRef.current.position.y = Math.sin(clock.breathPhase) * 0.015 - 0.05;
+      } else if (mood === "curious" || mood === "awaiting_permission") {
+        groupRef.current.position.y = Math.sin(clock.breathPhase) * 0.04 + floatY;
       }
       invalidate();
     }
@@ -70,7 +110,7 @@ export function PlaceholderAvatar({ mood, gaze, lowPower }: PlaceholderAvatarPro
       {/* 心形高光暗示（占位：小球代替） */}
       <mesh position={[0.32, 0.42, 0.28]}>
         <sphereGeometry args={[0.07, 16, 16]} />
-        <meshStandardMaterial color="#e0609a" emissive="#e0609a" emissiveIntensity={0.6} />
+        <meshStandardMaterial ref={glowRef} color="#e0609a" emissive="#e0609a" emissiveIntensity={0.6} />
       </mesh>
     </group>
   );

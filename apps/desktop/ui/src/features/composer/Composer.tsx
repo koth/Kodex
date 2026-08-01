@@ -67,6 +67,14 @@ export function Composer({
     setInput,
     setAttachments,
   } = useComposerDraft(draftOwnerKey);
+  // Keep the latest store setter in a ref. Callbacks created with an empty
+  // dependency array (e.g. removeAttachment) would otherwise keep the setter
+  // from their first render, which is bound to the draftOwnerKey at that
+  // moment. Switching workspaces reuses the same <Composer> instance, so a
+  // stale setter would write removals into the previous workspace's draft
+  // entry and the UI would never update.
+  const setAttachmentsRef = useRef(setAttachments);
+  setAttachmentsRef.current = setAttachments;
 
   const isInterrupted = snapshot.session.status === "Interrupted";
   const controls = snapshot.session_config.controls;
@@ -168,7 +176,7 @@ export function Composer({
           const normalized = path.replace(/\\/g, "/").replace(/^[\\/]+/, "");
           attachment.displayName = `${normalized}/`;
         }
-        setAttachments((current) => {
+        setAttachmentsRef.current((current) => {
           if (attachment.uri && current.some((item) => item.uri === attachment.uri)) {
             return current;
           }
@@ -229,7 +237,7 @@ export function Composer({
           imageInputEnabled,
         );
         if (disposed) return;
-        setAttachments((current) => {
+        setAttachmentsRef.current((current) => {
           if (attachment.uri && current.some((item) => item.uri === attachment.uri)) {
             return current;
           }
@@ -273,7 +281,7 @@ export function Composer({
   }, [activeImagePreview]);
 
   const removeAttachment = useCallback((attachmentId: string) => {
-    setAttachments((current) => current.filter((item) => item.id !== attachmentId));
+    setAttachmentsRef.current((current) => current.filter((item) => item.id !== attachmentId));
     setActiveImagePreviewId((current) => (current === attachmentId ? null : current));
   }, []);
 
@@ -322,7 +330,7 @@ export function Composer({
     }
     setInput("");
     if (!turnActive) {
-      setAttachments([]);
+      setAttachmentsRef.current([]);
     }
     setActiveImagePreviewId(null);
     setSlashMenuOpen(false);
@@ -373,7 +381,7 @@ export function Composer({
         setControlError("部分文件已被跳过，因为当前智能体不支持它们");
       }
       const nextAttachments = await Promise.all(selected.map(readAttachment));
-      setAttachments((current) => [...current, ...nextAttachments]);
+      setAttachmentsRef.current((current) => [...current, ...nextAttachments]);
     } catch (error) {
       setControlError(String(error));
     } finally {
@@ -403,7 +411,7 @@ export function Composer({
           draftOwnerKey,
         }),
       }).catch(() => undefined);
-      setAttachments((current) => [...current, ...nextAttachments]);
+      setAttachmentsRef.current((current) => [...current, ...nextAttachments]);
     } catch (error) {
       setControlError(String(error));
     }

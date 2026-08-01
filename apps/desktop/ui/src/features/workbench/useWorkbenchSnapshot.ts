@@ -8,6 +8,16 @@ import {
   getStreamingMessageBody,
 } from "../conversation/streaming-message-store";
 
+/** How often the workbench re-syncs its snapshot from the backend. Streaming
+ *  renders depend on incremental `ui:snapshot_patch` events whose deltas are
+ *  only correct when applied in-order with no gaps. A single dropped event
+ *  (webview busy under heavy markdown rendering) silently desyncs the local
+ *  stream store from the backend message body, truncating the final reply
+ *  with no way to recover. This periodic full poll is the self-heal: when the
+ *  backend revision is ahead of ours we replace the local snapshot with the
+ *  complete state, so a missed delta self-corrects within a few seconds. */
+const SNAPSHOT_SELF_HEAL_POLL_MS = 3000;
+
 export function applySnapshotPatch(snapshot: UiSnapshot, patch: UiSnapshotPatch): UiSnapshot {
   const messages =
     patch.messages.length === 0
@@ -272,6 +282,17 @@ export function useWorkbenchSnapshot() {
           void pollState();
           return prev;
         }
+        // A revision gap means one or more patches were dropped between the
+        // last accepted state and this one. Delta-only patches are only
+        // meaningful when applied in-order with no gaps — after a gap the
+        // stream store appends a suffix computed against an older backend
+        // body, permanently misaligning the displayed text (the classic
+        // "final part of the reply renders truncated"). Re-sync from a full
+        // snapshot instead of merging a corrupted delta.
+        if (patch.revision > prev.revision + 1) {
+          void pollState();
+          return prev;
+        }
 
         prevSnapshotSessionId.current = patch.session.id;
         prevSnapshotRevision.current = Math.max(prev.revision, patch.revision);
@@ -309,6 +330,19 @@ export function useWorkbenchSnapshot() {
       unlistenPatch?.();
     };
   }, [pollState]);
+
+  // Periodic full-snapshot reconciliation. Catches patch loss that never
+  // surfaces as a revision gap (e.g. the last deltas of a turn are dropped and
+  // no further patch arrives to trigger the gap check): the backend revision
+  // stays ahead of ours, so the next poll replaces the truncated local state
+  // with the complete reply.
+  useEffect(() => {
+    if (!workspaceReady) return;
+    const interval = window.setInterval(() => {
+      void pollState();
+    }, SNAPSHOT_SELF_HEAL_POLL_MS);
+    return () => window.clearInterval(interval);
+  }, [workspaceReady, pollState]);
 
   useEffect(() => {
     if (!workspaceReady || snapshot) return;

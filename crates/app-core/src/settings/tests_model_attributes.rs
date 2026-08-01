@@ -315,3 +315,96 @@ fn settings_snapshot_surfaces_model_entries_with_attributes() {
     assert_eq!(entries[0]["supports_image_input"], true);
     assert_eq!(entries[0]["reasoning_effort"], "low");
 }
+
+#[test]
+fn legacy_minimal_reasoning_effort_normalizes_to_low_and_xhigh_is_preserved() {
+    let dir = tempdir().unwrap();
+    let paths = AppPaths::from_root(dir.path().join(".kodex"));
+    save_provider_models(
+        &paths,
+        TIMIAI_PROVIDER_ID,
+        vec![
+            workspace_model::ModelAttributesInput {
+                slug: "gpt-5.4".to_string(),
+                display_name: None,
+                context_window: None,
+                max_output_tokens: None,
+                supports_image_input: None,
+                // Legacy value from catalogs saved before the Minimal/Low merge.
+                reasoning_effort: Some(workspace_model::ReasoningEffort::Minimal),
+            },
+            workspace_model::ModelAttributesInput {
+                slug: "gpt-5.5".to_string(),
+                display_name: None,
+                context_window: None,
+                max_output_tokens: None,
+                supports_image_input: None,
+                reasoning_effort: Some(workspace_model::ReasoningEffort::XHigh),
+            },
+        ],
+    )
+    .unwrap();
+
+    let snapshot = settings_snapshot(&paths);
+    let parsed = serde_json::to_value(&snapshot).unwrap();
+    let timiai = parsed["codex_acp"]["profiles"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["id"] == TIMIAI_PROVIDER_ID)
+        .unwrap();
+    let entries = timiai["model_entries"].as_array().unwrap();
+    assert_eq!(entries.len(), 2);
+    assert_eq!(entries[0]["slug"], "gpt-5.4");
+    assert_eq!(entries[0]["reasoning_effort"], "low");
+    assert_eq!(entries[1]["slug"], "gpt-5.5");
+    assert_eq!(entries[1]["reasoning_effort"], "xhigh");
+}
+
+#[test]
+fn saving_provider_models_syncs_reasoning_effort_into_proxy_provider_map() {
+    let dir = tempdir().unwrap();
+    let paths = AppPaths::from_root(dir.path().join(".kodex"));
+    // Pin the selected Codex channel to BYOK so the provider-map env
+    // aggregates source-provider catalogs.
+    let mut settings = load_app_settings(&paths);
+    settings.selected_codex_provider_profile_id = Some(BYOK_PROVIDER_ID.to_string());
+    save_app_settings(&paths, &settings).unwrap();
+    save_provider_models(
+        &paths,
+        TIMIAI_PROVIDER_ID,
+        vec![workspace_model::ModelAttributesInput {
+            slug: "gpt-5.5".to_string(),
+            display_name: None,
+            context_window: None,
+            max_output_tokens: None,
+            supports_image_input: None,
+            reasoning_effort: Some(workspace_model::ReasoningEffort::XHigh),
+        }],
+    )
+    .unwrap();
+    save_agent_provider_secret(
+        &paths,
+        AgentProviderFamily::Codex,
+        TIMIAI_PROVIDER_ID,
+        "timiai-secret",
+    )
+    .unwrap();
+
+    // `save_provider_models` syncs this map into the in-process proxy, so the
+    // catalog's authored effort must already be visible in the env payload.
+    let (env_name, value) = codex_model_provider_map_env(&paths).expect("provider map env");
+    assert_eq!(env_name, KODEX_MODEL_PROVIDER_MAP_ENV);
+    let parsed: serde_json::Value = serde_json::from_str(&value).unwrap();
+    let entry = parsed
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| {
+            entry["model"]
+                .as_str()
+                .is_some_and(|model| model.contains("gpt-5.5"))
+        })
+        .expect("gpt-5.5 entry present in provider map");
+    assert_eq!(entry["reasoning_effort"], "xhigh");
+}

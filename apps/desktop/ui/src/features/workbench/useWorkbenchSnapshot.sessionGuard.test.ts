@@ -262,3 +262,82 @@ describe("useWorkbenchSnapshot – session-id revision collision guard", () => {
     expect(result.current.snapshot).toBe(original);
   });
 });
+
+describe("useWorkbenchSnapshot – dropped patch self-heal", () => {
+  it("re-syncs from a full snapshot when a revision gap signals dropped patches", async () => {
+    const session = makeSnapshot({
+      revision: 1,
+      session: { ...makeSnapshot().session, status: "Streaming" },
+      messages: [{ id: "msg-1", role: "Assistant", body: "prefix" }],
+      timeline: [{ Message: "msg-1" }],
+    });
+    // The backend's full state after the dropped patch(es): revision jumped
+    // from 1 to 3 and the message body is complete.
+    const healed = makeSnapshot({
+      revision: 3,
+      session: { ...makeSnapshot().session, status: "Streaming" },
+      messages: [{ id: "msg-1", role: "Assistant", body: "prefix + complete suffix" }],
+      timeline: [{ Message: "msg-1" }],
+    });
+
+    const { result } = renderHook(() => useWorkbenchSnapshot());
+    await act(async () => {
+      result.current.acceptSnapshot(session);
+    });
+
+    mockSessionGetState = () => Promise.resolve(healed);
+
+    // A patch with a revision gap (2 skipped) arrives. The local stream store
+    // would otherwise append a delta computed against an unknown intermediate
+    // body; instead the patch must be rejected and a full poll triggered.
+    await act(async () => {
+      patchCallback?.({
+        ...makeStreamingDeltaPatch(session, "msg-1", " + suffix"),
+        revision: 3,
+      });
+    });
+
+    // pollState fetched the complete backend snapshot and replaced the local
+    // truncated body with it.
+    expect(result.current.snapshot?.revision).toBe(3);
+    expect(result.current.snapshot?.messages[0].body).toBe("prefix + complete suffix");
+  });
+
+  it("periodically reconciles a truncated snapshot even when no further patch arrives", async () => {
+    vi.useFakeTimers();
+    try {
+      const session = makeSnapshot({
+        revision: 1,
+        session: { ...makeSnapshot().session, status: "Idle" },
+        messages: [{ id: "msg-1", role: "Assistant", body: "prefix only" }],
+        timeline: [{ Message: "msg-1" }],
+      });
+      // The last deltas of the turn were dropped: the backend already holds
+      // the complete reply but no further patch will arrive to trigger the
+      // revision-gap check. The periodic poll must repair the UI.
+      const healed = makeSnapshot({
+        revision: 2,
+        session: { ...makeSnapshot().session, status: "Idle" },
+        messages: [{ id: "msg-1", role: "Assistant", body: "prefix only + final tail" }],
+        timeline: [{ Message: "msg-1" }],
+      });
+
+      const { result } = renderHook(() => useWorkbenchSnapshot());
+      await act(async () => {
+        result.current.acceptSnapshot(session);
+      });
+      expect(result.current.snapshot?.messages[0].body).toBe("prefix only");
+
+      mockSessionGetState = () => Promise.resolve(healed);
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(3000);
+      });
+
+      expect(result.current.snapshot?.revision).toBe(2);
+      expect(result.current.snapshot?.messages[0].body).toBe("prefix only + final tail");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});

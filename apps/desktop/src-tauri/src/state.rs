@@ -581,6 +581,19 @@ impl AppState {
         Ok(guard.active_workspace.clone())
     }
 
+    /// Current upstream-retry status for the active session, if the
+    /// in-process codex_api_proxy is mid-retry. Polled by the snapshot
+    /// bridge every wake so it can push a `proxy:retry` event to the UI.
+    pub fn proxy_retry_status(&self) -> Result<Option<workspace_model::ProxyRetryStatus>, String> {
+        let guard = self.workspaces.lock().map_err(|e| e.to_string())?;
+        let active_key = guard.active_workspace.clone().ok_or("No workspace open")?;
+        let app = match guard.workspaces.get(&active_key) {
+            Some(WorkspaceEntry::Connected(app)) => app,
+            _ => return Ok(None),
+        };
+        Ok(app.proxy_retry_status())
+    }
+
     pub fn with_app<F, R>(&self, f: F) -> Result<R, String>
     where
         F: FnOnce(&mut Application) -> Result<R, String>,

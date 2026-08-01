@@ -338,6 +338,9 @@ fn start_snapshot_bridge(app: tauri::AppHandle, running: Arc<AtomicBool>) {
         let mut cursor = UiPatchCursor::default();
         let mut last_key: Option<String> = None;
         let mut rx: Option<tokio::sync::broadcast::Receiver<app_core::AppUpdate>> = None;
+        // Last-emitted upstream-retry status so we only push a `proxy:retry`
+        // event to the frontend when it actually changes (each 220ms wake).
+        let mut last_proxy_retry: Option<workspace_model::ProxyRetryStatus> = None;
 
         while running.load(Ordering::Acquire) {
             // Re-subscribe to the active workspace's update signals when the
@@ -358,6 +361,12 @@ fn start_snapshot_bridge(app: tauri::AppHandle, running: Arc<AtomicBool>) {
                     .ok()
                     .flatten();
                 cursor = UiPatchCursor::default();
+                // Drop any stale retry animation when switching workspaces so
+                // the new session does not inherit the previous one's state.
+                // Emit None to clear the frontend immediately; the per-wake
+                // poll below then tracks the new session's status from None.
+                last_proxy_retry = None;
+                events::emit_proxy_retry_status(&app, None);
             }
 
             // Signal-driven wake: block until an update signal arrives or the
@@ -387,6 +396,22 @@ fn start_snapshot_bridge(app: tauri::AppHandle, running: Arc<AtomicBool>) {
                 None => {
                     cursor = UiPatchCursor::default();
                 }
+            }
+
+            // Poll the in-process codex_api_proxy's upstream-retry status
+            // for the active session and push a `proxy:retry` event whenever
+            // it changes. Retries happen out-of-band (no ACP events while the
+            // proxy backs off), so the snapshot revision does not advance on
+            // its own — this dedicated poll keeps the UI animation in sync
+            // with retry attempts.
+            let current_proxy_retry = app
+                .state::<AppState>()
+                .proxy_retry_status()
+                .ok()
+                .flatten();
+            if current_proxy_retry != last_proxy_retry {
+                last_proxy_retry = current_proxy_retry.clone();
+                events::emit_proxy_retry_status(&app, current_proxy_retry.as_ref());
             }
         }
     });

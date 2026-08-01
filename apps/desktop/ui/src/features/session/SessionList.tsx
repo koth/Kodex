@@ -852,7 +852,7 @@ function WorkspaceSection({
   onArchiveWorkspace: (workspaceRoot: string, isActive: boolean, workspaceName?: string) => void;
 }) {
   const sessions = sortSessions(item.sessions);
-  const collapsed = collapsedState ?? false;
+  const collapsed = collapsedState ?? !item.is_active;
   const setCollapsed = (next: boolean) => onCollapsedChange(item.workspace.root, next);
   const workspaceRoot = item.workspace.root;
   const isRemoteWorkspace = item.workspace.location?.kind === "remote_linux";

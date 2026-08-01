@@ -260,6 +260,22 @@ export interface TerminalOutput {
   output: string;
 }
 
+/**
+ * Transient upstream-retry state surfaced by the in-process codex_api_proxy
+ * when an upstream provider returns a transient error (502 / 429 / transport
+ * error). Pushed to the frontend via the `proxy:retry` event so the UI can
+ * render a retry animation. `null` (event payload omitted) means no retry is
+ * currently in flight — clear the animation.
+ */
+export interface ProxyRetryStatus {
+  attempt: number;
+  max_attempts: number;
+  status_code: number | null;
+  reason: string;
+  active: boolean;
+  provider: string | null;
+}
+
 export type TerminalSessionStatus = "running" | "exited";
 
 export interface TerminalSession {
@@ -822,7 +838,8 @@ export type ReasoningEffort =
   | "minimal"
   | "low"
   | "medium"
-  | "high";
+  | "high"
+  | "xhigh";
 
 export interface ModelCatalogEntry {
   slug: string;

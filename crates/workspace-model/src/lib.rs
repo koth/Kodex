@@ -580,6 +580,39 @@ pub enum ThinkingStatus {
     Completed,
 }
 
+/// Transient retry state surfaced by the in-process `codex_api_proxy` when an
+/// upstream provider returns a transient error (502 Bad Gateway, 429 Too Many
+/// Requests) or a transport-level failure. The proxy retries the upstream
+/// request up to `max_attempts` times and pushes each attempt here so the UI
+/// can render a retry animation. Keyed by the ACP session id (the same value
+/// codex-acp sends as the `session-id` header), so it correlates with the
+/// active session the frontend is rendering.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ProxyRetryStatus {
+    /// 1-based retry attempt currently in flight (the first retry after the
+    /// initial request failed is attempt `1`). Never exceeds `max_attempts`.
+    pub attempt: u32,
+    /// Hard cap on retry attempts the proxy will perform.
+    pub max_attempts: u32,
+    /// HTTP status code returned by the upstream that triggered the retry
+    /// (e.g. `502`, `429`). `None` for transport-level failures (connection
+    /// reset, timeout) where no HTTP response was received.
+    #[serde(default)]
+    pub status_code: Option<u16>,
+    /// Short machine-readable reason: `bad_gateway`, `rate_limited`,
+    /// `transport_error`.
+    #[serde(default)]
+    pub reason: String,
+    /// `true` while the proxy is backing off and resending between attempts;
+    /// `false` once the upstream responded successfully or all retries were
+    /// exhausted (cleared shortly after).
+    #[serde(default)]
+    pub active: bool,
+    /// Provider the retry targets, for display (e.g. `deepseek`, `kimi_code`).
+    #[serde(default)]
+    pub provider: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum MessageRole {
     User,
@@ -1565,8 +1598,10 @@ impl AgentProviderProfile {
 
 /// Reasoning effort levels surfaced through ACP/Codex config and the model
 /// catalog. `None` is the existing default and disables reasoning summaries
-/// entirely. `Minimal`/`Low`/`Medium`/`High` map to Codex effort values when
-/// the active model/provider supports them.
+/// entirely. `Low`/`Medium`/`High`/`XHigh` map to Codex effort values when
+/// the active model/provider supports them. `Minimal` is retained only for
+/// backward-compatible deserialization of legacy catalog data; new values
+/// normalize it to `Low` (see `normalize_model_entries`).
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum ReasoningEffort {
@@ -1576,6 +1611,8 @@ pub enum ReasoningEffort {
     Low,
     Medium,
     High,
+    #[serde(rename = "xhigh")]
+    XHigh,
 }
 
 impl ReasoningEffort {
@@ -1586,6 +1623,7 @@ impl ReasoningEffort {
             Self::Low => "low",
             Self::Medium => "medium",
             Self::High => "high",
+            Self::XHigh => "xhigh",
         }
     }
 }
@@ -1985,6 +2023,7 @@ mod model_attributes_tests {
             (ReasoningEffort::Low, "\"low\""),
             (ReasoningEffort::Medium, "\"medium\""),
             (ReasoningEffort::High, "\"high\""),
+            (ReasoningEffort::XHigh, "\"xhigh\""),
         ] {
             let json = serde_json::to_string(&effort).expect("serialize");
             assert_eq!(json, expected, "mismatch for {effort:?}");
@@ -1996,6 +2035,7 @@ mod model_attributes_tests {
         assert_eq!(ReasoningEffort::default(), ReasoningEffort::None);
         assert_eq!(ReasoningEffort::None.as_codex_str(), "none");
         assert_eq!(ReasoningEffort::High.as_codex_str(), "high");
+        assert_eq!(ReasoningEffort::XHigh.as_codex_str(), "xhigh");
     }
 
     #[test]

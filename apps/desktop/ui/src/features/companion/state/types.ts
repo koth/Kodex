@@ -32,6 +32,8 @@ export interface CompanionSettings {
   minimized: boolean;
   /** 用户自定义 VRM 模型 URL；null 使用内置默认 */
   modelUrl: string | null;
+  /** 显示缩放比例（1 = 100%） */
+  scale: number;
   /** 首次开启说明是否已确认 */
   introAcknowledged: boolean;
 }
@@ -42,6 +44,7 @@ export const DEFAULT_COMPANION_SETTINGS: CompanionSettings = {
   position: { x: 0.92, y: 0.85 },
   minimized: false,
   modelUrl: null,
+  scale: 1,
   introAcknowledged: false,
 };
 

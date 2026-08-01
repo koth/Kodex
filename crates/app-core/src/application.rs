@@ -609,6 +609,35 @@ impl Application {
         self.update_tx.subscribe()
     }
 
+    /// Current upstream-retry status for the active ACP session, if the
+    /// in-process codex_api_proxy is mid-retry on a transient upstream error
+    /// (429 / 5xx / transport error). The Tauri snapshot bridge polls this
+    /// each wake to push a `proxy:retry` event so the UI can render a retry
+    /// animation.
+    ///
+    /// First tries the exact ACP session id (`self.session.id`); if that key
+    /// is not in the proxy's retry registry, falls back to the most-recently
+    /// updated active retry across ALL sessions. The fallback matters because
+    /// a single visible conversation can fire concurrent requests (e.g. a
+    /// fast-model title/summary request) that are keyed under a different
+    /// `session-id` than the main conversation — without the fallback the UI
+    /// would hide a retry that is genuinely in flight.
+    /// Retry status for the **active session's own** in-flight upstream
+    /// request, keyed by the ACP session id (the `session-id` header the proxy
+    /// receives). Returns `None` when this session is not currently retrying.
+    ///
+    /// We intentionally do NOT fall back to other sessions' retries: doing so
+    /// would render another (retrying) conversation's spinner onto an idle
+    /// session's UI. The `/responses` paths all key the retry registry under
+    /// the ACP session id, so the exact lookup is both necessary and
+    /// sufficient for the visible turn.
+    pub fn proxy_retry_status(&self) -> Option<workspace_model::ProxyRetryStatus> {
+        if self.session.id.is_empty() {
+            return None;
+        }
+        acp_core::current_proxy_retry_status(&self.session.id)
+    }
+
     /// Mark the in-flight prompt as originating from a remote (relay/phone)
     /// caller so destructive permissions require explicit phone approval.
     /// Set before dispatching a remote prompt; cleared on turn end.

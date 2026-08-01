@@ -32,6 +32,8 @@ interface Props {
    *  git changeset; candidates are matched as whole trailing segments, never
    *  by basename alone. */
   candidatePaths?: string[];
+  /** Called when a markdown image is clicked; omitted in non-chat surfaces. */
+  onImagePreview?: (src: string, alt?: string) => void;
 }
 
 /** Cross-message cache of `fs_path_exists` results so the same file link is
@@ -63,7 +65,7 @@ export function clearFilePathLinkCacheForTests() {
   barePathOverrides.clear();
 }
 
-function MarkdownBody({ content, workspaceRoot, onFilePathClick, changedFiles, candidatePaths }: Props) {
+function MarkdownBody({ content, workspaceRoot, onFilePathClick, changedFiles, candidatePaths, onImagePreview }: Props) {
   const appTheme = useCurrentAppTheme();
   const codeTheme = appTheme === "light" ? oneLight : vscDarkPlus;
   const displayContent = repairCompactMarkdown(content);
@@ -405,7 +407,21 @@ function MarkdownBody({ content, workspaceRoot, onFilePathClick, changedFiles, c
           );
         },
         img({ src, alt }) {
-          return <img className="md-image" src={src} alt={alt ?? "附加的图片"} />;
+          const label = alt || "附加的图片";
+          if (!onImagePreview || typeof src !== "string" || !src) {
+            return <img className="md-image" src={src} alt={label} />;
+          }
+          return (
+            <button
+              type="button"
+              className="md-image-button"
+              onClick={() => onImagePreview(src, label)}
+              aria-label={`预览 ${label}`}
+              title="预览图片"
+            >
+              <img className="md-image" src={src} alt={label} />
+            </button>
+          );
         },
         strong({ children }) {
           return <strong className="md-bold">{children}</strong>;
@@ -728,10 +744,15 @@ function isImageOnlyParagraph(children: ReactNode) {
 }
 
 function isMarkdownImageElement(child: ReactNode) {
-  if (!isValidElement<{ className?: string; src?: string }>(child)) {
+  if (!isValidElement<{ className?: string; src?: string; children?: ReactNode }>(child)) {
     return false;
   }
-  return child.props.className === "md-image" || child.type === "img" || Boolean(child.props.src);
+  return (
+    child.props.className === "md-image" ||
+    child.type === "img" ||
+    Boolean(child.props.src) ||
+    Children.toArray(child.props.children).some(isMarkdownImageElement)
+  );
 }
 
 export function repairCompactMarkdown(content: string) {

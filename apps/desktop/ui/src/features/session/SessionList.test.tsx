@@ -828,9 +828,11 @@ const workspaceButton = await screen.findByTitle(/^双击连接远程工作区/)
       />,
     );
 
-    const indicator = await screen.findByLabelText("后台会话仍在运行");
+    // The inactive "Other" workspace defaults to collapsed; its running
+    // session surfaces as an aggregate indicator on the workspace header.
+    const indicator = await screen.findByLabelText("有会话进行中");
     expect(indicator).toHaveClass("is-progress");
-    expect(indicator.closest(".sl-item")).toHaveClass("is-background-running");
+    expect(indicator.closest(".sl-workspace-section")).toHaveClass("has-collapsed-running");
   });
 
   it("refreshes background session indicators when session status events arrive", async () => {

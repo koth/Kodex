@@ -13,6 +13,7 @@ use std::convert::Infallible;
 use std::net::{SocketAddr, TcpListener};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock, RwLock};
+use workspace_model::ProxyRetryStatus;
 
 type ProxyBody = BoxBody<Bytes, Infallible>;
 
@@ -52,6 +53,7 @@ const COMMANDCODE_UPSTREAM_CHAT_COMPLETIONS_URL: &str =
     "https://api.commandcode.ai/provider/v1/chat/completions";
 const COMMANDCODE_UPSTREAM_MESSAGES_URL: &str = "https://api.commandcode.ai/provider/v1/messages";
 const DEEPSEEK_UPSTREAM_CHAT_COMPLETIONS_URL: &str = "https://api.deepseek.com/v1/chat/completions";
+const DEEPSEEK_UPSTREAM_RESPONSES_URL: &str = "https://api.deepseek.com/responses";
 const KIMI_UPSTREAM_CHAT_COMPLETIONS_URL: &str = "https://api.kimi.com/coding/v1/chat/completions";
 const KIMI_UPSTREAM_MESSAGES_URL: &str = "https://api.kimi.com/coding/v1/messages";
 const MIMO_UPSTREAM_CHAT_COMPLETIONS_URL: &str =
@@ -159,6 +161,348 @@ static SYNTHETIC_TOOL_CALL_ID_COUNTER: AtomicU64 = AtomicU64::new(1);
 fn next_synthetic_tool_call_id() -> String {
     let n = SYNTHETIC_TOOL_CALL_ID_COUNTER.fetch_add(1, Ordering::Relaxed);
     format!("call_proxy_{n}")
+}
+// ── Upstream retry machinery ──────────────────────────────────────────────
+//
+// The in-process codex_api_proxy forwards each request to a single upstream
+// provider. Transient failures (any 5xx, 429 Too Many Requests, or a
+// transport-level error such as a connection reset) are retried here, up to
+// `MAX_UPSTREAM_RETRIES` times, with exponential backoff + jitter. Each retry
+// attempt is published to a process-global registry keyed by the ACP session
+// id so the UI can surface a retry animation; the entry is cleared on success
+// or once retries are exhausted.
+
+/// Maximum number of retry attempts for a transient upstream failure. The
+/// initial request is not counted, so the upstream is contacted up to
+/// `1 + MAX_UPSTREAM_RETRIES` times before giving up and returning the final
+/// error response.
+const MAX_UPSTREAM_RETRIES: u32 = 5;
+
+/// Process-global retry-status registry keyed by ACP session id (the value
+/// codex-acp sends as the `session-id` header). Populated while a retry is in
+/// flight and cleared on completion. The Tauri snapshot bridge polls this every
+/// wake to push a `proxy:retry` event to the UI for the active session.
+///
+/// Each entry also records when it was last updated so the UI bridge can fall
+/// back to the most-recent active entry when the exact session id is unknown
+/// or mismatches (e.g. a fast-model request keyed under a different id than
+/// the visible conversation). That fallback keeps the retry animation visible
+/// even when the per-session keying is imperfect.
+///
+/// The registry is keyed by a **per-attempt id** (a fresh UUID per
+/// [`send_upstream_with_retry`] call), NOT by session id. This fixes two
+/// structural bugs the old per-session single-cell design had:
+///
+/// 1. Concurrent sub-requests within one ACP turn (main completion, token
+///    counting, compact, fast-model ...) share one session id but are
+///    independent upstream calls. With one cell they stomped each other: a
+///    succeeding sub-request would `clear` a retry still backing off in a
+///    sibling request ("502 不重试" symptom), or vice-versa.
+/// 2. A retry dropped mid-backoff (codex-acp cancellation / session switch)
+///    never reached the `clear` calls, leaking an `active:true` entry the UI
+///    rendered as "网络异常" on every later successful turn.
+///
+/// The session id is stored *inside* each entry, so per-session reads
+/// ([`current_proxy_retry_status`]) aggregate over the entries that belong to
+/// that session. Cleanup is RAII via [`RetryGuard`] (see
+/// [`send_upstream_with_retry`]): dropping the future clears the entry on
+/// every path including cancellation.
+static CODEX_API_PROXY_RETRY_STATUS: OnceLock<
+    Arc<RwLock<BTreeMap<String, RetryRegistryEntry>>>,
+> = OnceLock::new();
+
+#[derive(Clone)]
+struct RetryRegistryEntry {
+    status: ProxyRetryStatus,
+    /// The ACP session id this retry belongs to (the value codex-acp sends as
+    /// the `session-id` header). Stored so reads can aggregate back to the
+    /// per-session view the UI polls, instead of keying the map by it.
+    session_id: String,
+    updated_at: std::time::SystemTime,
+}
+
+fn retry_status_registry() -> Arc<RwLock<BTreeMap<String, RetryRegistryEntry>>> {
+    CODEX_API_PROXY_RETRY_STATUS
+        .get_or_init(|| Arc::new(RwLock::new(BTreeMap::new())))
+        .clone()
+}
+
+/// Record the current retry attempt for `attempt_id`, belonging to session
+/// `session_id`. Called on every retry attempt so the UI animation tracks
+/// progress (attempt N of MAX). `attempt_id` must be unique per
+/// [`send_upstream_with_retry`] call (a fresh UUID) so concurrent
+/// sub-requests in the same ACP session do not overwrite each other.
+fn set_proxy_retry_status(attempt_id: &str, session_id: &str, status: ProxyRetryStatus) {
+    if attempt_id.is_empty() {
+        return;
+    }
+    let registry = retry_status_registry();
+    if let Ok(mut guard) = registry.write() {
+        guard.insert(
+            attempt_id.to_string(),
+            RetryRegistryEntry {
+                status,
+                session_id: session_id.to_string(),
+                updated_at: std::time::SystemTime::now(),
+            },
+        );
+    }
+}
+
+/// Clear the retry status for `attempt_id` (success, exhaustion, or
+/// cancellation). The UI stops rendering the retry animation once the last
+/// active entry for its session is removed. Called by [`RetryGuard::drop`],
+/// which runs on every exit path from [`send_upstream_with_retry`] including a
+/// future dropped mid-backoff.
+fn clear_proxy_retry_status_by_key(attempt_id: &str) {
+    if attempt_id.is_empty() {
+        return;
+    }
+    let registry = retry_status_registry();
+    if let Ok(mut guard) = registry.write() {
+        guard.remove(attempt_id);
+    }
+}
+
+/// Read the current retry status for `session_id`, if any. Used by app-core to
+/// surface retry state to the UI for the active session. Aggregates over all
+/// in-flight retries that belong to `session_id` (there is normally exactly
+/// one, but concurrent sub-requests in the same turn each have their own
+/// entry) and returns the most-recently-updated active one. Returns `None`
+/// when no retry for that session is currently active.
+pub fn current_proxy_retry_status(session_id: &str) -> Option<ProxyRetryStatus> {
+    if session_id.is_empty() {
+        return None;
+    }
+    let registry = retry_status_registry();
+    let guard = registry.read().ok()?;
+    guard
+        .values()
+        .filter(|entry| entry.session_id == session_id && entry.status.active)
+        .max_by_key(|entry| entry.updated_at)
+        .map(|entry| entry.status.clone())
+}
+
+/// Read the most-recently-updated active retry status across ALL sessions, if
+/// any. Kept as a diagnostic/utility accessor. The active-session UI lookup
+/// (`Application::proxy_retry_status`) uses exact session-id keying only and
+/// intentionally does NOT consult this cross-session view, so that one
+/// conversation's retry animation cannot leak onto an idle conversation.
+pub fn any_active_proxy_retry_status() -> Option<ProxyRetryStatus> {
+    let registry = retry_status_registry();
+    let guard = registry.read().ok()?;
+    guard
+        .values()
+        .filter(|entry| entry.status.active)
+        .max_by_key(|entry| entry.updated_at)
+        .map(|entry| entry.status.clone())
+}
+
+/// Retries cover the common transient upstream failures: rate limiting (429)
+/// and the full family of gateway/server errors (500/502/503/504). A flaky
+/// gateway frequently alternates between these across attempts (e.g. 502 then
+/// 503 then 200), so retrying the whole set is what actually lets a transient
+/// outage recover instead of stopping after the first 502 because the second
+/// attempt returned a different 5xx. Permanent 5xx (501 Not Implemented, 505
+/// HTTP Version Not Supported) and client 4xx (except 429) are NOT retried.
+/// Whether an upstream HTTP status should trigger an automatic retry.
+///
+/// Retries cover `429 Too Many Requests` and the **transient** 5xx family:
+/// `500`, `502`, `503`, `504` plus Cloudflare origin/timeout codes `520`–`524`.
+/// Crucially this avoids the failure mode where attempt N returns e.g. `502`
+/// (retried) but attempt N+1 returns `503` or a Cloudflare `524` that was *not*
+/// in a narrower allow-list, causing the loop to bail out after a single
+/// logged attempt. Permanent 5xx such as `501 Not Implemented` / `505 HTTP
+/// Version Not Supported` are excluded since retrying cannot help them; 4xx
+/// responses (except `429`) are client errors returned immediately.
+fn is_retryable_upstream_status(status: reqwest::StatusCode) -> bool {
+    matches!(
+        status.as_u16(),
+        429 | 500 | 502 | 503 | 504 | 520 | 521 | 522 | 523 | 524
+    )
+}
+
+fn retry_reason_for_status(status: reqwest::StatusCode) -> &'static str {
+    match status.as_u16() {
+        429 => "rate_limited",
+        500 => "internal_server_error",
+        502 => "bad_gateway",
+        503 => "service_unavailable",
+        504 => "gateway_timeout",
+        520 => "cloudflare_web_unknown",
+        521 => "cloudflare_web_down",
+        522 => "cloudflare_connection_timeout",
+        523 => "cloudflare_origin_unreachable",
+        524 => "cloudflare_timeout",
+        _ if status.is_server_error() => "server_error",
+        _ => "transient_error",
+    }
+}
+
+/// Parse the `Retry-After` header (integer seconds form) for 429 responses so
+/// the backoff honors the upstream's rate-limit guidance. HTTP-date form is
+/// uncommon for LLM proxies and intentionally unsupported.
+fn parse_retry_after_seconds(headers: &reqwest::header::HeaderMap) -> Option<u64> {
+    let value = headers.get(reqwest::header::RETRY_AFTER)?;
+    let text = value.to_str().ok()?;
+    text.trim().parse::<u64>().ok()
+}
+
+/// Exponential backoff (500ms × 2^(attempt-1), capped at 8s) plus jitter to
+/// avoid synchronized retry storms. For 429 responses carrying `Retry-After`,
+/// honor that value (capped at 8s) instead of the exponential schedule.
+fn retry_backoff_duration(attempt: u32, retry_after: Option<u64>) -> std::time::Duration {
+    const BASE_MS: u64 = 500;
+    const CAP_MS: u64 = 8_000;
+    if let Some(seconds) = retry_after {
+        return std::time::Duration::from_millis((seconds * 1_000).min(CAP_MS));
+    }
+    let exponent = attempt.saturating_sub(1).min(6);
+    let mut delay_ms = BASE_MS.saturating_mul(1u64 << exponent);
+    if delay_ms > CAP_MS {
+        delay_ms = CAP_MS;
+    }
+    // Deterministic jitter derived from the attempt to avoid pulling in a RNG
+    // dependency; the goal is merely to spread concurrent retries apart.
+    let jitter = (attempt as u64 * 37) % 250;
+    std::time::Duration::from_millis(delay_ms + jitter)
+}
+
+/// RAII guard that clears a retry registry entry on drop. Defined locally so
+/// its `Drop` runs on **every** exit from [`send_upstream_with_retry`],
+/// including the case where the future is dropped (cancelled) while suspended
+/// in a backoff `sleep`. That cancellation case is the root cause of the old
+/// "每次都是正常结束了说异常尝试" bug: the retry future was dropped mid-backoff,
+/// the manual `clear_proxy_retry_status` calls never ran, and an
+/// `active:true` entry leaked into the registry forever after.
+struct RetryGuard {
+    armed: bool,
+    attempt_id: String,
+}
+
+impl Drop for RetryGuard {
+    fn drop(&mut self) {
+        if self.armed {
+            clear_proxy_retry_status_by_key(&self.attempt_id);
+        }
+    }
+}
+
+/// Send an upstream request, automatically retrying on transient failures
+/// (502, 429, transport errors). Retries are bounded by
+/// [`MAX_UPSTREAM_RETRIES`] and use [`retry_backoff_duration`]. Each retry is
+/// published to the retry-status registry under a per-call `attempt_id`
+/// (with the ACP `session_id` stored inside the entry for aggregation) so the
+/// UI can render a retry animation; the entry is cleared on success,
+/// exhaustion, or cancellation via [`RetryGuard`].
+///
+/// The request body must be cloneable via `reqwest::RequestBuilder::try_clone`
+/// (always true for our byte-bodied requests); if it is not, the request is
+/// sent exactly once without retrying.
+async fn send_upstream_with_retry(
+    session_id: Option<&str>,
+    provider: &str,
+    request: reqwest::RequestBuilder,
+) -> Result<reqwest::Response, reqwest::Error> {
+    let sid = session_id.unwrap_or("").trim();
+    // Per-call id keys the registry entry so concurrent sub-requests in the
+    // same ACP session (main completion, token counting, compact, fast-model)
+    // do not share a single cell and stomp each other's state.
+    let attempt_id = uuid::Uuid::new_v4().to_string();
+    // Cleared on drop (success / exhaustion / cancellation). `armed` flips to
+    // true once we have actually published an entry, so the uncloneable fast
+    // path drops without touching the registry.
+    let mut guard = RetryGuard {
+        armed: false,
+        attempt_id: attempt_id.clone(),
+    };
+
+    // Fast path: if the request cannot be cloned, send exactly once. Our
+    // request bodies are always bytes so try_clone succeeds in practice.
+    if request.try_clone().is_none() {
+append_codex_api_proxy_log(&format!(
+            "upstream_retry_skipped provider={} session={} reason=uncloneable_request",
+            provider, sid,
+        ));
+        return request.send().await;
+    }
+    let mut attempt: u32 = 0;
+    loop {
+        // Rebuild a fresh request from the clonable template for each attempt.
+        let this_attempt = match request.try_clone() {
+            Some(req) => req,
+            // Should not happen after the check above, but degrade gracefully:
+            // send the original once and return its result. The guard is
+            // still unarmed here, so dropping it is a no-op.
+            None => {
+                return request.send().await;
+            }
+        };
+        match this_attempt.send().await {
+            Ok(response) => {
+                let status = response.status();
+                if is_retryable_upstream_status(status) && attempt < MAX_UPSTREAM_RETRIES {
+                    attempt += 1;
+                    let reason = retry_reason_for_status(status);
+                    let retry_after = parse_retry_after_seconds(response.headers());
+                    if !sid.is_empty() {
+                        set_proxy_retry_status(
+                            &attempt_id,
+                            sid,
+                            ProxyRetryStatus {
+                                attempt,
+                                max_attempts: MAX_UPSTREAM_RETRIES,
+                                status_code: Some(status.as_u16()),
+                                reason: reason.to_string(),
+                                active: true,
+                                provider: Some(provider.to_string()),
+                            },
+                        );
+                        guard.armed = true;
+                    }
+                    append_codex_api_proxy_log(&format!(
+                        "upstream_retry provider={} session={} attempt={}/{} status={} reason={}",
+                        provider,
+                        sid,
+                        attempt,
+                        MAX_UPSTREAM_RETRIES,
+                        status.as_u16(),
+                        reason,
+                    ));
+                    tokio::time::sleep(retry_backoff_duration(attempt, retry_after)).await;
+                    continue;
+                }
+                return Ok(response);
+            }
+            Err(error) => {
+                if attempt < MAX_UPSTREAM_RETRIES {
+                    attempt += 1;
+                    if !sid.is_empty() {
+                        set_proxy_retry_status(
+                            &attempt_id,
+                            sid,
+                            ProxyRetryStatus {
+                                attempt,
+                                max_attempts: MAX_UPSTREAM_RETRIES,
+                                status_code: None,
+                                reason: "transport_error".to_string(),
+                                active: true,
+                                provider: Some(provider.to_string()),
+                            },
+                        );
+                        guard.armed = true;
+                    }
+                    append_codex_api_proxy_log(&format!(
+                        "upstream_retry provider={} session={} attempt={}/{} reason=transport_error error={}",
+                        provider, sid, attempt, MAX_UPSTREAM_RETRIES, error,
+                    ));
+                    tokio::time::sleep(retry_backoff_duration(attempt, None)).await;
+                    continue;
+                }
+                return Err(error);
+            }
+        }
+    }
 }
 /// DeepSeek reasoning history, **partitioned by session id** so concurrent
 /// requests for different sessions cannot cross-contaminate each other's
@@ -559,11 +903,29 @@ async fn handle_codex_api_proxy_request(
 ) -> Result<Response<ProxyBody>, Infallible> {
     let response = match proxy_codex_api_request(request, config).await {
         Ok(response) => response,
-        Err(error) => response_with_status(
-            StatusCode::BAD_GATEWAY,
-            json!({ "error": { "message": error.to_string() } }).to_string(),
-            "application/json",
-        ),
+        // Local/structural failures (JSON parse errors, body read failures,
+        // payload conversion errors, ...) must NOT be mapped to 502 Bad
+        // Gateway: a 502 is the upstream's transient gateway error and the
+        // very thing [`send_upstream_with_retry`] already retried (and, when
+        // exhausted, returned as an `Ok(502)` response that flows through the
+        // `Ok` arm above). Funneling local errors through 502 here made them
+        // indistinguishable from exhausted-upstream 502, producing the
+        // "502 时不重试直接失败" symptom. Local errors get a 500 with a typed
+        // `proxy_internal_error` marker instead.
+        Err(error) => {
+            append_codex_api_proxy_log(&format!("proxy_request_failed error={error}"));
+            response_with_status(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                json!({
+                    "error": {
+                        "type": "proxy_internal_error",
+                        "message": error.to_string(),
+                    }
+                })
+                .to_string(),
+                "application/json",
+            )
+        }
     };
     Ok(response)
 }
@@ -592,7 +954,7 @@ async fn proxy_codex_api_request(
         .filter(|s| !s.trim().is_empty())
         .map(|s| s.trim().to_string());
     if path.ends_with("/messages") {
-        return proxy_anthropic_messages_request(request, config, explicit_provider).await;
+        return proxy_anthropic_messages_request(request, config, explicit_provider, acp_session_id.as_deref()).await;
     }
     if path.ends_with("/responses/compact") {
         return proxy_native_codex_responses_compact_request(request, config, explicit_provider)
@@ -702,6 +1064,23 @@ async fn proxy_codex_api_request(
         )
         .await;
     }
+    // DeepSeek upstream speaks the OpenAI Responses protocol natively, so the
+    // responses payload is forwarded as-is to the /responses endpoint instead
+    // of being downgraded to a chat/completions payload. When DeepSeek is
+    // configured as a custom provider (provider_configs), the branch above
+    // wins and uses the user's base_url / protocol.
+    if normalize_proxy_provider(&provider) == "deepseek" {
+        append_codex_api_proxy_log("deepseek_responses_request protocol=responses");
+        let session_id = resolved_proxy_session_id(&config_arc, &provider, &acp_session_id);
+        return proxy_native_responses_request(
+            payload,
+            &api_key,
+            &provider,
+            DEEPSEEK_UPSTREAM_RESPONSES_URL,
+            Some(&session_id),
+        )
+        .await;
+    }
     // Resolve the session id once for the whole request so reasoning-history
     // lookups stay scoped to this session (deepseek/timiai-deepseek compat).
     let session_id = resolved_proxy_session_id(&config_arc, &provider, &acp_session_id);
@@ -773,8 +1152,14 @@ async fn proxy_custom_codex_responses_request(
 ) -> anyhow::Result<Response<ProxyBody>> {
     match custom_config.protocol {
         ProxyProviderProtocol::Responses => {
-            proxy_native_responses_request(payload, api_key, provider, &custom_config.base_url)
-                .await
+            proxy_native_responses_request(
+                payload,
+                api_key,
+                provider,
+                &custom_config.base_url,
+                session_id,
+            )
+            .await
         }
         ProxyProviderProtocol::ChatCompletions => {
             let session_id = session_id.unwrap_or_default();
@@ -813,15 +1198,19 @@ async fn proxy_native_responses_request(
     api_key: &str,
     provider: &str,
     upstream_url: &str,
+    session_id: Option<&str>,
 ) -> anyhow::Result<Response<ProxyBody>> {
     let client = reqwest::Client::new();
-    let upstream = client
-        .post(upstream_url)
-        .header(CONTENT_TYPE, "application/json")
-        .bearer_auth(api_key)
-        .body(serde_json::to_vec(&payload)?)
-        .send()
-        .await?;
+    let upstream = send_upstream_with_retry(
+        session_id,
+        provider,
+        client
+            .post(upstream_url)
+            .header(CONTENT_TYPE, "application/json")
+            .bearer_auth(api_key)
+            .body(serde_json::to_vec(&payload)?),
+    )
+    .await?;
     let status = StatusCode::from_u16(upstream.status().as_u16())?;
     let content_type = upstream
         .headers()
@@ -867,11 +1256,14 @@ async fn proxy_anthropic_messages_codex_responses_request(
         &anthropic_payload,
     );
     let client = reqwest::Client::new();
-    let upstream = anthropic_messages_base_request(&client, upstream_url)
-        .header("x-api-key", api_key)
-        .body(serde_json::to_vec(&anthropic_payload)?)
-        .send()
-        .await?;
+    let upstream = send_upstream_with_retry(
+        Some(session_id),
+        provider,
+        anthropic_messages_base_request(&client, upstream_url)
+            .header("x-api-key", api_key)
+            .body(serde_json::to_vec(&anthropic_payload)?),
+    )
+    .await?;
     let status = StatusCode::from_u16(upstream.status().as_u16())?;
     let content_type = upstream
         .headers()
@@ -942,7 +1334,13 @@ async fn proxy_chat_completions_codex_responses_request(
         }
     };
     let request_body = serde_json::to_vec(&chat_payload)?;
-    let upstream = match request.body(request_body).send().await {
+    let upstream = match send_upstream_with_retry(
+        session_id,
+        provider,
+        request.body(request_body),
+    )
+    .await
+    {
         Ok(upstream) => upstream,
         Err(error) => {
             log_chat_completions_upstream_error(&provider, upstream_url, &chat_payload, &error);
@@ -1012,6 +1410,12 @@ async fn proxy_native_codex_responses_compact_request(
     config: Arc<RwLock<CodexApiProxyConfig>>,
     explicit_provider: Option<String>,
 ) -> anyhow::Result<Response<ProxyBody>> {
+    let acp_session_id = request
+        .headers()
+        .get("session-id")
+        .and_then(|v| v.to_str().ok())
+        .filter(|s| !s.trim().is_empty())
+        .map(|s| s.trim().to_string());
     let body = request.into_body().collect().await?.to_bytes();
     let config = config
         .read()
@@ -1047,15 +1451,18 @@ async fn proxy_native_codex_responses_compact_request(
 
     let session_id = session_id_for_proxy_provider(&config, &provider);
     let client = reqwest::Client::new();
-    let upstream = with_timiai_headers(
-        client
-            .post(TIMIAI_RESPONSES_COMPACT_URL)
-            .header(CONTENT_TYPE, "application/json"),
-        &api_key,
-        &session_id,
+    let upstream = send_upstream_with_retry(
+        acp_session_id.as_deref(),
+        &provider,
+        with_timiai_headers(
+            client
+                .post(TIMIAI_RESPONSES_COMPACT_URL)
+                .header(CONTENT_TYPE, "application/json"),
+            &api_key,
+            &session_id,
+        )
+        .body(body),
     )
-    .body(body)
-    .send()
     .await?;
     let status = StatusCode::from_u16(upstream.status().as_u16())?;
     let content_type = upstream
@@ -1077,6 +1484,7 @@ async fn proxy_anthropic_messages_request(
     request: Request<Incoming>,
     config: Arc<RwLock<CodexApiProxyConfig>>,
     explicit_provider: Option<String>,
+    acp_session_id: Option<&str>,
 ) -> anyhow::Result<Response<ProxyBody>> {
     let body = request.into_body().collect().await?.to_bytes();
     let config = config
@@ -1137,6 +1545,7 @@ async fn proxy_anthropic_messages_request(
             &provider,
             &session_id,
             &custom_config,
+            acp_session_id,
         )
         .await;
     }
@@ -1146,12 +1555,13 @@ async fn proxy_anthropic_messages_request(
             &api_key,
             &provider,
             &session_id,
+            acp_session_id,
         )
         .await;
     }
     match normalize_proxy_provider(&provider).as_str() {
         "commandcode" | "kimi_code" | "xiaomi_mimo" | "timiai" => {
-            proxy_native_anthropic_messages_request(payload, &api_key, &provider, &session_id).await
+            proxy_native_anthropic_messages_request(payload, &api_key, &provider, &session_id, acp_session_id).await
         }
         _ => {
             proxy_completion_to_anthropic_messages_request(
@@ -1159,6 +1569,7 @@ async fn proxy_anthropic_messages_request(
                 &api_key,
                 &provider,
                 &session_id,
+                acp_session_id,
             )
             .await
         }
@@ -1171,6 +1582,7 @@ async fn proxy_custom_anthropic_messages_request(
     provider: &str,
     session_id: &str,
     custom_config: &ProxyProviderConfig,
+    acp_session_id: Option<&str>,
 ) -> anyhow::Result<Response<ProxyBody>> {
     match custom_config.protocol {
         ProxyProviderProtocol::AnthropicMessages => {
@@ -1180,6 +1592,7 @@ async fn proxy_custom_anthropic_messages_request(
                 provider,
                 session_id,
                 &custom_config.base_url,
+                acp_session_id,
             )
             .await
         }
@@ -1190,6 +1603,7 @@ async fn proxy_custom_anthropic_messages_request(
                 provider,
                 session_id,
                 &custom_config.base_url,
+                acp_session_id,
             )
             .await
         }
@@ -1200,6 +1614,7 @@ async fn proxy_custom_anthropic_messages_request(
                 provider,
                 &custom_config.base_url,
                 session_id,
+                acp_session_id,
             )
             .await
         }
@@ -1212,6 +1627,7 @@ async fn proxy_responses_to_anthropic_messages_request(
     provider: &str,
     upstream_url: &str,
     session_id: &str,
+    acp_session_id: Option<&str>,
 ) -> anyhow::Result<Response<ProxyBody>> {
     let requested_stream = payload
         .get("stream")
@@ -1219,13 +1635,16 @@ async fn proxy_responses_to_anthropic_messages_request(
         .unwrap_or(false);
     let responses_payload = anthropic_payload_to_responses_payload(payload);
     let client = reqwest::Client::new();
-    let upstream = client
-        .post(upstream_url)
-        .header(CONTENT_TYPE, "application/json")
-        .bearer_auth(api_key)
-        .body(serde_json::to_vec(&responses_payload)?)
-        .send()
-        .await?;
+    let upstream = send_upstream_with_retry(
+        acp_session_id,
+        provider,
+        client
+            .post(upstream_url)
+            .header(CONTENT_TYPE, "application/json")
+            .bearer_auth(api_key)
+            .body(serde_json::to_vec(&responses_payload)?),
+    )
+    .await?;
     let status = StatusCode::from_u16(upstream.status().as_u16())?;
     let content_type = upstream
         .headers()
@@ -1274,6 +1693,7 @@ async fn proxy_native_anthropic_messages_request(
     api_key: &str,
     provider: &str,
     session_id: &str,
+    acp_session_id: Option<&str>,
 ) -> anyhow::Result<Response<ProxyBody>> {
     let upstream_url = upstream_messages_url(provider);
     proxy_native_anthropic_messages_request_with_url(
@@ -1282,6 +1702,7 @@ async fn proxy_native_anthropic_messages_request(
         provider,
         session_id,
         upstream_url,
+        acp_session_id,
     )
     .await
 }
@@ -1292,6 +1713,7 @@ async fn proxy_native_anthropic_messages_request_with_url(
     provider: &str,
     session_id: &str,
     upstream_url: &str,
+    acp_session_id: Option<&str>,
 ) -> anyhow::Result<Response<ProxyBody>> {
     let requested_stream = payload
         .get("stream")
@@ -1358,7 +1780,13 @@ async fn proxy_native_anthropic_messages_request_with_url(
         request.header("x-api-key", api_key)
     };
     let request_body = serde_json::to_vec(&payload)?;
-    let upstream = match request.body(request_body).send().await {
+    let upstream = match send_upstream_with_retry(
+        acp_session_id,
+        provider,
+        request.body(request_body),
+    )
+    .await
+    {
         Ok(upstream) => upstream,
         Err(error) => {
             log_native_anthropic_upstream_send_error(provider, upstream_url, &payload, &error);
@@ -1408,6 +1836,7 @@ async fn proxy_completion_to_anthropic_messages_request(
     api_key: &str,
     provider: &str,
     session_id: &str,
+    acp_session_id: Option<&str>,
 ) -> anyhow::Result<Response<ProxyBody>> {
     let upstream_url = upstream_chat_completions_url(provider);
     proxy_completion_to_anthropic_messages_request_with_url(
@@ -1416,6 +1845,7 @@ async fn proxy_completion_to_anthropic_messages_request(
         provider,
         session_id,
         upstream_url,
+        acp_session_id,
     )
     .await
 }
@@ -1426,6 +1856,7 @@ async fn proxy_completion_to_anthropic_messages_request_with_url(
     provider: &str,
     session_id: &str,
     upstream_url: &str,
+    acp_session_id: Option<&str>,
 ) -> anyhow::Result<Response<ProxyBody>> {
     let requested_stream = payload
         .get("stream")
@@ -1449,10 +1880,12 @@ async fn proxy_completion_to_anthropic_messages_request_with_url(
     } else {
         request.bearer_auth(api_key)
     };
-    let upstream = match request
-        .body(serde_json::to_vec(&chat_payload)?)
-        .send()
-        .await
+    let upstream = match send_upstream_with_retry(
+        acp_session_id,
+        provider,
+        request.body(serde_json::to_vec(&chat_payload)?),
+    )
+    .await
     {
         Ok(upstream) => upstream,
         Err(error) => {
@@ -1596,7 +2029,12 @@ fn sanitize_timiai_responses_payload(mut payload: Value) -> Value {
         return payload;
     };
     let mut removed = Vec::<String>::new();
-    for key in ["context_management", "reasoning"] {
+    // Keep the top-level `reasoning` object: timiai requests are always
+    // downgraded to chat/completions below, and the converter reads
+    // `reasoning.effort` to honor the authored effort on the chat upstream.
+    // Only Codex-specific fields the timiai gateway does not understand
+    // (`context_management`) and unsupported input items are stripped.
+    for key in ["context_management"] {
         if object.remove(key).is_some() {
             removed.push(key.to_string());
         }
@@ -1697,11 +2135,14 @@ async fn proxy_kimi_codex_api_request(
     log_anthropic_payload_summary("kimi_request", &anthropic_payload);
 
     let client = reqwest::Client::new();
-    let upstream = anthropic_messages_base_request(&client, KIMI_UPSTREAM_MESSAGES_URL)
-        .header("x-api-key", api_key)
-        .body(serde_json::to_vec(&anthropic_payload)?)
-        .send()
-        .await?;
+    let upstream = send_upstream_with_retry(
+        Some(session_id),
+        "kimi_code",
+        anthropic_messages_base_request(&client, KIMI_UPSTREAM_MESSAGES_URL)
+            .header("x-api-key", api_key)
+            .body(serde_json::to_vec(&anthropic_payload)?),
+    )
+    .await?;
     let status = StatusCode::from_u16(upstream.status().as_u16())?;
     let content_type = upstream
         .headers()
@@ -1838,11 +2279,31 @@ fn responses_payload_to_chat_payload(
     {
         chat["max_tokens"] = max_tokens.clone();
     }
+    // Preserve the Responses reasoning effort so OpenAI-compatible
+    // chat/completions upstreams (commandcode, xiaomi_mimo, timiai, custom
+    // chat endpoints, deepseek-chat, ...) can honor it. `none` disables
+    // thinking and is intentionally dropped — chat endpoints do not accept a
+    // `none` effort value.
+    if let Some(effort) = responses_reasoning_effort(&payload) {
+        chat["reasoning_effort"] = Value::String(effort.to_string());
+    }
     if add_edit_bridge_instructions {
         chat = add_non_gpt_edit_bridge_instructions(chat);
     }
 
     Ok(chat)
+}
+
+/// Extract the reasoning effort from a Responses payload: `reasoning.effort`
+/// (OpenAI Responses format) or the legacy top-level `reasoning_effort`.
+fn responses_reasoning_effort(payload: &Value) -> Option<&str> {
+    payload
+        .get("reasoning")
+        .and_then(|reasoning| reasoning.get("effort"))
+        .and_then(Value::as_str)
+        .or_else(|| payload.get("reasoning_effort").and_then(Value::as_str))
+        .map(str::trim)
+        .filter(|effort| !effort.is_empty() && *effort != "none")
 }
 
 fn normalize_chat_payload_for_provider(
@@ -1940,6 +2401,13 @@ fn inject_kimi_output_config(mut payload: Value, provider: &str) -> Value {
     if normalize_proxy_provider(provider) != "kimi_code" {
         return payload;
     }
+    // KimiCode honors the Anthropic-style `output_config.effort`; the
+    // OpenAI-style `reasoning_effort` the Responses→chat converter writes is
+    // redundant here and would be echoed to an upstream that does not speak
+    // it, so drop it.
+    if let Some(object) = payload.as_object_mut() {
+        object.remove("reasoning_effort");
+    }
     let Some(model) = payload.get("model").and_then(Value::as_str).map(normalized_model_key) else {
         return payload;
     };
@@ -1958,7 +2426,8 @@ fn inject_kimi_output_config(mut payload: Value, provider: &str) -> Value {
 /// Resolve the per-model reasoning effort registered via the model provider
 /// map. Reads the process-global proxy config so it reflects the latest
 /// `configure_codex_api_proxy_model_provider_map`/`clear_…` call. Returns the
-/// raw Codex-style label (`none`/`minimal`/`low`/`medium`/`high`).
+/// raw Codex-style label (`none`/`low`/`medium`/`high`/`xhigh`). Legacy
+/// `minimal` values are normalized to `low` when the catalog is saved.
 fn lookup_model_reasoning_effort(model: &str) -> Option<String> {
     let key = normalized_model_key(model);
     let config = CODEX_API_PROXY_CONFIG.get()?;

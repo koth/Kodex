@@ -111,6 +111,7 @@ describe("FileTree", () => {
     render(<FileTree workspaceRoot="/repo" onFileOpen={vi.fn()} variant="inline" />);
 
     const filter = screen.getByPlaceholderText("筛选文件...");
+    expect(screen.getByRole("button", { name: "刷新文件树" })).toBeTruthy();
     expect(screen.queryByText("所有文件")).toBeNull();
     expect(await screen.findByText("notes.md")).toBeTruthy();
 
@@ -118,6 +119,27 @@ describe("FileTree", () => {
 
     expect(screen.getByText("src")).toBeTruthy();
     expect(screen.queryByText("notes.md")).toBeNull();
+  });
+
+  it("refreshes the visible tree from the toolbar button", async () => {
+    vi.mocked(fsListDir).mockImplementation(async (path: string) =>
+      path === "src"
+        ? [{ name: "main.ts", kind: "File", path: "src/main.ts" }]
+        : rootEntries,
+    );
+    render(<FileTree workspaceRoot="/repo" onFileOpen={vi.fn()} variant="inline" />);
+
+    fireEvent.click(await screen.findByText("src"));
+    await waitFor(() => expect(fsListDir).toHaveBeenCalledWith("src"));
+    fireEvent.click(screen.getByRole("button", { name: "刷新文件树" }));
+
+    await waitFor(() => expect(vi.mocked(fsListDir).mock.calls.length).toBeGreaterThanOrEqual(4));
+    expect(vi.mocked(fsListDir).mock.calls.map(([path]) => path)).toEqual([
+      "",
+      "src",
+      "",
+      "src",
+    ]);
   });
 
   it("expands parent dirs of an absolute activePath relative to the workspace", async () => {

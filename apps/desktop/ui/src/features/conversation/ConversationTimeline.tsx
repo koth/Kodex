@@ -13,6 +13,7 @@ import {
   subscribeStreamingMessage,
 } from "./streaming-message-store";
 import "./ConversationTimeline.css";
+import { useProxyRetry, proxyRetryReasonLabel } from "./useProxyRetry";
 
 /** Workspace root for resolving relative file paths inside markdown messages.
  *  Set once per timeline render; module-level so the memoized streaming
@@ -96,12 +97,18 @@ interface StreamingMarkdownProps {
   onFilePathClick?: (filePath: string, lineNumber?: number) => void;
   changedFiles?: string[];
   candidatePaths?: string[];
+  onImagePreview?: (src: string, alt?: string) => void;
 }
 
 interface UserMessageImage {
   alt: string;
   src: string;
   previewSrc: string;
+}
+
+interface ImagePreviewState {
+  alt: string;
+  src: string;
 }
 
 type ContextCompactionState = "pending" | "completed";
@@ -139,7 +146,7 @@ function contextCompactionState(body: string): ContextCompactionState | null {
   return null;
 }
 
-const StreamingMarkdown = memo(function StreamingMarkdown({ id, body, onFilePathClick, changedFiles, candidatePaths }: StreamingMarkdownProps) {
+const StreamingMarkdown = memo(function StreamingMarkdown({ id, body, onFilePathClick, changedFiles, candidatePaths, onImagePreview }: StreamingMarkdownProps) {
   const hostRef = useRef<HTMLDivElement>(null);
   const [content, setContent] = useState(() => ensureStreamingMessageBody(id, body));
 
@@ -164,7 +171,7 @@ const StreamingMarkdown = memo(function StreamingMarkdown({ id, body, onFilePath
 
   return (
     <div ref={hostRef} className="msg-streaming-markdown">
-      <MarkdownBody content={content} workspaceRoot={visibleWorkspaceRoot} onFilePathClick={onFilePathClick} changedFiles={changedFiles} candidatePaths={candidatePaths} />
+      <MarkdownBody content={content} workspaceRoot={visibleWorkspaceRoot} onFilePathClick={onFilePathClick} changedFiles={changedFiles} candidatePaths={candidatePaths} onImagePreview={onImagePreview} />
     </div>
   );
 });
@@ -234,7 +241,7 @@ function TimelineActiveTurnSummary({ durationLabel }: { durationLabel: string | 
 }
 
 const UserImageStrip = memo(function UserImageStrip({ images }: { images: UserMessageImage[] }) {
-  const [previewImage, setPreviewImage] = useState<UserMessageImage | null>(null);
+  const [previewImage, setPreviewImage] = useState<ImagePreviewState | null>(null);
 
   useEffect(() => {
     if (!previewImage) return;
@@ -257,7 +264,7 @@ const UserImageStrip = memo(function UserImageStrip({ images }: { images: UserMe
               key={`${image.src}-${image.previewSrc}-${index}`}
               type="button"
               className="msg-user-image-button"
-              onClick={() => setPreviewImage(image)}
+              onClick={() => setPreviewImage({ alt: label, src: image.previewSrc })}
               aria-label={`预览 ${label}`}
               title="预览图片"
             >
@@ -297,7 +304,7 @@ const UserImageStrip = memo(function UserImageStrip({ images }: { images: UserMe
             </button>
             <img
               className="msg-image-preview-original"
-              src={previewImage.previewSrc}
+              src={previewImage.src}
               alt={previewImage.alt || "附加的图片"}
             />
           </div>
@@ -324,10 +331,26 @@ const MessageRow = memo(function MessageRow({
   const [draft, setDraft] = useState(body);
   const [submitting, setSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
+  const [previewImage, setPreviewImage] = useState<ImagePreviewState | null>(null);
 
   useEffect(() => {
     if (!editing) setDraft(body);
   }, [body, editing]);
+
+  useEffect(() => {
+    if (!previewImage) return;
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setPreviewImage(null);
+      }
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [previewImage]);
+
+  const handleImagePreview = (src: string, alt?: string) => {
+    setPreviewImage({ alt: alt || "附加的图片", src });
+  };
 
   const handleRetrySubmit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -455,7 +478,7 @@ const MessageRow = memo(function MessageRow({
         <span className="msg-prefix msg-prefix-assistant">{"\u2022"} </span>
         <div className="msg-content msg-content-assistant">
           {streaming ? (
-            <StreamingMarkdown id={id} body={body} onFilePathClick={onFilePathClick} changedFiles={visibleChangedFiles} candidatePaths={candidatePaths} />
+            <StreamingMarkdown id={id} body={body} onFilePathClick={onFilePathClick} changedFiles={visibleChangedFiles} candidatePaths={candidatePaths} onImagePreview={handleImagePreview} />
           ) : (
             <MarkdownBody
               content={body}
@@ -463,6 +486,7 @@ const MessageRow = memo(function MessageRow({
               onFilePathClick={onFilePathClick}
               changedFiles={visibleChangedFiles}
               candidatePaths={candidatePaths}
+              onImagePreview={handleImagePreview}
             />
           )}
           {streaming && <span className="streaming-cursor" />}
@@ -477,6 +501,40 @@ const MessageRow = memo(function MessageRow({
               copiedClassName="msg-copy-btn-copied"
             />
           </div>
+        )}
+        {previewImage && createPortal(
+          <div
+            className="msg-image-preview-backdrop"
+            role="presentation"
+            onMouseDown={(event) => {
+              if (event.target === event.currentTarget) {
+                setPreviewImage(null);
+              }
+            }}
+          >
+            <div
+              className="msg-image-preview-dialog"
+              role="dialog"
+              aria-modal="true"
+              aria-label={previewImage.alt ? `图片预览：${previewImage.alt}` : "图片预览"}
+            >
+              <button
+                type="button"
+                className="msg-image-preview-close"
+                onClick={() => setPreviewImage(null)}
+                aria-label="关闭图片预览"
+                title="关闭"
+              >
+                ×
+              </button>
+              <img
+                className="msg-image-preview-original"
+                src={previewImage.src}
+                alt={previewImage.alt || "附加的图片"}
+              />
+            </div>
+          </div>,
+          document.body,
         )}
       </div>
     );
@@ -793,6 +851,10 @@ export function ConversationTimeline({
   const bottomSentinelRef = useRef<HTMLDivElement>(null);
   const userScrolledUp = useRef(false);
   const manualScrollIntent = useRef(false);
+  // Upstream retry status (502/429/transport) pushed by the codex_api_proxy
+  // via the `proxy:retry` event. Rendered as a retry animation near the
+  // timeline bottom while the proxy is backing off and resending.
+  const proxyRetry = useProxyRetry();
   const stickCorrectionActive = useRef(false);
   /** 原生滚动条拖拽中（pointerdown 在滚动条上 → pointerup）。期间禁止吸底，
       否则 ResizeObserver/布局效应会把 thumb 拽回底部造成抖动。 */
@@ -1364,6 +1426,17 @@ export function ConversationTimeline({
           <div className="thinking-indicator thinking-active">
             <span className="thinking-bullet">•</span>
             <span className="thinking-text">思考中</span>
+          </div>
+        )}
+        {proxyRetry?.active && (
+          <div className="proxy-retry-indicator" role="status" aria-live="polite">
+            <span className="proxy-retry-spinner" aria-hidden="true" />
+            <span className="proxy-retry-text">
+              {proxyRetryReasonLabel(proxyRetry.reason)}，正在自动重试
+              {proxyRetry.max_attempts > 0
+                ? `（${proxyRetry.attempt}/${proxyRetry.max_attempts}）`
+                : ""}
+            </span>
           </div>
         )}
         <div className="timeline-bottom-sentinel" ref={bottomSentinelRef} aria-hidden="true" />

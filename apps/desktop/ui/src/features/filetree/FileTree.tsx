@@ -450,22 +450,62 @@ export function FileTree({
     onAddComposerReference(entry.path);
   }, [composerReferenceEnabled, onAddComposerReference]);
 
+  const handleRefreshTree = useCallback(async () => {
+    const requestWorkspaceRoot = workspaceRoot;
+    const dirsToRefresh = ["", ...Array.from(expandedDirs)];
+    try {
+      for (const dirPath of dirsToRefresh) {
+        if (workspaceRootRef.current !== requestWorkspaceRoot) return;
+        await refreshDirectory(dirPath, requestWorkspaceRoot);
+      }
+    } catch (e) {
+      if (workspaceRootRef.current === requestWorkspaceRoot) {
+        setError(String(e));
+      }
+    }
+  }, [expandedDirs, refreshDirectory, workspaceRoot]);
+
   const rootLoading = loadingPaths.has("");
+  const refreshLoading = loadingPaths.size > 0;
 
   return (
     <div className={`filetree filetree-${variant}`}>
       {variant === "panel" ? (
-        <div className="filetree-header">所有文件</div>
+        <div className="filetree-header">
+          <span>所有文件</span>
+          <button
+            type="button"
+            className="filetree-refresh-button"
+            onClick={handleRefreshTree}
+            disabled={refreshLoading}
+            title="刷新文件树"
+            aria-label="刷新文件树"
+          >
+            <RefreshIcon />
+          </button>
+        </div>
       ) : (
-        <label className="filetree-search">
-          <SearchIcon />
-          <input
-            className="filetree-search-input"
-            value={filterText}
-            placeholder="筛选文件..."
-            onChange={(event) => setFilterText(event.target.value)}
-          />
-        </label>
+        <div className="filetree-search-row">
+          <label className="filetree-search">
+            <SearchIcon />
+            <input
+              className="filetree-search-input"
+              value={filterText}
+              placeholder="筛选文件..."
+              onChange={(event) => setFilterText(event.target.value)}
+            />
+          </label>
+          <button
+            type="button"
+            className="filetree-refresh-button"
+            onClick={handleRefreshTree}
+            disabled={refreshLoading}
+            title="刷新文件树"
+            aria-label="刷新文件树"
+          >
+            <RefreshIcon />
+          </button>
+        </div>
       )}
       {error && <div className="filetree-inline-error">{error}</div>}
       <div className="filetree-list">
@@ -574,6 +614,15 @@ function SearchIcon() {
     <svg className="filetree-search-icon" viewBox="0 0 20 20" aria-hidden="true">
       <circle cx="8.5" cy="8.5" r="5.2" />
       <path d="m12.4 12.4 4 4" />
+    </svg>
+  );
+}
+
+function RefreshIcon() {
+  return (
+    <svg className="filetree-refresh-icon" viewBox="0 0 20 20" aria-hidden="true">
+      <path d="M15.8 7.2a6 6 0 1 0 .1 5.4" />
+      <path d="M15.8 3.8v3.4h-3.4" />
     </svg>
   );
 }

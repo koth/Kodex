@@ -166,13 +166,65 @@ pub async fn companion_stage_model(source_path: String) -> Result<String, String
             .and_then(|name| name.to_str())
             .ok_or_else(|| "无法解析文件名".to_string())?;
         let target = companion_dir.join(file_name);
-        std::fs::copy(source, &target)
-            .map_err(|e| format!("复制到受控目录失败 {}: {e}", target.display()))?;
+        // 源文件可能已经在受控目录里（用户直接选了 ~/.kodex/companion/ 下的
+        // 模型）。此时复制是 no-op，且"先删目标再复制"会把源也删掉导致
+        // os error 2；规范化路径比较后跳过。
+        if !paths_equal(source, &target) {
+            // Windows 上 `std::fs::copy` 覆盖一个仍被占用（如 WebView 里
+            // three-vrm 仍持有句柄）的目标文件会报 os error 32。先删除目标
+            // 再复制；删除本身也可能瞬时失败，重试几次给加载器释放句柄的时间。
+            copy_with_replace_retry(source, &target)
+                .map_err(|e| format!("复制到受控目录失败 {}: {e}", target.display()))?;
+        }
 
         Ok(target.to_string_lossy().into_owned())
     })
     .await
     .map_err(|e| format!("Stage model task failed: {e}"))?
+}
+
+/// Compare two paths for equality after normalizing separators, case, and any
+/// canonicalization differences (e.g. `C:\a\b.vrm` vs `C:/a/b.vrm`). Falls
+/// back to a plain component-wise comparison when canonicalization fails.
+fn paths_equal(a: &Path, b: &Path) -> bool {
+    let canon_a = a.canonicalize().ok();
+    let canon_b = b.canonicalize().ok();
+    if let (Some(ca), Some(cb)) = (canon_a, canon_b) {
+        if ca == cb {
+            return true;
+        }
+        // Windows canonicalize keeps original casing; compare case-insensitively.
+        return ca.to_string_lossy().to_lowercase() == cb.to_string_lossy().to_lowercase();
+    }
+    // Fallback: normalize separators + lowercase and compare strings.
+    let norm = |p: &Path| p.to_string_lossy().replace('\\', "/").to_lowercase();
+    norm(a) == norm(b)
+}
+
+/// Copy `source` onto `target`, tolerating a brief Windows file lock on the
+/// destination: remove the target first and retry a few times so a loader that
+/// still holds a handle (e.g. three-vrm in the WebView) gets a chance to drop
+/// it before we surface os error 32.
+fn copy_with_replace_retry(source: &Path, target: &Path) -> std::io::Result<()> {
+    const MAX_ATTEMPTS: u32 = 6;
+    let mut last_err: Option<std::io::Error> = None;
+    for attempt in 0..MAX_ATTEMPTS {
+        if target.exists() {
+            match std::fs::remove_file(target) {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => {
+                    last_err = Some(e);
+                    std::thread::sleep(std::time::Duration::from_millis(120 * (attempt as u64 + 1)));
+                    continue;
+                }
+            }
+        }
+        return std::fs::copy(source, target).map(|_| ());
+    }
+    Err(last_err.unwrap_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::Other, "replace retry exhausted")
+    }))
 }
 
 fn ensure_local_workspace(app: &app_core::Application) -> Result<(), String> {
