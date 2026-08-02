@@ -273,6 +273,8 @@
   padding: 0;
   border: 0;
   background: transparent;
+  appearance: none;
+  -webkit-appearance: none;
   cursor: col-resize;
 }
 
@@ -448,6 +450,8 @@ body.is-resizing-left-sidebar .sidebar-resizer-hit::after {
   padding: 0;
   border: 0;
   background: transparent;
+  appearance: none;
+  -webkit-appearance: none;
   cursor: col-resize;
 }
 

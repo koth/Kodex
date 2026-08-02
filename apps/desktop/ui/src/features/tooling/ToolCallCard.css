@@ -471,6 +471,7 @@
   overflow: auto;
   background: var(--surface-muted-bg);
   color: var(--text-strong);
+  outline: none;
   overscroll-behavior-x: contain;
   scrollbar-gutter: stable;
 }

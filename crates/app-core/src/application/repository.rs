@@ -184,7 +184,7 @@ impl Application {
         crate::startup_perf::mark("commit-gen/handle_started", "session handle created");
         // The throwaway session does NOT inherit the visible session's model —
         // `SessionConfig.model` only carries a display label, so without an
-        // explicit `set_model` the agent falls back to the default baked into
+        // explicit model push the agent falls back to the default baked into
         // `config.toml`. That default frequently points at a model the BYOK
         // proxy can't serve, stalling the task with zero events until the
         // 120s timeout ("仍在等待 AI 响应…"). Push the current model first.
@@ -193,8 +193,27 @@ impl Application {
                 "commit-gen/set_model",
                 format!("model={model_id:?} provider={provider:?}"),
             );
-            if let Err(error) = handle.set_model(model_id, provider) {
-                crate::startup_perf::mark("commit-gen/set_model_failed", error.to_string());
+            // CodeBuddy/Codex agents expose the model as a config option
+            // ("model") and do NOT implement `session/set_model` (returns
+            // "Method not found"), so a `set_model` call leaves the session on
+            // the `config.toml` default and the agent bails with an empty
+            // refusal ("AI 没有返回可用的提交信息"). Prefer the config-option
+            // path — the same one the main session uses when the user picks a
+            // model — and fall back to `set_model` for agents that only
+            // support the dedicated method.
+            let config_option_result =
+                handle.set_config_option("model", model_id.clone(), provider.clone());
+            if let Err(config_option_error) = config_option_result {
+                crate::startup_perf::mark(
+                    "commit-gen/set_config_option_failed",
+                    config_option_error.to_string(),
+                );
+                if let Err(model_error) = handle.set_model(model_id, provider) {
+                    crate::startup_perf::mark(
+                        "commit-gen/set_model_failed",
+                        model_error.to_string(),
+                    );
+                }
             }
         } else {
             crate::startup_perf::mark("commit-gen/set_model_skipped", "no model resolved");
@@ -323,7 +342,6 @@ impl Application {
 /// Normalize an AI-produced commit message into a multi-line draft.
 /// Keeps the subject + body, strips thinking preamble / code fences / labels /
 /// surrounding quotes.
-/// Detect tools that create/modify files. The commit-gen prompt forbids these
 /// Detect tools that create/modify files. The commit-gen prompt forbids these
 /// (the agent must emit the message as assistant text, not save it to disk);
 /// returning true lets the loop bail out instead of stalling to timeout.

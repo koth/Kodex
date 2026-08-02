@@ -91,8 +91,8 @@ export function DiffTab({
         </div>
       </div>
       <div
-        className="dt-editor"
         {...horizontalScroll.scrollControlProps}
+        className="dt-editor"
       >
         {diffPreview.kind === "patch" ? (
           <div className="dt-pierre-scroll" aria-label={`${change.path} 差异预览`}>

@@ -525,9 +525,9 @@
 }
 
 .review-inline-diff {
-  --review-diff-scrollbar-thumb: color-mix(in srgb, var(--app-bg) 82%, var(--text-soft));
-  --review-diff-scrollbar-thumb-active: color-mix(in srgb, var(--app-bg) 56%, var(--text-muted));
-  --review-diff-scrollbar-thumb-hover: color-mix(in srgb, var(--app-bg) 34%, var(--text-muted));
+  --review-diff-scrollbar-thumb: color-mix(in srgb, var(--app-bg) 78%, var(--text-soft));
+  --review-diff-scrollbar-thumb-active: color-mix(in srgb, var(--app-bg) 60%, var(--text-soft));
+  --review-diff-scrollbar-thumb-hover: color-mix(in srgb, var(--app-bg) 45%, var(--text-soft));
   overflow-x: auto;
   overflow-y: visible;
   border-top: 0;
@@ -535,6 +535,7 @@
   font-family: var(--font-mono);
   font-size: 12px;
   line-height: 1.5;
+  outline: none;
   overscroll-behavior-x: contain;
   scrollbar-color: var(--review-diff-scrollbar-thumb) transparent;
   scrollbar-gutter: stable;

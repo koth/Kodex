@@ -18,9 +18,9 @@ export const PIERRE_DIFF_OPTIONS_BASE = {
       --diffs-light-bg: var(--app-bg) !important;
       --diffs-bg-context: var(--app-bg) !important;
       --diffs-bg-buffer: var(--app-bg) !important;
-      --review-diff-scrollbar-thumb: color-mix(in srgb, var(--app-bg) 82%, var(--text-soft)) !important;
-      --review-diff-scrollbar-thumb-active: color-mix(in srgb, var(--app-bg) 56%, var(--text-muted)) !important;
-      --review-diff-scrollbar-thumb-hover: color-mix(in srgb, var(--app-bg) 34%, var(--text-muted)) !important;
+      --review-diff-scrollbar-thumb: color-mix(in srgb, var(--app-bg) 78%, var(--text-soft)) !important;
+      --review-diff-scrollbar-thumb-active: color-mix(in srgb, var(--app-bg) 60%, var(--text-soft)) !important;
+      --review-diff-scrollbar-thumb-hover: color-mix(in srgb, var(--app-bg) 45%, var(--text-soft)) !important;
       background-color: var(--app-bg) !important;
     }
 
@@ -62,39 +62,88 @@ export const PIERRE_DIFF_OPTIONS_BASE = {
       background-image: none !important;
     }
 
+    // The pierre renderer puts its own scrollbars INSIDE the shadow DOM on
+    // [data-code] (overflow: scroll). The vertical one is the bright bar that
+    // appears once content is long enough to scroll; its thumb falls back to
+    // the library's default light --diffs-bg-context. Recolor it to a theme
+    // color that stays close to the app background. Keep overflow-y scrolling
+    // intact — pierre's [data-code] is the vertical scroll container, so hiding
+    // the scrollbar or clipping overflow would break scrolling for long diffs.
+    // Note: the thumb uses background-clip: content-box with a transparent
+    // border, so use an opaque surface color (a translucent one reads as a
+    // washed-out bright stripe).
+    [data-code],
     [data-overflow="scroll"] [data-code] {
-      overflow-x: auto !important;
-      overflow-y: clip !important;
+      scrollbar-color: var(--review-diff-scrollbar-thumb) transparent !important;
+    }
+
+    :host(:hover) [data-code],
+    :host(:hover) [data-overflow="scroll"] [data-code],
+    :is([data-diff], [data-file]):hover [data-code] {
+      scrollbar-color: var(--review-diff-scrollbar-thumb-active) transparent !important;
+    }
+
+    [data-code]::-webkit-scrollbar-thumb,
+    [data-overflow="scroll"] [data-code]::-webkit-scrollbar-thumb {
+      background-color: var(--review-diff-scrollbar-thumb) !important;
+      background-clip: content-box !important;
+    }
+
+    :host(:hover) [data-code]::-webkit-scrollbar-thumb,
+    :host(:hover) [data-overflow="scroll"] [data-code]::-webkit-scrollbar-thumb,
+    :is([data-diff], [data-file]):hover [data-code]::-webkit-scrollbar-thumb {
+      background-color: var(--review-diff-scrollbar-thumb-active) !important;
+      background-clip: content-box !important;
+    }
+
+    [data-code]::-webkit-scrollbar-thumb:hover,
+    [data-overflow="scroll"] [data-code]::-webkit-scrollbar-thumb:hover {
+      background-color: var(--review-diff-scrollbar-thumb-hover) !important;
+    }
+
+    // The <pre> element is pierre's actual vertical scroll container (it gets
+    // tabindex="0" and overflow:scroll from the library, but the library gives
+    // it NO scrollbar styling at all). Its vertical scrollbar therefore renders
+    // with the WebKit default light track/thumb — the bright bar that shows up
+    // once content is long enough. Theme it here so it matches the app surface.
+    pre,
+    [data-diff],
+    [data-file] {
       scrollbar-color: var(--review-diff-scrollbar-thumb) transparent !important;
       scrollbar-width: thin !important;
     }
 
-    :host(:hover) [data-overflow="scroll"] [data-code] {
-      scrollbar-color: var(--review-diff-scrollbar-thumb-active) transparent !important;
-    }
-
-    [data-overflow="scroll"] [data-code]::-webkit-scrollbar {
-      width: 0 !important;
+    pre::-webkit-scrollbar,
+    [data-diff]::-webkit-scrollbar,
+    [data-file]::-webkit-scrollbar {
+      width: 9px !important;
       height: 9px !important;
     }
 
-    [data-overflow="scroll"] [data-code]::-webkit-scrollbar-track {
+    pre::-webkit-scrollbar-track,
+    [data-diff]::-webkit-scrollbar-track,
+    [data-file]::-webkit-scrollbar-track {
       background: transparent !important;
     }
 
-    [data-overflow="scroll"] [data-code]::-webkit-scrollbar-thumb {
-      min-width: 36px !important;
+    pre::-webkit-scrollbar-thumb,
+    [data-diff]::-webkit-scrollbar-thumb,
+    [data-file]::-webkit-scrollbar-thumb {
       border: 2px solid transparent !important;
       border-radius: 999px !important;
       background-color: var(--review-diff-scrollbar-thumb) !important;
       background-clip: content-box !important;
     }
 
-    :host(:hover) [data-overflow="scroll"] [data-code]::-webkit-scrollbar-thumb {
+    pre:hover::-webkit-scrollbar-thumb,
+    [data-diff]:hover::-webkit-scrollbar-thumb,
+    [data-file]:hover::-webkit-scrollbar-thumb {
       background-color: var(--review-diff-scrollbar-thumb-active) !important;
     }
 
-    [data-overflow="scroll"] [data-code]::-webkit-scrollbar-thumb:hover {
+    pre::-webkit-scrollbar-thumb:hover,
+    [data-diff]::-webkit-scrollbar-thumb:hover,
+    [data-file]::-webkit-scrollbar-thumb:hover {
       background-color: var(--review-diff-scrollbar-thumb-hover) !important;
     }
   `,
