@@ -21,6 +21,7 @@ use uuid::Uuid;
 
 type BoxBody = Full<Bytes>;
 const MCP_SESSION_ID_HEADER: &str = "Mcp-Session-Id";
+const TOOLS_RESOURCE_URI: &str = "kodex-web-tools://tools";
 
 pub struct WebToolsMcpHandle {
     url: String,
@@ -261,6 +262,11 @@ async fn handle_json_rpc_call(payload: Value, service: WebToolsService) -> Optio
         "tools/call" => {
             handle_tool_call(payload.get("params").cloned().unwrap_or_default(), service).await
         }
+        "resources/list" => Ok(json!({"resources": [tool_manifest_resource()]})),
+        "resources/templates" => Ok(json!({"resourceTemplates": []})),
+        "resources/read" => {
+            handle_resource_read(payload.get("params").cloned().unwrap_or_default())
+        }
         _ => Err(json_rpc_error(
             -32601,
             format!("Method not found: {method}"),
@@ -271,6 +277,35 @@ async fn handle_json_rpc_call(payload: Value, service: WebToolsService) -> Optio
         Ok(result) => json!({"jsonrpc": "2.0", "id": id, "result": result}),
         Err(error) => json!({"jsonrpc": "2.0", "id": id, "error": error}),
     })
+}
+
+/// The resource advertised by `resources/list`: a single manifest describing
+/// the web tools mounted for the session.
+fn tool_manifest_resource() -> Value {
+    json!({
+        "uri": TOOLS_RESOURCE_URI,
+        "name": "kodex-web-tools mounted tools",
+        "description": "Web tools currently mounted for this session: web_search, web_fetch.",
+        "mimeType": "application/json",
+    })
+}
+
+fn handle_resource_read(params: Value) -> Result<Value, Value> {
+    let uri = params
+        .get("uri")
+        .and_then(Value::as_str)
+        .ok_or_else(|| json_rpc_error(-32602, "Missing resource uri"))?;
+    if uri != TOOLS_RESOURCE_URI {
+        return Err(json_rpc_error(-32002, format!("Resource not found: {uri}")));
+    }
+    let text = serde_json::to_string_pretty(&tool_schemas()).unwrap_or_else(|_| "[]".to_string());
+    Ok(json!({
+        "contents": [{
+            "uri": TOOLS_RESOURCE_URI,
+            "mimeType": "application/json",
+            "text": text,
+        }]
+    }))
 }
 
 async fn handle_tool_call(params: Value, service: WebToolsService) -> Result<Value, Value> {
@@ -532,6 +567,56 @@ mod tests {
         let tools = response["result"]["tools"].as_array().unwrap();
         assert!(tools.iter().any(|tool| tool["name"] == "web_search"));
         assert!(tools.iter().any(|tool| tool["name"] == "web_fetch"));
+    }
+
+    #[test]
+    fn mcp_resources_expose_mounted_tools() {
+        let handle = start_web_tools_mcp_server_with_service(mcp_service()).unwrap();
+        let names = run_async(async {
+            let client = reqwest::Client::new();
+            let session_id = initialize_mcp_session(&client, &handle).await;
+            let list: Value = client
+                .post(handle.url())
+                .header("x-kodex-web-tools-token", handle.token())
+                .header(MCP_SESSION_ID_HEADER, session_id.clone())
+                .json(&json!({"jsonrpc": "2.0", "id": 1, "method": "resources/list"}))
+                .send()
+                .await
+                .unwrap()
+                .json()
+                .await
+                .unwrap();
+            let resources = list["result"]["resources"].as_array().unwrap();
+            assert_eq!(resources.len(), 1);
+            let uri = resources[0]["uri"].as_str().unwrap();
+            assert_eq!(uri, TOOLS_RESOURCE_URI);
+            let read: Value = client
+                .post(handle.url())
+                .header("x-kodex-web-tools-token", handle.token())
+                .header(MCP_SESSION_ID_HEADER, session_id.clone())
+                .json(&json!({
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "resources/read",
+                    "params": {"uri": uri}
+                }))
+                .send()
+                .await
+                .unwrap()
+                .json()
+                .await
+                .unwrap();
+            let text = read["result"]["contents"][0]["text"].as_str().unwrap();
+            let parsed: Value = serde_json::from_str(text).unwrap();
+            parsed
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|tool| tool["name"].as_str().unwrap().to_string())
+                .collect::<Vec<_>>()
+        });
+        assert!(names.contains(&"web_search".to_string()));
+        assert!(names.contains(&"web_fetch".to_string()));
     }
 
     #[test]

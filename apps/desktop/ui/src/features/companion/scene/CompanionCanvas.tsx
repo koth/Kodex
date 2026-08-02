@@ -5,6 +5,10 @@ import { CompanionAvatar, type GazeTarget } from "./CompanionAvatar";
 import { PlaceholderAvatar } from "./PlaceholderAvatar";
 import { useVrmModel } from "./useVrmModel";
 
+/** 无 WebGL 降级立绘（透明背景 PNG，见 public/companion/CHARACTER.md）。
+ *  base 为 "./"（见 vite.config.ts），相对路径在 dev 与打包产物下均可用。 */
+const FALLBACK_PORTRAIT_URL = "./companion/portrait/portrait-v1.png";
+
 export type RenderTier = "vrm" | "placeholder" | "portrait" | "bubble-only";
 
 interface CompanionCanvasProps {
@@ -59,9 +63,12 @@ export function CompanionCanvas({ mood, gaze, lowPower, modelUrl, onTierChange, 
   if (!webglAvailable) {
     return (
       <div className="companion-portrait-fallback" data-testid="companion-portrait-fallback">
-        <span className={`companion-portrait-face companion-portrait-${mood}`} aria-hidden>
-          {mood === "happy" ? "＾▽＾" : mood === "sleepy" ? "－ｗ－" : mood === "pouty" ? "＞＜" : "・ω・"}
-        </span>
+        <img
+          className={`companion-portrait-img companion-portrait-${mood}`}
+          src={FALLBACK_PORTRAIT_URL}
+          alt=""
+          draggable={false}
+        />
       </div>
     );
   }

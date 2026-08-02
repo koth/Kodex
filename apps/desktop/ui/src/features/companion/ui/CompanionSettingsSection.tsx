@@ -174,7 +174,7 @@ export function CompanionSettingsSection() {
               </div>
               {modelError && <p className="settings-field-error">{modelError}</p>}
               <p className="companion-setting-hint">
-                自定义模型加载失败时会自动回退到默认头像。模型需 ≤5MB、贴图 ≤2K。
+                自定义模型加载失败时会自动回退到默认头像。模型建议 ≤30MB、贴图 ≤2K。
               </p>
             </div>
 

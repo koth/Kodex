@@ -11,6 +11,11 @@
 //! `ImageCapabilities` is held behind a shared, lockable cell so that a model
 //! switch can update the offered tool set without restarting the server
 //! (subsequent `tools/list` calls recompute the trimmed set).
+//!
+//! The server also advertises a `kodex-image://tools` resource describing the
+//! currently mounted tool set, so client-side `list_mcp_resources` /
+//! `read_mcp_resource` can surface what is mounted even though this server
+//! exposes tools rather than file-like resources.
 
 use bytes::Bytes;
 use http_body_util::{BodyExt, Full};
@@ -35,6 +40,7 @@ use crate::image_api::{ImageApi, ViewCache};
 
 const MCP_SESSION_ID_HEADER: &str = "Mcp-Session-Id";
 const TOKEN_HEADER: &str = "x-kodex-image-token";
+const TOOLS_RESOURCE_URI: &str = "kodex-image://tools";
 
 /// Configuration carried by the image MCP service. Phase 5 wires the real
 /// `ImageApi` (real multimodal understanding + OpenAI-compatible generation).
@@ -343,6 +349,14 @@ async fn handle_json_rpc_call(payload: Value, service: ImageMcpService) -> Optio
         "tools/call" => {
             handle_tool_call(payload.get("params").cloned().unwrap_or_default(), service).await
         }
+        "resources/list" => {
+            let caps = service.capabilities();
+            Ok(json!({"resources": [tool_manifest_resource(&caps)]}))
+        }
+        "resources/templates" => Ok(json!({"resourceTemplates": []})),
+        "resources/read" => {
+            handle_resource_read(payload.get("params").cloned().unwrap_or_default(), service)
+        }
         _ => Err(json_rpc_error(
             -32601,
             format!("Method not found: {method}"),
@@ -353,6 +367,37 @@ async fn handle_json_rpc_call(payload: Value, service: ImageMcpService) -> Optio
         Ok(result) => json!({"jsonrpc": "2.0", "id": id, "result": result}),
         Err(error) => json!({"jsonrpc": "2.0", "id": id, "error": error}),
     })
+}
+
+/// The resource advertised by `resources/list`: a single manifest describing
+/// the currently mounted image tools, trimmed to the session's capabilities.
+fn tool_manifest_resource(caps: &ImageCapabilities) -> Value {
+    json!({
+        "uri": TOOLS_RESOURCE_URI,
+        "name": "kodex-image mounted tools",
+        "description": "Tools currently mounted for this session (trimmed by model image capabilities): view_image, generate_image, edit_image.",
+        "mimeType": "application/json",
+    })
+}
+
+fn handle_resource_read(params: Value, service: ImageMcpService) -> Result<Value, Value> {
+    let uri = params
+        .get("uri")
+        .and_then(Value::as_str)
+        .ok_or_else(|| json_rpc_error(-32602, "Missing resource uri"))?;
+    if uri != TOOLS_RESOURCE_URI {
+        return Err(json_rpc_error(-32002, format!("Resource not found: {uri}")));
+    }
+    let caps = service.capabilities();
+    let text = serde_json::to_string_pretty(&trimmed_tool_schemas(&caps))
+        .unwrap_or_else(|_| "[]".to_string());
+    Ok(json!({
+        "contents": [{
+            "uri": TOOLS_RESOURCE_URI,
+            "mimeType": "application/json",
+            "text": text,
+        }]
+    }))
 }
 
 /// Tool names offered for the given capabilities (the trimmed set).
@@ -674,6 +719,90 @@ mod tests {
             response["error"]["message"].as_str(),
             Some("tool not available in current capability mode")
         );
+    }
+
+    #[test]
+    fn resources_list_exposes_mounted_tools_manifest() {
+        let handle = start_image_mcp_server(service(ImageCapabilities {
+            native_view: true,
+            native_generate: false,
+            native_edit: false,
+            view_fallback: false,
+        }))
+        .unwrap();
+        let tools_in_manifest = run_async(async {
+            let client = reqwest::Client::new();
+            let session_id = initialize(&client, &handle).await;
+            let list: Value = client
+                .post(handle.url())
+                .header(TOKEN_HEADER, handle.token())
+                .header(MCP_SESSION_ID_HEADER, session_id.clone())
+                .json(&json!({"jsonrpc": "2.0", "id": 1, "method": "resources/list"}))
+                .send()
+                .await
+                .unwrap()
+                .json()
+                .await
+                .unwrap();
+            let resources = list["result"]["resources"].as_array().unwrap();
+            assert_eq!(resources.len(), 1);
+            let uri = resources[0]["uri"].as_str().unwrap();
+            assert_eq!(uri, TOOLS_RESOURCE_URI);
+            let read: Value = client
+                .post(handle.url())
+                .header(TOKEN_HEADER, handle.token())
+                .header(MCP_SESSION_ID_HEADER, session_id.clone())
+                .json(&json!({
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "resources/read",
+                    "params": {"uri": uri}
+                }))
+                .send()
+                .await
+                .unwrap()
+                .json()
+                .await
+                .unwrap();
+            let text = read["result"]["contents"][0]["text"].as_str().unwrap();
+            let parsed: Value = serde_json::from_str(text).unwrap();
+            parsed
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|tool| tool["name"].as_str().unwrap().to_string())
+                .collect::<Vec<_>>()
+        });
+        // native_view=true trims view_image from the mounted set.
+        assert!(!tools_in_manifest.contains(&"view_image".to_string()));
+        assert!(tools_in_manifest.contains(&"generate_image".to_string()));
+        assert!(tools_in_manifest.contains(&"edit_image".to_string()));
+    }
+
+    #[test]
+    fn resources_read_rejects_unknown_uri() {
+        let handle = start_image_mcp_server(service(ImageCapabilities::default())).unwrap();
+        let error: Value = run_async(async {
+            let client = reqwest::Client::new();
+            let session_id = initialize(&client, &handle).await;
+            client
+                .post(handle.url())
+                .header(TOKEN_HEADER, handle.token())
+                .header(MCP_SESSION_ID_HEADER, session_id)
+                .json(&json!({
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "resources/read",
+                    "params": {"uri": "kodex-image://missing"}
+                }))
+                .send()
+                .await
+                .unwrap()
+                .json()
+                .await
+                .unwrap()
+        });
+        assert_eq!(error["error"]["code"], -32002);
     }
 
     #[test]
