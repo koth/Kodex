@@ -17,6 +17,18 @@ pub fn session_get_state(state: State<'_, AppState>) -> Result<UiSnapshot, Strin
     })
 }
 
+/// Lightweight revision probe used by the frontend self-heal poll. Returns the
+/// current session id + revision without cloning the whole `UiSnapshot`, so the
+/// periodic poll stays cheap on long sessions and only pays for a full snapshot
+/// when the revision actually advanced.
+#[tauri::command]
+pub fn session_get_revision(state: State<'_, AppState>) -> Result<(String, u64), String> {
+    state.with_app(|app| {
+        app.poll_prompt_progress();
+        Ok((app.ui.session.id.to_string(), app.ui.revision))
+    })
+}
+
 #[tauri::command]
 pub fn session_send_prompt(
     state: State<'_, AppState>,
@@ -240,6 +252,32 @@ pub fn session_get_file_diff(
     path: String,
 ) -> Result<SessionFileChange, String> {
     state.with_app(|app| app.session_file_diff(&path))
+}
+
+#[tauri::command]
+pub fn session_get_turn_file_diff(
+    state: State<'_, AppState>,
+    message_id: String,
+    path: String,
+) -> Result<SessionFileChange, String> {
+    state.with_app(|app| app.session_turn_file_diff(&message_id, &path))
+}
+
+#[tauri::command]
+pub fn session_load_history_before(
+    state: State<'_, AppState>,
+    before_seq: i64,
+    limit: usize,
+) -> Result<app_core::HistoryPage, String> {
+    state.with_app(|app| app.load_history_before(before_seq, limit))
+}
+
+#[tauri::command]
+pub fn session_get_tool_detail(
+    state: State<'_, AppState>,
+    tool_id: String,
+) -> Result<workspace_model::ToolInvocation, String> {
+    state.with_app(|app| app.session_tool_detail(&tool_id))
 }
 
 #[tauri::command]

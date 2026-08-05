@@ -106,12 +106,10 @@ function TreeNode({
         onContextMenu={handleContextMenu}
         title={entry.path}
       >
-        <span className="filetree-chevron">
-          {isDir ? (isExpanded ? "\u25BE" : "\u25B8") : " "}
+        <span className={`filetree-chevron ${isExpanded ? "is-expanded" : ""}`}>
+          {isDir ? <ChevronIcon /> : null}
         </span>
-        {isDir ? (
-          <FolderTreeIcon className="filetree-icon filetree-folder-icon" />
-        ) : (
+        {!isDir && (
           <img className="filetree-icon" src={getFileIcon(entry.path)} alt="" />
         )}
         {isRenaming ? (
@@ -627,11 +625,10 @@ function RefreshIcon() {
   );
 }
 
-function FolderTreeIcon({ className }: { className?: string }) {
+function ChevronIcon() {
   return (
-    <svg className={className} viewBox="0 0 20 20" aria-hidden="true">
-      <path d="M2.5 6.2c0-1 .8-1.8 1.8-1.8h3.4l1.5 1.6h6.5c1 0 1.8.8 1.8 1.8v6.7c0 1-.8 1.8-1.8 1.8H4.3c-1 0-1.8-.8-1.8-1.8V6.2Z" />
-      <path d="M2.5 8.2h15" />
+    <svg className="filetree-chevron-icon" viewBox="0 0 20 20" aria-hidden="true">
+      <path d="m7.5 5 5 5-5 5" />
     </svg>
   );
 }

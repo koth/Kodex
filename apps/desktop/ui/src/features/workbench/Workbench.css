@@ -493,6 +493,8 @@ body.is-resizing-left-sidebar {
   --conversation-composer-max: 720px;
   --expanded-review-side-tree-width: clamp(230px, 24vw, 300px);
   --expanded-review-composer-height: 58px;
+  /* 轮次导航刻度带宽度，ConversationTimeline 导航定位与挤压档左留白共用。 */
+  --timeline-nav-space: 30px;
 
   position: relative;
   display: flex;
@@ -1113,7 +1115,8 @@ body.is-resizing-left-sidebar {
 .center-panel.is-agent-plan-overlap .conversation-container .timeline-items,
 .center-panel.is-agent-plan-overlap .conversation-container .composer-plan-slot,
 .center-panel.is-agent-plan-overlap .conversation-container .composer {
-  margin-left: 0;
+  /* 左侧给轮次导航刻度留带，避免挤压到左侧时盖住导航。 */
+  margin-left: var(--timeline-nav-space, 30px);
   margin-right: calc(var(--agent-plan-dock-width) + var(--agent-plan-dock-gap));
 }
 

@@ -128,6 +128,8 @@ fn build_initial_ui_for_descriptor(descriptor: WorkspaceDescriptor) -> anyhow::R
         thinking_status: None,
         usage: Default::default(),
         pending_steers: Vec::new(),
+        history_total: 0,
+        history_earliest_seq: None,
     })
 }
 

@@ -539,6 +539,8 @@ export interface UiSnapshot {
   thinking_status: ThinkingStatus | null;
   usage?: SessionUsageSnapshot;
   pending_steers?: PendingSteer[];
+  history_total?: number;
+  history_earliest_seq?: number | null;
 }
 
 export interface UiSnapshotPatch {
@@ -715,6 +717,9 @@ export interface TabDescriptor {
   diffSource?: "session" | "git" | "change-set";
   changeSetId?: string;
   diffChange?: SessionFileChange;
+  /** Owning user/assistant message for turn diffs, used to lazy-load the
+   *  stripped diff text via `session_get_turn_file_diff`. */
+  diffMessageId?: string;
   diffRecord?: FileChangeRecord;
   lineNumber?: number;
   searchQuery?: string;

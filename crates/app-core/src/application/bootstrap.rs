@@ -131,15 +131,28 @@ impl Application {
         )?;
 
         // Try to restore the most recent session, otherwise create a new one
+        let mut restored_history_total_count = 0i64;
+        let mut restored_history_earliest_seq: Option<i64> = None;
         let (needs_title, seq_counter, pending_model_restore) = match existing_sessions.as_slice() {
             [recent, ..] => {
                 // list_sessions orders by updated_at DESC
                 let session_id = &recent.id;
-                if let Ok((messages, tools, timeline)) =
+                if let Ok(history_window) =
                     crate::startup_perf::measure("app/bootstrap/load_session", session_id, || {
-                        store.load_session(session_id)
+                        store.load_session_window_by_turns(
+                            session_id,
+                            SESSION_HISTORY_WINDOW,
+                            SESSION_HISTORY_WINDOW_MIN_TURNS,
+                        )
                     })
                 {
+                    restored_history_total_count = history_window.total_count;
+                    restored_history_earliest_seq = history_window.earliest_seq;
+                    let (messages, tools, timeline) = (
+                        history_window.messages,
+                        history_window.tools,
+                        history_window.timeline,
+                    );
                     ui.session.id = uuid::Uuid::parse_str(session_id).unwrap_or(ui.session.id);
                     ui.session.title = recent.title.clone();
                     let mut tools = tools;
@@ -349,6 +362,8 @@ impl Application {
             pending_tool_write_detections: Vec::new(),
             inline_think_filter: InlineThinkFilter::default(),
             pending_image_degradation: None,
+            history_total_count: restored_history_total_count,
+            history_earliest_seq: restored_history_earliest_seq,
         })
     }
 
@@ -452,10 +467,23 @@ impl Application {
             },
         )?;
 
+        let mut restored_history_total_count = 0i64;
+        let mut restored_history_earliest_seq: Option<i64> = None;
         let (needs_title, seq_counter, pending_model_restore) = match selected_session {
             Some(recent) => {
                 let session_id = &recent.id;
-                if let Ok((messages, tools, timeline)) = store.load_session(session_id) {
+                if let Ok(history_window) = store.load_session_window_by_turns(
+                    session_id,
+                    SESSION_HISTORY_WINDOW,
+                    SESSION_HISTORY_WINDOW_MIN_TURNS,
+                ) {
+                    restored_history_total_count = history_window.total_count;
+                    restored_history_earliest_seq = history_window.earliest_seq;
+                    let (messages, tools, timeline) = (
+                        history_window.messages,
+                        history_window.tools,
+                        history_window.timeline,
+                    );
                     ui.session.id = uuid::Uuid::parse_str(session_id).unwrap_or(ui.session.id);
                     ui.session.title = recent.title.clone();
                     let mut tools = tools;
@@ -587,6 +615,8 @@ impl Application {
             pending_tool_write_detections: Vec::new(),
             inline_think_filter: InlineThinkFilter::default(),
             pending_image_degradation: None,
+            history_total_count: restored_history_total_count,
+            history_earliest_seq: restored_history_earliest_seq,
         })
     }
 }

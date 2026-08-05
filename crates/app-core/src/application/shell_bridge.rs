@@ -3,8 +3,8 @@ use crate::remote_workspace::RemoteWorkspaceClient;
 use git_service::GitService;
 use std::path::PathBuf;
 use workspace_model::{
-    ChangedFile, EditorFileSnapshot, EditorFileVersion, FileChangeType, FileEntry, SearchResult,
-    SessionFileChange,
+    ChangedFile, ChatMessage, EditorFileSnapshot, EditorFileVersion, FileChangeType, FileEntry,
+    SearchResult, SessionFileChange, TimelineItem, ToolInvocation,
 };
 
 impl Application {
@@ -324,8 +324,43 @@ impl Application {
     pub fn session_file_diff(&self, path: &str) -> Result<SessionFileChange, String> {
         let normalized = normalize_tracked_path(path);
         let normalized_relative = normalize_path_for_storage(path, &self.ui.workspace.root);
+        let matches = |change: &SessionFileChange| {
+            let change_normalized = normalize_tracked_path(&change.path);
+            let change_relative =
+                normalize_path_for_storage(&change.path, &self.ui.workspace.root);
+            change_normalized == normalized
+                || change_normalized == normalized_relative
+                || change_relative == normalized
+                || change_relative == normalized_relative
+        };
         self.ui
             .session_changes
+            .iter()
+            .find(|change| matches(change))
+            .or_else(|| self.ui.review_changes.iter().find(|change| matches(change)))
+            .cloned()
+            .ok_or_else(|| format!("No change found for path: {path}"))
+    }
+
+    /// Fetch the full diff (with `old_text`/`new_text`) for one file of a
+    /// specific turn. Snapshots strip embedded diff text, so diff views load
+    /// it on demand through this lookup.
+    pub fn session_turn_file_diff(
+        &self,
+        message_id: &str,
+        path: &str,
+    ) -> Result<SessionFileChange, String> {
+        let message_uuid = uuid::Uuid::parse_str(message_id)
+            .map_err(|e| format!("Invalid message id {message_id}: {e}"))?;
+        let turn = self
+            .ui
+            .turn_changes
+            .iter()
+            .find(|turn| turn.message_id == message_uuid)
+            .ok_or_else(|| format!("No turn changes found for message: {message_id}"))?;
+        let normalized = normalize_tracked_path(path);
+        let normalized_relative = normalize_path_for_storage(path, &self.ui.workspace.root);
+        turn.changes
             .iter()
             .find(|change| {
                 let change_normalized = normalize_tracked_path(&change.path);
@@ -339,4 +374,47 @@ impl Application {
             .cloned()
             .ok_or_else(|| format!("No change found for path: {path}"))
     }
+
+    /// Page older timeline history (entries strictly before `before_seq`).
+    /// The frontend prepends these to its local snapshot; the backend does not
+    /// mutate the in-memory window, keeping the live append path untouched.
+    pub fn load_history_before(
+        &self,
+        before_seq: i64,
+        limit: usize,
+    ) -> Result<HistoryPage, String> {
+        let session_id = self.ui.session.id.to_string();
+        let (messages, tools, timeline, earliest_seq) = self
+            .store
+            .load_history_before(&session_id, before_seq, limit)
+            .map_err(|e| e.to_string())?;
+        // When the page came back short of `limit` there is no older history.
+        let page_len = timeline.len();
+        Ok(HistoryPage {
+            messages,
+            tools,
+            timeline,
+            earliest_seq,
+            has_more: page_len >= limit,
+        })
+    }
+
+    /// Fetch a single tool invocation's full stored detail (uncapped raw
+    /// fields + diff previews) for an expanded tool card.
+    pub fn session_tool_detail(&self, tool_id: &str) -> Result<ToolInvocation, String> {
+        let session_id = self.ui.session.id.to_string();
+        self.store
+            .load_tool_detail(&session_id, tool_id)
+            .map_err(|e| e.to_string())
+    }
+}
+
+/// A page of older timeline history prepended into the visible session.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct HistoryPage {
+    pub messages: Vec<ChatMessage>,
+    pub tools: Vec<ToolInvocation>,
+    pub timeline: Vec<TimelineItem>,
+    pub earliest_seq: Option<i64>,
+    pub has_more: bool,
 }

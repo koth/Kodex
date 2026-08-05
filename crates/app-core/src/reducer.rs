@@ -1735,6 +1735,8 @@ mod tests {
             thinking_status: None,
             usage: Default::default(),
             pending_steers: Vec::new(),
+            history_total: 0,
+            history_earliest_seq: None,
         }
     }
 

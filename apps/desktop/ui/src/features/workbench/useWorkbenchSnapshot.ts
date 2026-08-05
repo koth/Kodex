@@ -1,9 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { UiSnapshot, UiSnapshotPatch } from "../../types";
-import { startupPerfMark, sessionGetState } from "../../lib/tauri";
+import { startupPerfMark, sessionGetState, sessionGetRevision, sessionLoadHistoryBefore } from "../../lib/tauri";
 import { onUiSnapshot, onUiSnapshotPatch } from "../../lib/events";
 import {
   appendStreamingMessageDelta,
+  clearStreamingMessageBodies,
   flushStreamingMessageBodies,
   getStreamingMessageBody,
 } from "../conversation/streaming-message-store";
@@ -187,6 +188,16 @@ export function useWorkbenchSnapshot() {
     }
   }, [snapshot]);
 
+  // Free cached streaming bodies when the session changes — the stream store
+  // only ever grows otherwise, so long sessions accumulate every historical
+  // message body in memory.
+  const currentSessionId = snapshot?.session.id ?? null;
+  useEffect(() => {
+    return () => {
+      clearStreamingMessageBodies();
+    };
+  }, [currentSessionId]);
+
   const pollState = useCallback(async () => {
     try {
       const state = await sessionGetState();
@@ -227,6 +238,17 @@ export function useWorkbenchSnapshot() {
     let disposed = false;
     let unlisten: (() => void) | undefined;
     let unlistenPatch: (() => void) | undefined;
+    // Debounce full-snapshot re-syncs triggered by patch reconcile paths so a
+    // burst of gap/stale patches during streaming doesn't fire several full
+    // `session_get_state` clones back-to-back.
+    let reconcileTimer = 0;
+    const scheduleFullResync = () => {
+      if (reconcileTimer !== 0) return;
+      reconcileTimer = window.setTimeout(() => {
+        reconcileTimer = 0;
+        void pollState();
+      }, 120);
+    };
 
     onUiSnapshot((nextSnapshot) => {
       if (disposed) return;
@@ -272,14 +294,14 @@ export function useWorkbenchSnapshot() {
       setWorkspaceReady(true);
       setSnapshot((prev) => {
         if (!prev) {
-          void pollState();
+          scheduleFullResync();
           return prev;
         }
         // Reject stale patches that belong to a different session than the
         // one currently rendered (e.g. a patch emitted by the bridge before a
         // session switch that arrives after the switch).
         if (patch.session.id !== prev.session.id || patch.revision < prev.revision) {
-          void pollState();
+          scheduleFullResync();
           return prev;
         }
         // A revision gap means one or more patches were dropped between the
@@ -290,7 +312,7 @@ export function useWorkbenchSnapshot() {
         // "final part of the reply renders truncated"). Re-sync from a full
         // snapshot instead of merging a corrupted delta.
         if (patch.revision > prev.revision + 1) {
-          void pollState();
+          scheduleFullResync();
           return prev;
         }
 
@@ -326,6 +348,10 @@ export function useWorkbenchSnapshot() {
 
     return () => {
       disposed = true;
+      if (reconcileTimer !== 0) {
+        window.clearTimeout(reconcileTimer);
+        reconcileTimer = 0;
+      }
       unlisten?.();
       unlistenPatch?.();
     };
@@ -338,16 +364,79 @@ export function useWorkbenchSnapshot() {
   // with the complete reply.
   useEffect(() => {
     if (!workspaceReady) return;
+    let cancelled = false;
     const interval = window.setInterval(() => {
-      void pollState();
+      // Probe the cheap revision endpoint first; only pay for a full snapshot
+      // clone + serialization when the backend actually advanced. Long sessions
+      // make `session_get_state` expensive, so this keeps the 3s poll light.
+      sessionGetRevision()
+        .then(([sessionId, revision]) => {
+          if (cancelled) return;
+          const changed =
+            sessionId !== prevSnapshotSessionId.current ||
+            revision !== prevSnapshotRevision.current;
+          if (changed) void pollState();
+        })
+        .catch(() => {});
     }, SNAPSHOT_SELF_HEAL_POLL_MS);
-    return () => window.clearInterval(interval);
+    return () => {
+      cancelled = true;
+      window.clearInterval(interval);
+    };
   }, [workspaceReady, pollState]);
 
   useEffect(() => {
     if (!workspaceReady || snapshot) return;
     pollState();
   }, [pollState, snapshot, workspaceReady]);
+
+  // Page older history (before the loaded window's earliest seq) and prepend
+  // it into the local snapshot. Returns false when there's nothing older.
+  const loadOlderHistory = useCallback(async (limit = 200): Promise<boolean> => {
+    const current = snapshotRef.current;
+    const earliest = current?.history_earliest_seq;
+    if (!current || earliest == null) return false;
+    try {
+      const page = await sessionLoadHistoryBefore(earliest, limit);
+      if (page.timeline.length === 0) return false;
+      setSnapshot((prev) => {
+        if (!prev) return prev;
+        // Dedupe by id in case of overlap with the current window.
+        const knownMessageIds = new Set(prev.messages.map((m) => m.id));
+        const knownToolIds = new Set(prev.tools.map((t) => t.id));
+        const knownTimeline = new Set(
+          prev.timeline.map((item) =>
+            typeof item === "object" && "Message" in item
+              ? `m:${item.Message}`
+              : typeof item === "object" && "Tool" in item
+              ? `t:${item.Tool}`
+              : String(item),
+          ),
+        );
+        const newMessages = page.messages.filter((m) => !knownMessageIds.has(m.id));
+        const newTools = page.tools.filter((t) => !knownToolIds.has(t.id));
+        const newTimeline = page.timeline.filter((item) => {
+          const key =
+            typeof item === "object" && "Message" in item
+              ? `m:${item.Message}`
+              : typeof item === "object" && "Tool" in item
+              ? `t:${item.Tool}`
+              : String(item);
+          return !knownTimeline.has(key);
+        });
+        return {
+          ...prev,
+          messages: [...newMessages, ...prev.messages],
+          tools: [...newTools, ...prev.tools],
+          timeline: [...newTimeline, ...prev.timeline],
+          history_earliest_seq: page.has_more ? page.earliest_seq : null,
+        };
+      });
+      return true;
+    } catch {
+      return false;
+    }
+  }, []);
 
   return {
     snapshot,
@@ -358,5 +447,6 @@ export function useWorkbenchSnapshot() {
     acceptSnapshot,
     clearSnapshot,
     clearWorkspace,
+    loadOlderHistory,
   };
 }

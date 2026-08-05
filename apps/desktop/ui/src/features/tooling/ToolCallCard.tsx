@@ -1,6 +1,7 @@
-import { memo, useState } from "react";
+import { memo, useEffect, useState } from "react";
 import { PatchDiff } from "@pierre/diffs/react";
 import type { DiffHunk, ToolDiffPreview, ToolInvocation } from "../../types";
+import { sessionGetToolDetail } from "../../lib/tauri";
 import { useHorizontalScrollControls } from "../../lib/use-horizontal-scroll-controls";
 import { deriveToolPresentation, type ToolPresentation } from "./tool-presentation";
 import { getDiffStats, previewToCompactPatch } from "./compact-patch";
@@ -41,6 +42,42 @@ const DIFF_OPTIONS = {
   themeType: "dark",
 } as const;
 
+// Snapshots cap large tool text (raw_output at 8K chars, raw_input/detail at
+// 4K). When a capped card is expanded we fetch the uncapped stored detail
+// once and cache it per tool id, so full fidelity stays available without
+// keeping the heavy text resident in every snapshot.
+const SNAPSHOT_RAW_INPUT_CAP_CHARS = 4 * 1024;
+const SNAPSHOT_RAW_OUTPUT_CAP_CHARS = 8 * 1024;
+
+const toolDetailCache = new Map<string, ToolInvocation>();
+const toolDetailInflight = new Map<string, Promise<void>>();
+
+function toolDetailLooksCapped(tool: ToolInvocation): boolean {
+  return (
+    (tool.raw_input?.length ?? 0) >= SNAPSHOT_RAW_INPUT_CAP_CHARS ||
+    (tool.raw_output?.length ?? 0) >= SNAPSHOT_RAW_OUTPUT_CAP_CHARS ||
+    tool.detail_text.length >= SNAPSHOT_RAW_INPUT_CAP_CHARS
+  );
+}
+
+function mergeToolDetail(base: ToolInvocation, detail: ToolInvocation): ToolInvocation {
+  return {
+    ...base,
+    raw_input: detail.raw_input ?? base.raw_input,
+    raw_output: detail.raw_output ?? base.raw_output,
+    error: detail.error ?? base.error,
+    diff_paths:
+      detail.diff_paths.length > 0 ? detail.diff_paths : base.diff_paths,
+    diff_previews:
+      detail.diff_previews.length > 0 ? detail.diff_previews : base.diff_previews,
+  };
+}
+
+export function clearToolDetailCacheForTests(): void {
+  toolDetailCache.clear();
+  toolDetailInflight.clear();
+}
+
 export { previewToCompactPatch } from "./compact-patch";
 
 interface Props {
@@ -68,6 +105,43 @@ function ToolCallCardImpl({
   const [expanded, setExpanded] = useState(false);
   const [rawDetailsOpen, setRawDetailsOpen] = useState(false);
   const [stopRequested, setStopRequested] = useState(false);
+  const [detailedTool, setDetailedTool] = useState<ToolInvocation | null>(
+    () => toolDetailCache.get(tool.id) ?? null,
+  );
+
+  // Lazy-load the uncapped stored detail on first expand when the snapshot's
+  // copy looks truncated. Terminal tools stream their full output already.
+  useEffect(() => {
+    if (!expanded || detailedTool || tool.terminal_output) return;
+    if (!toolDetailLooksCapped(tool)) return;
+    const cached = toolDetailCache.get(tool.id);
+    if (cached) {
+      setDetailedTool(cached);
+      return;
+    }
+    let cancelled = false;
+    const inflight =
+      toolDetailInflight.get(tool.id) ??
+      sessionGetToolDetail(tool.id)
+        .then((detail) => {
+          toolDetailCache.set(tool.id, detail);
+        })
+        .catch(() => {
+          // Keep the capped snapshot copy; the next expand retries.
+        })
+        .finally(() => {
+          toolDetailInflight.delete(tool.id);
+        });
+    toolDetailInflight.set(tool.id, inflight);
+    void inflight.then(() => {
+      if (cancelled) return;
+      const detail = toolDetailCache.get(tool.id);
+      if (detail) setDetailedTool(detail);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [expanded, detailedTool, tool]);
 
   const children = childToolsByParent?.get(tool.call_id) ?? [];
 
@@ -76,6 +150,10 @@ function ToolCallCardImpl({
   if (hiddenPermissionRequest) {
     return null;
   }
+
+  // Prefer the lazily fetched full detail for rendering; fall back to the
+  // (possibly capped) snapshot copy while the fetch is in flight.
+  tool = detailedTool ? mergeToolDetail(tool, detailedTool) : tool;
 
   const presentation = deriveToolPresentation(tool);
   const commandApplyPatchPreviews =

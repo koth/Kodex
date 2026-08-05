@@ -671,8 +671,24 @@ impl Application {
     }
 
     fn runtime_for_stored_session(&mut self, id: &str) -> Result<SessionRuntime, String> {
-        let (messages, mut tools, timeline) =
-            self.store.load_session(id).map_err(|e| e.to_string())?;
+        // Windowed history load: only the most recent entries are
+        // materialized; older history pages in on demand. Keeps long sessions
+        // from loading their entire message/tool history into memory.
+        let history_window = self
+            .store
+            .load_session_window_by_turns(
+                id,
+                SESSION_HISTORY_WINDOW,
+                SESSION_HISTORY_WINDOW_MIN_TURNS,
+            )
+            .map_err(|e| e.to_string())?;
+        let history_total_count = history_window.total_count;
+        let history_earliest_seq = history_window.earliest_seq;
+        let (messages, mut tools, timeline) = (
+            history_window.messages,
+            history_window.tools,
+            history_window.timeline,
+        );
         let interrupted_tool_ids = interrupt_incomplete_tools(&mut tools);
         for tool_id in &interrupted_tool_ids {
             if let Some(tool) = tools.iter().find(|tool| tool.id.to_string() == *tool_id) {
@@ -819,6 +835,8 @@ impl Application {
             runtime_status: SessionRuntimeStatus::Active,
             attention_state: SessionAttentionState::None,
             pending_image_degradation: None,
+            history_total_count,
+            history_earliest_seq,
         })
     }
 
@@ -927,6 +945,8 @@ impl Application {
             runtime_status: SessionRuntimeStatus::Active,
             attention_state: SessionAttentionState::None,
             pending_image_degradation: None,
+            history_total_count: 0,
+            history_earliest_seq: None,
         })
     }
 }

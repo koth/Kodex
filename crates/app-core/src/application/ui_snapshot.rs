@@ -29,6 +29,34 @@ pub enum UiSnapshotUpdate {
     Patch(UiSnapshotPatch),
 }
 
+/// Metadata-only copy of a file change: keeps path/kind/line counts/timestamp
+/// but drops the embedded file contents. Snapshots and patches never carry
+/// diff text — diff views fetch `old_text`/`new_text` on demand instead, so
+/// renderer memory and per-patch serialization stop scaling with edit volume.
+fn metadata_only_change(change: &SessionFileChange) -> SessionFileChange {
+    SessionFileChange {
+        path: change.path.clone(),
+        change_type: change.change_type.clone(),
+        old_text: None,
+        new_text: String::new(),
+        added_lines: change.added_lines,
+        removed_lines: change.removed_lines,
+        timestamp: change.timestamp.clone(),
+    }
+}
+
+fn metadata_only_turn_changes(
+    turn_changes: &[workspace_model::TurnFileChanges],
+) -> Vec<workspace_model::TurnFileChanges> {
+    turn_changes
+        .iter()
+        .map(|turn| workspace_model::TurnFileChanges {
+            message_id: turn.message_id,
+            changes: turn.changes.iter().map(metadata_only_change).collect(),
+        })
+        .collect()
+}
+
 fn lightweight_tool_invocation(
     tool: &ToolInvocation,
     created_change_paths: &HashSet<String>,
@@ -309,21 +337,20 @@ impl Application {
                 .ui
                 .session_changes
                 .iter()
-                .map(|change| SessionFileChange {
-                    path: change.path.clone(),
-                    change_type: change.change_type.clone(),
-                    old_text: None,
-                    new_text: String::new(),
-                    added_lines: change.added_lines,
-                    removed_lines: change.removed_lines,
-                    timestamp: change.timestamp.clone(),
-                })
+                .map(metadata_only_change)
                 .collect(),
-            review_changes: self.ui.review_changes.clone(),
-            turn_changes: self.ui.turn_changes.clone(),
+            review_changes: self
+                .ui
+                .review_changes
+                .iter()
+                .map(metadata_only_change)
+                .collect(),
+            turn_changes: metadata_only_turn_changes(&self.ui.turn_changes),
             thinking_status: self.ui.thinking_status.clone(),
             usage: self.ui.usage.clone(),
             pending_steers: self.ui.pending_steers.clone(),
+            history_total: self.history_total_count,
+            history_earliest_seq: self.history_earliest_seq,
         }
     }
 
@@ -450,18 +477,15 @@ impl Application {
                 .ui
                 .session_changes
                 .iter()
-                .map(|change| SessionFileChange {
-                    path: change.path.clone(),
-                    change_type: change.change_type.clone(),
-                    old_text: None,
-                    new_text: String::new(),
-                    added_lines: change.added_lines,
-                    removed_lines: change.removed_lines,
-                    timestamp: change.timestamp.clone(),
-                })
+                .map(metadata_only_change)
                 .collect(),
-            review_changes: self.ui.review_changes.clone(),
-            turn_changes: self.ui.turn_changes.clone(),
+            review_changes: self
+                .ui
+                .review_changes
+                .iter()
+                .map(metadata_only_change)
+                .collect(),
+            turn_changes: metadata_only_turn_changes(&self.ui.turn_changes),
             thinking_status: self.ui.thinking_status.clone(),
             usage: self.ui.usage.clone(),
             pending_steers: self.ui.pending_steers.clone(),

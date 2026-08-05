@@ -29,6 +29,7 @@ mod prompting;
 mod repository;
 mod sessions;
 mod shell_bridge;
+pub use shell_bridge::HistoryPage;
 #[cfg(test)]
 mod tests;
 mod titles;
@@ -113,6 +114,19 @@ impl ModelSelection {
     }
 }
 
+/// Number of most-recent timeline entries loaded into memory when a stored
+/// session is opened. Older history pages in on demand via
+/// `load_history_before`. Sized comfortably above the frontend's initial
+/// render window so light upward scrolling doesn't immediately hit the store.
+pub(crate) const SESSION_HISTORY_WINDOW: usize = 200;
+
+/// Minimum number of completed turns the initial history window must span.
+/// The turn-aligned loader extends the window backwards to this many turn
+/// boundaries so a reopened long session always starts on a turn boundary —
+/// guaranteeing the visible window contains full, collapsible turns instead
+/// of the tail of one giant in-progress turn.
+pub(crate) const SESSION_HISTORY_WINDOW_MIN_TURNS: usize = 3;
+
 struct SessionRuntime {
     local_session_id: uuid::Uuid,
     ui: workspace_model::UiSnapshot,
@@ -141,6 +155,10 @@ struct SessionRuntime {
     runtime_status: SessionRuntimeStatus,
     attention_state: SessionAttentionState,
     pending_image_degradation: Option<PendingImageDegradation>,
+    /// Total timeline entries stored for this session (windowed history).
+    history_total_count: i64,
+    /// Smallest loaded seq; `None` when the whole history fits in the window.
+    history_earliest_seq: Option<i64>,
 }
 
 impl SessionRuntime {
@@ -265,6 +283,10 @@ pub struct Application {
     pending_tool_write_detections: Vec<PendingToolWriteDetection>,
     inline_think_filter: InlineThinkFilter,
     pending_image_degradation: Option<PendingImageDegradation>,
+    /// Total timeline entries stored for this session (windowed history).
+    pub(crate) history_total_count: i64,
+    /// Smallest loaded seq; `None` when the whole history fits in the window.
+    pub(crate) history_earliest_seq: Option<i64>,
 }
 
 fn current_timestamp() -> String {

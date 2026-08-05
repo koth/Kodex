@@ -1,4 +1,4 @@
-import { Fragment, useRef, useEffect, useLayoutEffect, useMemo, useState, memo } from "react";
+import { Fragment, useRef, useEffect, useLayoutEffect, useMemo, useState, useCallback, memo } from "react";
 import type { FormEvent } from "react";
 import { createPortal } from "react-dom";
 import { convertFileSrc, isTauri } from "@tauri-apps/api/core";
@@ -69,6 +69,8 @@ interface Props {
   onCancelTurn?: () => Promise<void> | void;
   onStopTool?: (toolCallId: string) => Promise<void> | void;
   onFilePathClick?: (filePath: string, lineNumber?: number) => void;
+  /** Page older history from the backend when the local window is exhausted. */
+  onLoadOlderHistory?: (limit?: number) => Promise<boolean>;
 }
 
 export interface TimelineTurnChangeSet {
@@ -377,7 +379,7 @@ const MessageRow = memo(function MessageRow({
     // prompts while still showing the instruction text inline in the timeline.
     if (isSteer) {
       return (
-        <div key={id} className="msg msg-steer" role="note" aria-label="追加指令">
+        <div key={id} className="msg msg-steer" role="note" aria-label="追加指令" data-nav-user-id={id}>
           <span className="msg-steer-badge">追加指令</span>
           <span className="msg-steer-body">
             <UserMessageText text={text || body} />
@@ -389,7 +391,7 @@ const MessageRow = memo(function MessageRow({
       const normalizedBody = normalizeUserMessageText(body).trim();
       const normalizedDraft = normalizeUserMessageText(draft).trim();
       return (
-        <div key={id} className="msg msg-user msg-user-editing">
+        <div key={id} className="msg msg-user msg-user-editing" data-nav-user-id={id}>
           <form className="msg-user-edit" onSubmit={handleRetrySubmit}>
             <textarea
               className="msg-user-edit-textarea"
@@ -427,7 +429,7 @@ const MessageRow = memo(function MessageRow({
 
     if (images.length > 0) {
       return (
-        <div key={id} className="msg msg-user msg-user-stacked">
+        <div key={id} className="msg msg-user msg-user-stacked" data-nav-user-id={id}>
           <UserImageStrip images={images} />
           {text.trim().length > 0 && (
             <div className="msg-user-bubble">
@@ -442,7 +444,7 @@ const MessageRow = memo(function MessageRow({
     }
 
     const messageBubble = (
-      <div key={id} className="msg msg-user">
+      <div key={id} className="msg msg-user" data-nav-user-id={id}>
         <span className="msg-prefix msg-prefix-user">{"\u203A"} </span>
         <div className="msg-content msg-content-user">
           <UserMessageText text={body} />
@@ -601,6 +603,13 @@ function UserMessageText({ text }: { text: string }) {
 
 function normalizeUserMessageText(text: string) {
   return text.replace(/\r\n?/g, "\n");
+}
+
+/** 导航预览卡的首部摘要：压平空白后截取前 maxLength 个字符。 */
+function excerptPreviewText(text: string, maxLength = 60) {
+  const flattened = text.replace(/\s+/g, " ").trim();
+  if (flattened.length <= maxLength) return flattened;
+  return `${flattened.slice(0, maxLength)}…`;
 }
 
 function splitUserMessageBody(body: string): { text: string; images: UserMessageImage[] } {
@@ -839,6 +848,7 @@ export function ConversationTimeline({
   onCancelTurn,
   onStopTool,
   onFilePathClick,
+  onLoadOlderHistory,
 }: Props) {
   // Remote workspaces store a synthetic ssh:// key in workspace.root. File
   // link resolution/open needs the real remote filesystem root instead.
@@ -861,11 +871,18 @@ export function ConversationTimeline({
   const scrollbarDragging = useRef(false);
   const visibleSessionId = useRef(snapshot.session.id);
   const [visibleCount, setVisibleCount] = useState(INITIAL_TIMELINE_WINDOW);
+  const [loadingOlder, setLoadingOlder] = useState(false);
+  const mountedRef = useRef(true);
   const [expandedCollapseGroups, setExpandedCollapseGroups] = useState<Set<string>>(
     () => new Set(),
   );
   const activeTurnFallbackStart = useRef<{ key: string; startedAtMs: number } | null>(null);
   const [durationNowMs, setDurationNowMs] = useState(() => Date.now());
+  const [navHoverId, setNavHoverId] = useState<string | null>(null);
+  const [navActiveId, setNavActiveId] = useState<string | null>(null);
+  // 滚动时同步高亮当前轮次的回调，由下面的 effect 每次渲染更新，
+  // handleScroll（闭包于挂载时）通过 ref 调用以拿到最新的导航数据。
+  const syncNavActiveOnScrollRef = useRef<(() => void) | null>(null);
 
   const scrollToBottom = () => {
     const el = scrollRef.current;
@@ -925,7 +942,15 @@ export function ConversationTimeline({
     // stick-to-bottom writes, layout reflow, and pointer clicks must not.
     // Unpin immediately on the gesture (not on the later scroll event) so a
     // concurrent parent re-render cannot snap us back mid-gesture.
+    //
+    // Inertia/smooth scrolling means the wheel event fires *before* the scroll
+    // position actually leaves the near-bottom zone. A light flick may only
+    // move a few px, so the very next `scroll` event can still be within the
+    // sticky threshold and would wrongly re-pin (yanking the user back down).
+    // Suppress re-pinning for a short window after any upward gesture.
+    let lastUpwardIntentAt = 0;
     const unpinFromUser = () => {
+      lastUpwardIntentAt = performance.now();
       manualScrollIntent.current = true;
       userScrolledUp.current = true;
     };
@@ -973,12 +998,20 @@ export function ConversationTimeline({
       }
     };
     const handleScroll = () => {
+      // 滚动时同步左侧轮次导航的高亮到当前可视位置对应的轮次。
+      syncNavActiveOnScrollRef.current?.();
       if (scrollbarDragging.current) {
         // 拖拽途中的位置变化全部忽略，由松手时统一裁决，
         // 避免 thumb 掠过底部时 userScrolledUp 被意外清零。
         return;
       }
       if (isNearBottom(el)) {
+        // Within the upward-gesture grace window the user is scrolling up but
+        // hasn't cleared the threshold yet — don't re-pin to the bottom.
+        if (performance.now() - lastUpwardIntentAt < 400) {
+          userScrolledUp.current = true;
+          return;
+        }
         userScrolledUp.current = false;
         manualScrollIntent.current = false;
         return;
@@ -1000,6 +1033,9 @@ export function ConversationTimeline({
     el.addEventListener("pointerdown", markScrollbarDragIntent);
     el.addEventListener("keydown", markKeyboardIntent);
     el.addEventListener("scroll", handleScroll, { passive: true });
+    el.addEventListener("pointerup", clearScrollbarDrag);
+    el.addEventListener("pointercancel", clearScrollbarDrag);
+    el.addEventListener("lostpointercapture", clearScrollbarDrag);
     window.addEventListener("pointerup", clearScrollbarDrag);
     window.addEventListener("pointercancel", clearScrollbarDrag);
     return () => {
@@ -1009,6 +1045,9 @@ export function ConversationTimeline({
       el.removeEventListener("pointerdown", markScrollbarDragIntent);
       el.removeEventListener("keydown", markKeyboardIntent);
       el.removeEventListener("scroll", handleScroll);
+      el.removeEventListener("pointerup", clearScrollbarDrag);
+      el.removeEventListener("pointercancel", clearScrollbarDrag);
+      el.removeEventListener("lostpointercapture", clearScrollbarDrag);
       window.removeEventListener("pointerup", clearScrollbarDrag);
       window.removeEventListener("pointercancel", clearScrollbarDrag);
       if (timelineScrollController?.stickToBottom === scrollToBottom) {
@@ -1079,6 +1118,13 @@ export function ConversationTimeline({
     manualScrollIntent.current = false;
     stickCorrectionActive.current = false;
   }, [snapshot.session.id]);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
 
   const effectiveVisibleCount =
     visibleSessionId.current === snapshot.session.id
@@ -1181,6 +1227,122 @@ export function ConversationTimeline({
     }
     return map;
   }, [snapshot.messages, visibleMessageIds]);
+
+  // 对话导航（左侧虚线刻度）：覆盖全部历史用户消息（不含追加指令），
+  // 不限于当前可视窗口；超出窗口的轮次点击时先扩大窗口再跳转。
+  // 预览文本截取用户消息首部与其后第一条助手回复的首部。
+  const userNavEntries = useMemo(() => {
+    const entries: {
+      id: string;
+      timelineIndex: number;
+      userExcerpt: string;
+      replyExcerpt: string;
+    }[] = [];
+    for (let i = 0; i < snapshot.timeline.length; i += 1) {
+      const item = snapshot.timeline[i];
+      if (typeof item !== "object" || !("Message" in item)) continue;
+      const msg = allMessagesById.get(item.Message);
+      if (!msg || msg.role !== "User" || msg.is_steer) continue;
+      const { text } = splitUserMessageBody(msg.body);
+      entries.push({
+        id: msg.id,
+        timelineIndex: i,
+        userExcerpt: excerptPreviewText(text || msg.body),
+        replyExcerpt: "",
+      });
+    }
+    for (let i = 0; i < entries.length; i += 1) {
+      const searchEnd =
+        i + 1 < entries.length ? entries[i + 1].timelineIndex : snapshot.timeline.length;
+      for (let j = entries[i].timelineIndex + 1; j < searchEnd; j += 1) {
+        const item = snapshot.timeline[j];
+        if (typeof item !== "object" || !("Message" in item)) continue;
+        const candidate = allMessagesById.get(item.Message);
+        if (candidate?.role === "Assistant" && candidate.body.trim().length > 0) {
+          entries[i].replyExcerpt = excerptPreviewText(candidate.body);
+          break;
+        }
+      }
+    }
+    return entries;
+  }, [snapshot.timeline, allMessagesById]);
+
+  useEffect(() => {
+    if (userNavEntries.length === 0) return;
+    if (userNavEntries.some((entry) => entry.id === navActiveId)) return;
+    setNavActiveId(userNavEntries[userNavEntries.length - 1].id);
+  }, [userNavEntries, navActiveId]);
+
+  const navHoverEntry = navHoverId
+    ? userNavEntries.find((entry) => entry.id === navHoverId) ?? null
+    : null;
+
+  // 滚动时把导航高亮同步到当前可视位置对应的轮次：
+  // 取最后一个锚点不高于可视区中线的用户消息刻度；若所有刻度都在中线之下
+  // （还在第一段之前的顶部），取第一个；都在中线之上（滚到底）取最后一个。
+  useEffect(() => {
+    syncNavActiveOnScrollRef.current = () => {
+      const scroller = scrollRef.current;
+      if (!scroller || userNavEntries.length === 0) return;
+      const midY = scroller.getBoundingClientRect().top + scroller.clientHeight * 0.4;
+      let currentId: string | null = null;
+      for (const entry of userNavEntries) {
+        const node = scroller.querySelector<HTMLElement>(
+          `[data-nav-user-id="${entry.id}"]`,
+        );
+        if (!node) continue; // 该轮次尚未渲染（在可视窗口外），跳过
+        if (node.getBoundingClientRect().top <= midY) {
+          currentId = entry.id;
+        } else {
+          break;
+        }
+      }
+      // 顶部没有任何渲染锚点在中线之上时，高亮第一个已渲染轮次。
+      if (currentId === null) {
+        const firstVisible = userNavEntries.find((entry) =>
+          scroller.querySelector(`[data-nav-user-id="${entry.id}"]`),
+        );
+        currentId = firstVisible?.id ?? userNavEntries[userNavEntries.length - 1].id;
+      }
+      setNavActiveId((prev) => (prev === currentId ? prev : currentId));
+    };
+  });
+
+  // 导航数据或可视渲染范围变化后（扩窗跳转、流式新增轮次）同步一次高亮。
+  useEffect(() => {
+    const frame = requestAnimationFrame(() => {
+      syncNavActiveOnScrollRef.current?.();
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [userNavEntries, visibleCount]);
+
+  const handleUserNavJump = useCallback((messageId: string) => {
+    const scroller = scrollRef.current;
+    if (!scroller) return;
+    // 视为一次手动滚动：取消吸底，让跳转后的位置稳定停留。
+    userScrolledUp.current = true;
+    manualScrollIntent.current = true;
+    const scrollToTarget = () => {
+      const target = scroller.querySelector<HTMLElement>(
+        `[data-nav-user-id="${messageId}"]`,
+      );
+      if (!target) return;
+      scroller.scrollTop = Math.max(0, target.offsetTop - scroller.clientHeight * 0.2);
+    };
+    const target = scroller.querySelector<HTMLElement>(
+      `[data-nav-user-id="${messageId}"]`,
+    );
+    if (target) {
+      scrollToTarget();
+    } else {
+      // 目标在当前可视窗口之外：扩窗渲染后等 React 提交 + 布局再跳。
+      setVisibleCount(snapshot.timeline.length);
+      requestAnimationFrame(() => {
+        requestAnimationFrame(scrollToTarget);
+      });
+    }
+    setNavActiveId(messageId);
+  }, [snapshot.timeline.length]);
 
   const displayTurnChangeSetsByMessageId = useMemo(
     () =>
@@ -1364,8 +1526,9 @@ export function ConversationTimeline({
   };
 
   return (
-    <div className="timeline-scroll" ref={scrollRef}>
-      <div className="timeline-items" ref={itemsRef}>
+    <div className="timeline-host">
+      <div className="timeline-scroll" ref={scrollRef}>
+        <div className="timeline-items" ref={itemsRef}>
         {hiddenCount > 0 && (
           <button
             className="timeline-load-older"
@@ -1377,6 +1540,28 @@ export function ConversationTimeline({
             }
           >
             显示更早 {Math.min(hiddenCount, TIMELINE_WINDOW_STEP)} 条
+          </button>
+        )}
+        {hiddenCount === 0 && snapshot.history_earliest_seq != null && onLoadOlderHistory && (
+          <button
+            className="timeline-load-older"
+            type="button"
+            disabled={loadingOlder}
+            onClick={async () => {
+              setLoadingOlder(true);
+              try {
+                const loaded = await onLoadOlderHistory(200);
+                if (!mountedRef.current) return;
+                if (loaded) {
+                  // Show the newly prepended page immediately.
+                  setVisibleCount((count) => count + TIMELINE_WINDOW_STEP);
+                }
+              } finally {
+                if (mountedRef.current) setLoadingOlder(false);
+              }
+            }}
+          >
+            {loadingOlder ? "正在加载更早历史…" : "加载更早历史"}
           </button>
         )}
         {visibleTimeline.map((item, offset) => {
@@ -1441,6 +1626,58 @@ export function ConversationTimeline({
         )}
         <div className="timeline-bottom-sentinel" ref={bottomSentinelRef} aria-hidden="true" />
       </div>
+      </div>
+      {userNavEntries.length > 0 && (
+        // 导航作为 timeline-host 的同级覆盖层，absolute 相对非滚动的面板定位，
+        // 与滚动完全解耦——无论滚到哪里都钉在可视区左侧垂直居中。
+        <nav
+          className="timeline-user-nav"
+          aria-label="对话导航"
+          onMouseLeave={() => setNavHoverId(null)}
+        >
+          {userNavEntries.map((entry, index) => {
+            const hoverIndex = userNavEntries.findIndex((item) => item.id === navHoverId);
+            // hover 的刻度最长，向两侧按距离线性衰减（参考 Cursor 的轮次导航）。
+            const width =
+              hoverIndex < 0
+                ? undefined
+                : Math.max(8, 22 - Math.abs(index - hoverIndex) * 3);
+            return (
+              <button
+                key={entry.id}
+                type="button"
+                className={`timeline-user-nav-tick ${entry.id === navActiveId ? "is-active" : ""} ${entry.id === navHoverId ? "is-hovered" : ""}`}
+                style={width !== undefined ? ({ "--nav-tick-w": width } as React.CSSProperties) : undefined}
+                aria-label={`跳转到：${entry.userExcerpt}`}
+                onMouseEnter={() => setNavHoverId(entry.id)}
+                onFocus={() => setNavHoverId(entry.id)}
+                onBlur={() => setNavHoverId(null)}
+                onClick={() => handleUserNavJump(entry.id)}
+              />
+            );
+          })}
+          {navHoverEntry && (
+            (() => {
+              const hoverIndex = userNavEntries.findIndex((item) => item.id === navHoverId);
+              const total = userNavEntries.length;
+              // 预览卡垂直跟随被 hover 的刻度：按其在列中的比例定位。
+              const ratio = total <= 1 ? 0.5 : hoverIndex / (total - 1);
+              return (
+                <div
+                  className="timeline-user-nav-preview"
+                  role="tooltip"
+                  style={{ top: `${ratio * 100}%` }}
+                >
+              <div className="timeline-user-nav-preview-user">{navHoverEntry.userExcerpt}</div>
+              {navHoverEntry.replyExcerpt && (
+                <div className="timeline-user-nav-preview-reply">{navHoverEntry.replyExcerpt}</div>
+              )}
+                </div>
+              );
+            })()
+          )}
+        </nav>
+      )}
     </div>
   );
 }

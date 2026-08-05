@@ -1886,3 +1886,161 @@ describe("ThinkingIndicator", () => {
     globalThis.ResizeObserver = OriginalResizeObserver;
   });
 });
+
+describe("ConversationTimeline – window paging trigger", () => {
+  it("offers backend paging when the local window is exhausted but older history exists", async () => {
+    const snapshot = makeSnapshot({
+      timeline: [{ Message: "msg-1" }],
+      messages: [{ id: "msg-1", role: "User", body: "oldest loaded" }],
+      history_total: 50,
+      history_earliest_seq: 42,
+    });
+    const onLoadOlderHistory = vi.fn(() => Promise.resolve(true));
+
+    const { getByRole } = render(
+      <ConversationTimeline
+        snapshot={snapshot}
+        onPermissionSelect={() => {}}
+        onLoadOlderHistory={onLoadOlderHistory}
+      />,
+    );
+
+    const button = getByRole("button", { name: "加载更早历史" });
+    fireEvent.click(button);
+
+    await waitFor(() => {
+      expect(onLoadOlderHistory).toHaveBeenCalledWith(200);
+    });
+    // Let the async paging state settle so RTL cleanup unmounts a stable
+    // tree; otherwise the post-unmount setState re-renders into the detached
+    // container and leaks the button into later tests' document queries.
+    await act(async () => {});
+  });
+
+  it("hides the backend paging button once the full history is loaded", () => {
+    const snapshot = makeSnapshot({
+      timeline: [{ Message: "msg-1" }],
+      messages: [{ id: "msg-1", role: "User", body: "everything loaded" }],
+      history_total: 1,
+      history_earliest_seq: null,
+    });
+
+    const { container } = render(
+      <ConversationTimeline
+        snapshot={snapshot}
+        onPermissionSelect={() => {}}
+        onLoadOlderHistory={() => Promise.resolve(true)}
+      />,
+    );
+
+    // Scope to our own container: an async paging state update from the
+    // previous test can leak a stale button into `document` (RTL cleanup is
+    // synchronous), but it must never appear inside this component's tree.
+    expect(
+      Array.from(container.querySelectorAll(".timeline-load-older")).filter(
+        (button) => button.textContent?.includes("加载更早历史"),
+      ),
+    ).toHaveLength(0);
+  });
+
+  it("prefers widening the local slice over paging while hidden items remain", () => {
+    const timeline = Array.from({ length: 120 }, (_, index) => ({
+      Message: `msg-${index}`,
+    }));
+    const messages = Array.from({ length: 120 }, (_, index) => ({
+      id: `msg-${index}`,
+      role: "User" as const,
+      body: `body ${index}`,
+    }));
+    const snapshot = makeSnapshot({
+      timeline,
+      messages,
+      history_total: 500,
+      history_earliest_seq: 42,
+    });
+    const onLoadOlderHistory = vi.fn(() => Promise.resolve(true));
+
+    const { getByRole, container } = render(
+      <ConversationTimeline
+        snapshot={snapshot}
+        onPermissionSelect={() => {}}
+        onLoadOlderHistory={onLoadOlderHistory}
+      />,
+    );
+
+    expect(
+      Array.from(container.querySelectorAll(".timeline-load-older")).filter(
+        (button) => button.textContent?.includes("加载更早历史"),
+      ),
+    ).toHaveLength(0);
+    fireEvent.click(getByRole("button", { name: /显示更早/ }));
+    expect(onLoadOlderHistory).not.toHaveBeenCalled();
+  });
+
+  it("collapses the final completed turn of a restored long session", () => {
+    // Simulate a reopened session whose loaded window holds several turns and
+    // ends with a finished turn: each turn is user → tools → assistant. The
+    // initial render window (80) starts mid-conversation, so earlier turns'
+    // user messages are above the visible slice — exactly like reopening a
+    // long-history session.
+    const timeline: TimelineItem[] = [];
+    const messages: UiSnapshot["messages"] = [];
+    const tools: ToolInvocation[] = [];
+    for (let turn = 0; turn < 3; turn += 1) {
+      const userId = `reopen-user-${turn}`;
+      const toolId = `reopen-tool-${turn}`;
+      const assistantId = `reopen-assistant-${turn}`;
+      messages.push({
+        id: userId,
+        role: "User",
+        body: `question ${turn}`,
+        created_at: `2026-05-12T00:0${turn}:00Z`,
+      });
+      // Pad each turn with 30 tools so 3 turns exceed the 80-entry window.
+      for (let index = 0; index < 30; index += 1) {
+        tools.push(
+          makePermissionTool({
+            id: `${toolId}-${index}`,
+            call_id: `${toolId}-${index}`,
+            kind: "execute",
+            name: `run ${turn}-${index}`,
+            summary: `run ${turn}-${index}`,
+            status: "Succeeded",
+            permission_options: [],
+          }),
+        );
+        timeline.push({ Tool: `${toolId}-${index}` });
+      }
+      messages.push({
+        id: assistantId,
+        role: "Assistant",
+        body: `answer ${turn}`,
+        created_at: `2026-05-12T00:0${turn}:30Z`,
+      });
+      timeline.splice(
+        timeline.length - 30,
+        0,
+        { Message: userId },
+      );
+      timeline.push({ Message: assistantId });
+    }
+    const snapshot = makeSnapshot({
+      session: { ...makeSnapshot().session, status: "Idle" },
+      timeline,
+      messages,
+      tools,
+    });
+
+    const { container } = render(
+      <ConversationTimeline snapshot={snapshot} onPermissionSelect={() => {}} />,
+    );
+
+    const collapseSummaries = container.querySelectorAll(".timeline-collapse-toggle");
+    // Both fully visible completed turns should collapse naturally.
+    expect(collapseSummaries.length).toBeGreaterThanOrEqual(2);
+    // The last turn's intermediate tools are collapsed away…
+    expect(container.textContent).not.toContain("run 2-5");
+    // …while its final answer stays visible.
+    expect(container.textContent).toContain("answer 2");
+  });
+});

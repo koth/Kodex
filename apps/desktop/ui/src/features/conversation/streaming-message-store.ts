@@ -45,6 +45,21 @@ export function getStreamingMessageBody(id: string) {
   return states.get(id)?.body ?? null;
 }
 
+/** Drop every cached streaming body. Called on session switch so long-lived
+ *  sessions don't accumulate every historical message body in the store
+ *  (the map otherwise only ever grows). */
+export function clearStreamingMessageBodies() {
+  for (const state of states.values()) {
+    if (state.flushTimer != null) {
+      window.clearTimeout(state.flushTimer);
+      state.flushTimer = null;
+    }
+    state.pending = "";
+    state.listeners.clear();
+  }
+  states.clear();
+}
+
 /** Flush any coalesced pending appends so readers see the latest body. */
 export function flushStreamingMessageBodies() {
   for (const state of states.values()) {

@@ -1351,6 +1351,15 @@ pub struct UiSnapshot {
     /// frontend until the agent starts responding to them.
     #[serde(default)]
     pub pending_steers: Vec<PendingSteer>,
+    /// Total timeline entries (messages + tools) stored for the session. When
+    /// greater than the number of loaded entries, older history is available
+    /// to page in on demand. Defaults to 0 for backward compatibility.
+    #[serde(default)]
+    pub history_total: i64,
+    /// Smallest loaded timeline seq. `None` when the whole history fits in the
+    /// loaded window (nothing older to page).
+    #[serde(default)]
+    pub history_earliest_seq: Option<i64>,
 }
 
 fn default_true() -> bool {

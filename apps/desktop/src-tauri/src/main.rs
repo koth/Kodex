@@ -90,6 +90,7 @@ fn main() {
         })
         .invoke_handler(tauri::generate_handler![
             commands::session::session_get_state,
+            commands::session::session_get_revision,
             commands::session::session_send_prompt,
             commands::session::session_retry_user_message,
             commands::session::session_set_config_control,
@@ -113,6 +114,9 @@ fn main() {
             commands::session::session_list_change_set_files,
             commands::session::session_get_change_set_file_diff,
             commands::session::session_get_file_diff,
+            commands::session::session_get_turn_file_diff,
+            commands::session::session_load_history_before,
+            commands::session::session_get_tool_detail,
             commands::session::session_reconnect,
             commands::git::git_status,
             commands::git::git_stage,

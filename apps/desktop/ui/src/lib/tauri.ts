@@ -70,6 +70,13 @@ export async function sessionGetState(): Promise<UiSnapshot> {
   return invoke<UiSnapshot>("session_get_state");
 }
 
+/** Lightweight revision probe: avoids cloning/serializing the whole snapshot
+ *  on the periodic self-heal poll. The caller only falls back to
+ *  `sessionGetState()` when the returned revision/session actually changed. */
+export async function sessionGetRevision(): Promise<[string, number]> {
+  return invoke<[string, number]>("session_get_revision");
+}
+
 export async function sessionSendPrompt(
   prompt: UserPromptContent[],
 ): Promise<void> {
@@ -425,6 +432,42 @@ export async function sessionGetFileDiff(
   path: string,
 ): Promise<SessionFileChange> {
   return invoke<SessionFileChange>("session_get_file_diff", { path });
+}
+
+export async function sessionGetTurnFileDiff(
+  messageId: string,
+  path: string,
+): Promise<SessionFileChange> {
+  return invoke<SessionFileChange>("session_get_turn_file_diff", {
+    messageId,
+    path,
+  });
+}
+
+export interface HistoryPage {
+  messages: UiSnapshot["messages"];
+  tools: UiSnapshot["tools"];
+  timeline: UiSnapshot["timeline"];
+  earliest_seq: number | null;
+  has_more: boolean;
+}
+
+export async function sessionLoadHistoryBefore(
+  beforeSeq: number,
+  limit: number,
+): Promise<HistoryPage> {
+  return invoke<HistoryPage>("session_load_history_before", {
+    beforeSeq,
+    limit,
+  });
+}
+
+export async function sessionGetToolDetail(
+  toolId: string,
+): Promise<UiSnapshot["tools"][number]> {
+  return invoke<UiSnapshot["tools"][number]>("session_get_tool_detail", {
+    toolId,
+  });
 }
 
 export async function fsListDir(path: string): Promise<FileEntry[]> {

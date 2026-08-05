@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import type { FileChangeRecord, SessionFileChange, TabDescriptor } from "../../types";
-import { editorSaveFile, sessionGetChangeSetFileDiff } from "../../lib/tauri";
+import { editorSaveFile, sessionGetChangeSetFileDiff, sessionGetTurnFileDiff } from "../../lib/tauri";
 import {
   disposeModel,
   getModelBaseVersion,
@@ -111,6 +111,7 @@ export function useWorkbenchTabs({ onAfterEditorSave }: UseWorkbenchTabsArgs) {
       change?: SessionFileChange,
       changeSetId?: string,
       record?: FileChangeRecord,
+      messageId?: string,
     ) => {
       const tabId = changeSetId
         ? `diff:${changeSetId}:${path}`
@@ -130,6 +131,7 @@ export function useWorkbenchTabs({ onAfterEditorSave }: UseWorkbenchTabsArgs) {
             diffSource: source,
             changeSetId,
             diffChange: change,
+            diffMessageId: messageId,
             diffRecord: record,
           },
         ];
@@ -282,7 +284,24 @@ const handleOpenEditorTab = useCallback((filePath: string) => {
       };
     }
     if (activeTab.diffChange && !activeTab.changeSetId) {
-      setResolvedDiffChange(activeTab.diffChange);
+      const embedded = activeTab.diffChange;
+      // Snapshots strip diff text (old_text/new_text) to bound renderer
+      // memory. If the embedded change still carries text, render it directly;
+      // otherwise fetch the full diff on demand.
+      const hasText = Boolean(embedded.old_text) || Boolean(embedded.new_text);
+      if (hasText || !activeTab.diffMessageId) {
+        setResolvedDiffChange(embedded);
+        return () => {
+          cancelled = true;
+        };
+      }
+      sessionGetTurnFileDiff(activeTab.diffMessageId, filePath)
+        .then((change) => {
+          if (!cancelled) setResolvedDiffChange(change);
+        })
+        .catch(() => {
+          if (!cancelled) setResolvedDiffChange(embedded);
+        });
       return () => {
         cancelled = true;
       };
@@ -307,7 +326,7 @@ const handleOpenEditorTab = useCallback((filePath: string) => {
     return () => {
       cancelled = true;
     };
-  }, [isDiffTab, activeTab.filePath, activeTab.diffChange, activeTab.diffRecord, activeTab.changeSetId]);
+  }, [isDiffTab, activeTab.filePath, activeTab.diffChange, activeTab.diffMessageId, activeTab.diffRecord, activeTab.changeSetId]);
 
   const displayTabs = useMemo(
     () => tabs.map((tab) => (tab.type === "conversation" ? { ...tab, label: "Chat" } : tab)),

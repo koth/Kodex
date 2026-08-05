@@ -206,14 +206,29 @@
   flex-shrink: 0;
   width: 14px;
   text-align: center;
-  font-size: 10px;
-  color: var(--text-muted);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-soft);
 }
 
 .filetree-inline .filetree-chevron {
   width: 16px;
-  color: var(--text-soft);
-  font-size: 12px;
+}
+
+.filetree-chevron-icon {
+  width: 14px;
+  height: 14px;
+  fill: none;
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 1.8;
+  transition: transform 0.12s ease;
+}
+
+.filetree-chevron.is-expanded .filetree-chevron-icon {
+  transform: rotate(90deg);
 }
 
 .filetree-icon {
@@ -226,15 +241,6 @@
 .filetree-inline .filetree-icon {
   width: 15px;
   height: 15px;
-}
-
-.filetree-folder-icon {
-  fill: none;
-  stroke: currentColor;
-  stroke-linecap: round;
-  stroke-linejoin: round;
-  stroke-width: 1.75;
-  color: var(--text-soft);
 }
 
 .filetree-name {
@@ -389,8 +395,7 @@
 }
 
 :root[data-theme="light"] .filetree-chevron,
-:root[data-theme="light"] .filetree-inline .filetree-chevron,
-:root[data-theme="light"] .filetree-folder-icon {
+:root[data-theme="light"] .filetree-inline .filetree-chevron {
   color: #70767d;
 }
 

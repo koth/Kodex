@@ -67,6 +67,20 @@ pub struct SessionStore {
     workspace_root: String,
 }
 
+/// A bounded slice of a session's timeline history, plus the metadata needed
+/// to page older entries on demand.
+#[derive(Debug, Default)]
+pub struct SessionHistoryWindow {
+    pub messages: Vec<ChatMessage>,
+    pub tools: Vec<ToolInvocation>,
+    pub timeline: Vec<TimelineItem>,
+    /// Total timeline entries (messages + tools) stored for the session.
+    pub total_count: i64,
+    /// Smallest loaded seq. `None` when the whole history fits in the window
+    /// (nothing older to page).
+    pub earliest_seq: Option<i64>,
+}
+
 impl SessionStore {
     /// Open (or create) the global session database at `{app_data_root}/sessions/sessions.db`.
     pub fn open(app_data_root: &Path, workspace_root: &Path) -> Result<Self> {
@@ -1462,6 +1476,386 @@ impl SessionStore {
             }
         }
 
+        Ok((messages, tools, timeline))
+    }
+
+    /// Windowed history load: returns only the most recent `limit` timeline
+    /// entries (messages + tools interleaved by `seq`) plus the total entry
+    /// count and the earliest loaded seq. Keeps long sessions from
+    /// materializing their entire history into memory on load; older entries
+    /// are paged in on demand via `load_history_before`.
+    pub fn load_session_window(
+        &self,
+        id: &str,
+        limit: usize,
+    ) -> Result<SessionHistoryWindow> {
+        let total = self.history_entry_count(id)?;
+        let (messages, tools, timeline) = self.load_timeline_entries(id, None, Some(limit))?;
+        let earliest_seq = self.earliest_loaded_seq(id, limit, total)?;
+        Ok(SessionHistoryWindow {
+            messages,
+            tools,
+            timeline,
+            total_count: total,
+            earliest_seq,
+        })
+    }
+
+    /// Turn-aligned windowed history load: loads the most recent `min_entries`
+    /// timeline entries, then extends the window backwards to the start of the
+    /// `min_turns`-th most recent turn (a non-steer user message) so the loaded
+    /// window always begins on a turn boundary. This keeps reopening a long
+    /// session from starting mid-turn, which would leave the visible window
+    /// with no collapsible completed turn (the turn's user prompt, and thus
+    /// its collapse group anchor, would be outside the loaded window).
+    ///
+    /// The final (current) turn is always fully loaded no matter how long it
+    /// is, so its user prompt is always present; a giant in-progress turn can
+    /// therefore exceed `min_entries`, which is intentional — the window is
+    /// bounded by turn count, not raw entry count.
+    pub fn load_session_window_by_turns(
+        &self,
+        id: &str,
+        min_entries: usize,
+        min_turns: usize,
+    ) -> Result<SessionHistoryWindow> {
+        let total = self.history_entry_count(id)?;
+
+        // Find the seq of the user message that opens the `min_turns`-th most
+        // recent turn. The window starts at that turn boundary when doing so
+        // still honours the `min_entries` floor.
+        let boundary_seq = self.turn_boundary_seq(id, min_turns)?;
+
+        let (messages, tools, timeline, earliest_seq) = match boundary_seq {
+            Some(boundary) => {
+                // Load everything from the turn boundary forward (unbounded),
+                // then fall back to `min_entries` if that turn-aligned window
+                // would be smaller than the floor.
+                let (msgs, tls, tln) = self.load_timeline_entries_after(id, boundary)?;
+                if tln.len() >= min_entries {
+                    let earliest = if (tln.len() as i64) < total {
+                        Some(boundary)
+                    } else {
+                        None
+                    };
+                    (msgs, tls, tln, earliest)
+                } else {
+                    // Turn-aligned window is smaller than the floor: keep the
+                    // plain entry-count window so the UI still has enough
+                    // context to render.
+                    let (msgs, tls, tln) =
+                        self.load_timeline_entries(id, None, Some(min_entries))?;
+                    let earliest = self.earliest_loaded_seq(id, min_entries, total)?;
+                    (msgs, tls, tln, earliest)
+                }
+            }
+            None => {
+                // Fewer turns than requested: load everything.
+                let (msgs, tls, tln) = self.load_timeline_entries(id, None, None)?;
+                (msgs, tls, tln, None)
+            }
+        };
+
+        Ok(SessionHistoryWindow {
+            messages,
+            tools,
+            timeline,
+            total_count: total,
+            earliest_seq,
+        })
+    }
+
+    /// Seq of the user message opening the `turns_back`-th most recent turn.
+    /// `turns_back = 1` is the current/last turn. Steers are not turn
+    /// boundaries. Returns `None` when the session has fewer turns.
+    fn turn_boundary_seq(&self, id: &str, turns_back: usize) -> Result<Option<i64>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT seq FROM messages
+             WHERE session_id = ?1 AND role = 'User' AND is_steer = 0
+             ORDER BY seq DESC LIMIT 1 OFFSET ?2",
+        )?;
+        let mut rows = stmt.query(params![id, (turns_back as i64) - 1])?;
+        Ok(rows.next()?.map(|row| row.get(0)).transpose()?)
+    }
+
+    /// Load all timeline entries with `seq >= from_seq`, ascending.
+    fn load_timeline_entries_after(
+        &self,
+        id: &str,
+        from_seq: i64,
+    ) -> Result<(Vec<ChatMessage>, Vec<ToolInvocation>, Vec<TimelineItem>)> {
+        self.load_timeline_entries_from(id, Some(from_seq), None, None)
+    }
+
+    /// Fetch the page of timeline entries strictly before `before_seq`, in
+    /// ascending order, for prepending to the current window. Also returns the
+    /// page's own earliest seq (the next paging cursor) — `None` when empty.
+    pub fn load_history_before(
+        &self,
+        id: &str,
+        before_seq: i64,
+        limit: usize,
+    ) -> Result<(Vec<ChatMessage>, Vec<ToolInvocation>, Vec<TimelineItem>, Option<i64>)> {
+        let (messages, tools, timeline) =
+            self.load_timeline_entries(id, Some(before_seq), Some(limit))?;
+        // Next cursor = smallest seq actually loaded in this page. When the
+        // page is empty there is nothing older.
+        let page_earliest = if timeline.is_empty() {
+            None
+        } else {
+            // The page's earliest loaded seq is the smallest seq >= the true
+            // floor of this page; recompute from the tables for accuracy.
+            self.page_earliest_seq(id, before_seq, limit)?
+        };
+        Ok((messages, tools, timeline, page_earliest))
+    }
+
+    /// Smallest seq among the `limit` entries strictly before `before_seq`.
+    fn page_earliest_seq(
+        &self,
+        id: &str,
+        before_seq: i64,
+        limit: usize,
+    ) -> Result<Option<i64>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT seq FROM (
+               SELECT seq FROM messages WHERE session_id = ?1 AND seq < ?2
+               UNION ALL
+               SELECT seq FROM tool_invocations WHERE session_id = ?1 AND seq < ?2
+             ) ORDER BY seq DESC LIMIT ?3",
+        )?;
+        let seqs = stmt
+            .query_map(params![id, before_seq, limit as i64], |row| {
+                row.get::<_, i64>(0)
+            })?
+            .collect::<rusqlite::Result<Vec<i64>>>()?;
+        Ok(seqs.last().copied())
+    }
+
+    /// Total timeline entries (messages + tools) for a session.
+    pub fn history_entry_count(&self, id: &str) -> Result<i64> {
+        let messages: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM messages WHERE session_id = ?1",
+            params![id],
+            |row| row.get(0),
+        )?;
+        let tools: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM tool_invocations WHERE session_id = ?1",
+            params![id],
+            |row| row.get(0),
+        )?;
+        Ok(messages + tools)
+    }
+
+    /// Fetch one tool invocation's full stored detail (uncapped raw fields +
+    /// diff previews) so expanded tool cards can lazy-load large text.
+    pub fn load_tool_detail(
+        &self,
+        session_id: &str,
+        tool_id: &str,
+    ) -> Result<ToolInvocation> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, call_id, parent_call_id, name, kind, summary, status, raw_input, raw_output, error, diff_paths, diff_previews
+             FROM tool_invocations WHERE session_id = ?1 AND id = ?2",
+        )?;
+        let mut rows = stmt.query(params![session_id, tool_id])?;
+        let row = rows
+            .next()?
+            .ok_or_else(|| rusqlite::Error::QueryReturnedNoRows)?;
+        let id_str: String = row.get(0)?;
+        let diff_paths_json: Option<String> = row.get(10)?;
+        let diff_previews_json: Option<String> = row.get(11)?;
+        let status_str: String = row.get(6)?;
+        let status = match status_str.as_str() {
+            "Pending" => ToolStatus::Pending,
+            "Running" => ToolStatus::Running,
+            "Succeeded" => ToolStatus::Succeeded,
+            "Failed" => ToolStatus::Failed,
+            "Interrupted" => ToolStatus::Interrupted,
+            _ => ToolStatus::Succeeded,
+        };
+        Ok(ToolInvocation {
+            id: Uuid::parse_str(&id_str).unwrap_or_else(|_| Uuid::new_v4()),
+            call_id: row.get(1)?,
+            parent_call_id: row.get(2)?,
+            name: row.get(3)?,
+            kind: row.get(4)?,
+            summary: row.get(5)?,
+            status,
+            is_subagent: false,
+            detail_text: String::new(),
+            logs: Vec::new(),
+            diff_paths: decode_json_vec(diff_paths_json.as_deref()),
+            diff_previews: decode_json_vec(diff_previews_json.as_deref()),
+            raw_input: row.get(7)?,
+            raw_output: row.get(8)?,
+            terminal_output: None,
+            error: row.get(9)?,
+            permission_options: Vec::new(),
+            permission_input: None,
+            permission_decision: None,
+            can_stop: false,
+            stop_kind: None,
+            stop_status: None,
+        })
+    }
+
+    /// Smallest seq among the most recent `limit` entries; `None` when the
+    /// whole history fits within the window (no older entries to page).
+    fn earliest_loaded_seq(&self, id: &str, limit: usize, total: i64) -> Result<Option<i64>> {
+        if total <= limit as i64 {
+            return Ok(None);
+        }
+        let mut stmt = self.conn.prepare(
+            "SELECT seq FROM (
+               SELECT seq FROM messages WHERE session_id = ?1
+               UNION ALL
+               SELECT seq FROM tool_invocations WHERE session_id = ?1
+             ) ORDER BY seq DESC LIMIT ?2",
+        )?;
+        let seqs = stmt
+            .query_map(params![id, limit as i64], |row| row.get::<_, i64>(0))?
+            .collect::<rusqlite::Result<Vec<i64>>>()?;
+        Ok(seqs.last().copied())
+    }
+
+    /// Shared timeline-entry loader. `before_seq` restricts to entries older
+    /// than the cursor; `limit` keeps only the most recent matching entries.
+    fn load_timeline_entries(
+        &self,
+        id: &str,
+        before_seq: Option<i64>,
+        limit: Option<usize>,
+    ) -> Result<(Vec<ChatMessage>, Vec<ToolInvocation>, Vec<TimelineItem>)> {
+        self.load_timeline_entries_from(id, None, before_seq, limit)
+    }
+
+    /// Shared timeline-entry loader. `from_seq` restricts to entries with
+    /// `seq >= from_seq`; `before_seq` restricts to entries older than the
+    /// cursor; `limit` keeps only the most recent matching entries.
+    fn load_timeline_entries_from(
+        &self,
+        id: &str,
+        from_seq: Option<i64>,
+        before_seq: Option<i64>,
+        limit: Option<usize>,
+    ) -> Result<(Vec<ChatMessage>, Vec<ToolInvocation>, Vec<TimelineItem>)> {
+        // Collect (seq, kind, payload) via a union query, then sort ascending.
+        #[derive(Debug)]
+        enum Row {
+            Message(ChatMessage),
+            Tool(ToolInvocation),
+        }
+        let mut rows: Vec<(i64, Row)> = Vec::new();
+
+        {
+            let mut stmt = self.conn.prepare(
+                "SELECT id, role, body, seq, created_at, is_steer FROM messages
+                 WHERE session_id = ?1
+                   AND (?2 IS NULL OR seq < ?2)
+                   AND (?3 IS NULL OR seq >= ?3)
+                 ORDER BY seq DESC",
+            )?;
+            let mapped = stmt.query_map(params![id, before_seq, from_seq], |row| {
+                let id_str: String = row.get(0)?;
+                let role_str: String = row.get(1)?;
+                let role = match role_str.as_str() {
+                    "User" => MessageRole::User,
+                    "Assistant" => MessageRole::Assistant,
+                    _ => MessageRole::System,
+                };
+                Ok((
+                    row.get::<_, i64>(3)?,
+                    Row::Message(ChatMessage {
+                        id: Uuid::parse_str(&id_str).unwrap_or_else(|_| Uuid::new_v4()),
+                        role,
+                        body: row.get(2)?,
+                        created_at: row.get(4)?,
+                        is_steer: row.get::<_, i64>(5)? != 0,
+                    }),
+                ))
+            })?;
+            for row in mapped {
+                rows.push(row?);
+            }
+        }
+
+        {
+            let mut stmt = self.conn.prepare(
+                "SELECT id, call_id, parent_call_id, name, kind, summary, status, raw_input, raw_output, error, diff_paths, diff_previews, seq
+                 FROM tool_invocations WHERE session_id = ?1
+                   AND (?2 IS NULL OR seq < ?2)
+                   AND (?3 IS NULL OR seq >= ?3)
+                 ORDER BY seq DESC",
+            )?;
+            let mapped = stmt.query_map(params![id, before_seq, from_seq], |row| {
+                let id_str: String = row.get(0)?;
+                let status_str: String = row.get(6)?;
+                let status = match status_str.as_str() {
+                    "Pending" => ToolStatus::Pending,
+                    "Running" => ToolStatus::Running,
+                    "Succeeded" => ToolStatus::Succeeded,
+                    "Failed" => ToolStatus::Failed,
+                    "Interrupted" => ToolStatus::Interrupted,
+                    _ => ToolStatus::Succeeded,
+                };
+                let diff_paths_json: Option<String> = row.get(10)?;
+                let diff_previews_json: Option<String> = row.get(11)?;
+                Ok((
+                    row.get::<_, i64>(12)?,
+                    Row::Tool(ToolInvocation {
+                        id: Uuid::parse_str(&id_str).unwrap_or_else(|_| Uuid::new_v4()),
+                        call_id: row.get(1)?,
+                        parent_call_id: row.get(2)?,
+                        name: row.get(3)?,
+                        kind: row.get(4)?,
+                        summary: row.get(5)?,
+                        status,
+                        is_subagent: false,
+                        detail_text: String::new(),
+                        logs: Vec::new(),
+                        diff_paths: decode_json_vec(diff_paths_json.as_deref()),
+                        diff_previews: decode_json_vec(diff_previews_json.as_deref()),
+                        raw_input: row.get(7)?,
+                        raw_output: row.get(8)?,
+                        terminal_output: None,
+                        error: row.get(9)?,
+                        permission_options: Vec::new(),
+                        permission_input: None,
+                        permission_decision: None,
+                        can_stop: false,
+                        stop_kind: None,
+                        stop_status: None,
+                    }),
+                ))
+            })?;
+            for row in mapped {
+                rows.push(row?);
+            }
+        }
+
+        // Keep the most recent `limit` by seq, then restore ascending order.
+        rows.sort_by_key(|(seq, _)| std::cmp::Reverse(*seq));
+        if let Some(limit) = limit {
+            rows.truncate(limit);
+        }
+        rows.sort_by_key(|(seq, _)| *seq);
+
+        let mut messages = Vec::new();
+        let mut tools = Vec::new();
+        let mut timeline = Vec::new();
+        for (_seq, row) in rows {
+            match row {
+                Row::Message(message) => {
+                    timeline.push(TimelineItem::Message(message.id));
+                    messages.push(message);
+                }
+                Row::Tool(tool) => {
+                    timeline.push(TimelineItem::Tool(tool.id));
+                    tools.push(tool);
+                }
+            }
+        }
         Ok((messages, tools, timeline))
     }
 

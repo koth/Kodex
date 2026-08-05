@@ -4257,3 +4257,39 @@ fn completed_write_raw_input_content_without_baseline_stays_out_of_review_change
         .unwrap();
     assert!(tool.diff_previews.is_empty());
 }
+
+#[test]
+fn lightweight_snapshot_strips_review_and_turn_diff_text() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = test_app(&dir);
+    let change = || SessionFileChange {
+        path: "src/main.rs".into(),
+        change_type: FileChangeType::Modified,
+        old_text: Some("before\n".into()),
+        new_text: "after\n".into(),
+        added_lines: 1,
+        removed_lines: 1,
+        timestamp: "2026-05-13T00:00:00Z".into(),
+    };
+    app.ui.review_changes = vec![change()];
+    app.ui.turn_changes = vec![workspace_model::TurnFileChanges {
+        message_id: uuid::Uuid::new_v4(),
+        changes: vec![change()],
+    }];
+
+    let snapshot = app.lightweight_ui_snapshot();
+    let review = &snapshot.review_changes[0];
+    assert_eq!(review.old_text, None);
+    assert_eq!(review.new_text, "");
+    assert_eq!(review.path, "src/main.rs");
+    assert_eq!((review.added_lines, review.removed_lines), (1, 1));
+
+    let turn = &snapshot.turn_changes[0];
+    assert_eq!(turn.changes[0].old_text, None);
+    assert_eq!(turn.changes[0].new_text, "");
+    assert_eq!(turn.changes[0].path, "src/main.rs");
+
+    // Internal state keeps the full text — only the projection strips it.
+    assert_eq!(app.ui.review_changes[0].new_text, "after\n");
+    assert_eq!(app.ui.turn_changes[0].changes[0].new_text, "after\n");
+}

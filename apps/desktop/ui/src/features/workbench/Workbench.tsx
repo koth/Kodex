@@ -285,6 +285,7 @@ export function Workbench() {
     pollState,
     acceptSnapshot,
     clearWorkspace,
+    loadOlderHistory,
   } = useWorkbenchSnapshot();
   const {
     gitRefreshing,
@@ -1350,6 +1351,7 @@ export function Workbench() {
                       onCancelTurn={handleCancelTurn}
                       onStopTool={handleStopTool}
                       onFilePathClick={handleSearchFileOpen}
+                      onLoadOlderHistory={loadOlderHistory}
                     />
                   </>
                 ) : (

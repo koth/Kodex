@@ -20,8 +20,8 @@ pub mod web_tools_mcp;
 mod workspace_files;
 
 pub use application::{
-    Application, AppUpdate, UiPatchCursor, UiSnapshotUpdate, normalize_path_for_storage,
-    normalize_tracked_path,
+    Application, AppUpdate, HistoryPage, UiPatchCursor, UiSnapshotUpdate,
+    normalize_path_for_storage, normalize_tracked_path,
 };
 pub use remote_control::{AppCoreRemoteControl, RemoteControl};
 pub use paths::AppPaths;
@@ -1765,6 +1765,64 @@ async function clickCanvasNewMenuItem(page: Page, itemText: string) {
         assert_eq!(absolute.path, "src/main.rs");
     }
 
+    #[test]
+    fn session_file_diff_also_resolves_review_changes() {
+        let dir = tempdir().unwrap();
+        let mut app = test_app(&dir);
+        app.ui.review_changes = vec![SessionFileChange {
+            path: "src/lib.rs".into(),
+            change_type: FileChangeType::Modified,
+            old_text: Some("old\n".into()),
+            new_text: "new\n".into(),
+            added_lines: 1,
+            removed_lines: 1,
+            timestamp: "1".into(),
+        }];
+
+        let change = app.session_file_diff("src/lib.rs").unwrap();
+        assert_eq!(change.new_text, "new\n");
+        assert!(app.session_file_diff("src/missing.rs").is_err());
+    }
+
+    #[test]
+    fn session_turn_file_diff_resolves_by_message_and_path() {
+        let dir = tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        let mut app = test_app(&dir);
+        let message_id = uuid::Uuid::new_v4();
+        app.ui.turn_changes = vec![workspace_model::TurnFileChanges {
+            message_id,
+            changes: vec![SessionFileChange {
+                path: "src/main.rs".into(),
+                change_type: FileChangeType::Modified,
+                old_text: Some("old\n".into()),
+                new_text: "new\n".into(),
+                added_lines: 1,
+                removed_lines: 1,
+                timestamp: "1".into(),
+            }],
+        }];
+
+        let relative = app
+            .session_turn_file_diff(&message_id.to_string(), "src/main.rs")
+            .unwrap();
+        assert_eq!(relative.new_text, "new\n");
+        assert_eq!(relative.old_text.as_deref(), Some("old\n"));
+
+        let absolute_path = dir.path().join("src/main.rs").display().to_string();
+        let absolute = app
+            .session_turn_file_diff(&message_id.to_string(), &absolute_path)
+            .unwrap();
+        assert_eq!(absolute.path, "src/main.rs");
+
+        assert!(app
+            .session_turn_file_diff(&message_id.to_string(), "src/missing.rs")
+            .is_err());
+        assert!(app
+            .session_turn_file_diff(&uuid::Uuid::new_v4().to_string(), "src/main.rs")
+            .is_err());
+    }
+
     fn test_app(dir: &tempfile::TempDir) -> Application {
         Application::bootstrap_with_app_paths(
             dir.path(),
@@ -1772,6 +1830,18 @@ async function clickCanvasNewMenuItem(page: Page, itemText: string) {
             AppPaths::from_root(dir.path().join("home").join(".kodex")),
         )
         .unwrap()
+    }
+
+    #[test]
+    fn lightweight_snapshot_carries_history_window_metadata() {
+        let dir = tempdir().unwrap();
+        let mut app = test_app(&dir);
+        app.history_total_count = 500;
+        app.history_earliest_seq = Some(301);
+
+        let snapshot = app.lightweight_ui_snapshot();
+        assert_eq!(snapshot.history_total, 500);
+        assert_eq!(snapshot.history_earliest_seq, Some(301));
     }
 
     fn mock_agent_command() -> String {

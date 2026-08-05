@@ -33,6 +33,13 @@ vi.mock("../../lib/tauri", () => ({
     if (mockSessionGetState) return mockSessionGetState();
     return Promise.reject(new Error("no mock"));
   }),
+  // Derive the revision probe from the full-state mock so existing fixtures
+  // keep working: the probe reports whatever snapshot the poll would return.
+  sessionGetRevision: vi.fn(async () => {
+    if (!mockSessionGetState) return Promise.reject(new Error("no mock"));
+    const snapshot = await mockSessionGetState();
+    return [snapshot.session.id, snapshot.revision] as [string, number];
+  }),
 }));
 
 // ── Fixtures ───────────────────────────────────────────────────────
@@ -297,10 +304,12 @@ describe("useWorkbenchSnapshot – dropped patch self-heal", () => {
       });
     });
 
-    // pollState fetched the complete backend snapshot and replaced the local
-    // truncated body with it.
-    expect(result.current.snapshot?.revision).toBe(3);
-    expect(result.current.snapshot?.messages[0].body).toBe("prefix + complete suffix");
+    // The full re-sync is debounced (~120ms) to avoid back-to-back full
+    // snapshot clones during a streaming patch burst; wait for it to land.
+    await vi.waitFor(() => {
+      expect(result.current.snapshot?.revision).toBe(3);
+      expect(result.current.snapshot?.messages[0].body).toBe("prefix + complete suffix");
+    });
   });
 
   it("periodically reconciles a truncated snapshot even when no further patch arrives", async () => {

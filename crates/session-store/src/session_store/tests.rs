@@ -2614,3 +2614,254 @@ fn usage_summary_turn_delta_session_survives_after_peer_session_total() {
         "Session A's SessionTotal(150) + Session B's TurnDelta(50) = 200"
     );
 }
+
+fn make_tool(id: &str, call_id: &str) -> ToolInvocation {
+    ToolInvocation {
+        id: Uuid::parse_str(id).unwrap_or_else(|_| Uuid::new_v4()),
+        call_id: call_id.to_string(),
+        parent_call_id: None,
+        name: "shell".into(),
+        kind: "shell".into(),
+        summary: format!("summary-{call_id}"),
+        status: ToolStatus::Succeeded,
+        is_subagent: false,
+        detail_text: String::new(),
+        logs: Vec::new(),
+        diff_paths: Vec::new(),
+        diff_previews: Vec::new(),
+        raw_input: Some(format!("input-{call_id}")),
+        raw_output: Some(format!("output-{call_id}")),
+        terminal_output: None,
+        error: None,
+        permission_options: Vec::new(),
+        permission_input: None,
+        permission_decision: None,
+        can_stop: false,
+        stop_kind: None,
+        stop_status: None,
+    }
+}
+
+#[test]
+fn windowed_load_keeps_only_recent_entries() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = SessionStore::open(dir.path(), dir.path()).unwrap();
+    store.create_session("s1", "gpt-4").unwrap();
+    // 10 messages (seq 1..=10) + 10 tools (seq 11..=20) = 20 entries.
+    for i in 1..=10 {
+        store
+            .insert_message("s1", &Uuid::new_v4().to_string(), "User", &format!("m{i}"), i)
+            .unwrap();
+    }
+    for i in 11..=20 {
+        store
+            .insert_tool("s1", &make_tool(&Uuid::new_v4().to_string(), &format!("c{i}")), i)
+            .unwrap();
+    }
+
+    let window = store.load_session_window("s1", 5).unwrap();
+    assert_eq!(window.total_count, 20);
+    assert_eq!(window.timeline.len(), 5, "only the latest 5 entries load");
+    // Latest 5 entries are seq 16..=20 (all tools).
+    assert_eq!(window.earliest_seq, Some(16));
+    assert!(window.messages.is_empty());
+    assert_eq!(window.tools.len(), 5);
+}
+
+#[test]
+fn windowed_load_short_session_loads_all() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = SessionStore::open(dir.path(), dir.path()).unwrap();
+    store.create_session("s1", "gpt-4").unwrap();
+    store
+        .insert_message("s1", &Uuid::new_v4().to_string(), "User", "hi", 1)
+        .unwrap();
+    store
+        .insert_message("s1", &Uuid::new_v4().to_string(), "Assistant", "hello", 2)
+        .unwrap();
+
+    let window = store.load_session_window("s1", 100).unwrap();
+    assert_eq!(window.total_count, 2);
+    assert_eq!(window.timeline.len(), 2);
+    assert_eq!(window.earliest_seq, None, "nothing older to page");
+}
+
+// Helper: build a session with `turns` turns, each = 1 user + `tools_per_turn`
+// tools + 1 assistant, sequenced in order. Returns the seq of each turn's user
+// message.
+fn build_turned_session(
+    store: &SessionStore,
+    session: &str,
+    turns: usize,
+    tools_per_turn: usize,
+) -> Vec<i64> {
+    let mut seq = 0i64;
+    let mut user_seqs = Vec::new();
+    for turn in 0..turns {
+        seq += 1;
+        user_seqs.push(seq);
+        store
+            .insert_message(
+                session,
+                &Uuid::new_v4().to_string(),
+                "User",
+                &format!("question {turn}"),
+                seq,
+            )
+            .unwrap();
+        for tool in 0..tools_per_turn {
+            seq += 1;
+            store
+                .insert_tool(
+                    session,
+                    &make_tool(
+                        &Uuid::new_v4().to_string(),
+                        &format!("call-{turn}-{tool}"),
+                    ),
+                    seq,
+                )
+                .unwrap();
+        }
+        seq += 1;
+        store
+            .insert_message(
+                session,
+                &Uuid::new_v4().to_string(),
+                "Assistant",
+                &format!("answer {turn}"),
+                seq,
+            )
+            .unwrap();
+    }
+    user_seqs
+}
+
+#[test]
+fn turn_aligned_window_starts_on_turn_boundary() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = SessionStore::open(dir.path(), dir.path()).unwrap();
+    store.create_session("s1", "gpt-4").unwrap();
+    // 5 turns of 10 tools each = 60 entries. A plain 25-entry window would
+    // start mid-turn (inside turn 4). Turn-aligned with min_turns=3 must back
+    // up to turn 3's user message (the 3rd-most-recent turn).
+    let user_seqs = build_turned_session(&store, "s1", 5, 10);
+
+    let window = store.load_session_window_by_turns("s1", 25, 3).unwrap();
+    assert_eq!(window.total_count, 60);
+    // 3 turns of 12 entries each = 36 entries.
+    assert_eq!(window.timeline.len(), 36);
+    assert_eq!(
+        window.earliest_seq,
+        Some(user_seqs[2]),
+        "window starts at the 3rd-most-recent turn's user message"
+    );
+    // The very first entry is a User message (the turn boundary), not a tool.
+    assert_eq!(window.messages[0].role, MessageRole::User);
+    assert!(matches!(window.timeline[0], TimelineItem::Message(_)));
+}
+
+#[test]
+fn turn_aligned_window_loads_giant_final_turn_fully() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = SessionStore::open(dir.path(), dir.path()).unwrap();
+    store.create_session("s1", "gpt-4").unwrap();
+    // 2 small turns, then a final turn with 300 tools (> the 25-entry floor).
+    build_turned_session(&store, "s1", 2, 5);
+    let mut seq = 24i64;
+    let final_user_seq = seq + 1;
+    store
+        .insert_message("s1", &Uuid::new_v4().to_string(), "User", "final question", final_user_seq)
+        .unwrap();
+    seq = final_user_seq;
+    for tool in 0..300 {
+        seq += 1;
+        store
+            .insert_tool(
+                "s1",
+                &make_tool(&Uuid::new_v4().to_string(), &format!("final-{tool}")),
+                seq,
+            )
+            .unwrap();
+    }
+    seq += 1;
+    store
+        .insert_message("s1", &Uuid::new_v4().to_string(), "Assistant", "final answer", seq)
+        .unwrap();
+
+    let window = store.load_session_window_by_turns("s1", 25, 3).unwrap();
+    // The final turn (302 entries) + the 2 small turns (2×7) — but min_turns=3
+    // backs up to the 1st turn's user message, loading everything.
+    assert_eq!(window.messages[0].role, MessageRole::User);
+    // Crucially the final turn's user prompt is present even though the turn
+    // dwarfs the entry floor.
+    assert!(window
+        .messages
+        .iter()
+        .any(|message| message.body == "final question"));
+    assert!(window
+        .messages
+        .iter()
+        .any(|message| message.body == "final answer"));
+}
+
+#[test]
+fn turn_aligned_window_falls_back_to_floor_when_turns_are_small() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = SessionStore::open(dir.path(), dir.path()).unwrap();
+    store.create_session("s1", "gpt-4").unwrap();
+    // 5 turns with only 1 tool each: 15 entries total. Turn-aligned window
+    // (3 turns = 9 entries) is smaller than the 12-entry floor, so the loader
+    // keeps the entry-count window instead.
+    build_turned_session(&store, "s1", 5, 1);
+
+    let window = store.load_session_window_by_turns("s1", 12, 3).unwrap();
+    assert_eq!(window.timeline.len(), 12, "floor wins over turn alignment");
+}
+
+#[test]
+fn turn_aligned_window_loads_everything_when_fewer_turns_than_requested() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = SessionStore::open(dir.path(), dir.path()).unwrap();
+    store.create_session("s1", "gpt-4").unwrap();
+    build_turned_session(&store, "s1", 2, 4);
+
+    let window = store.load_session_window_by_turns("s1", 5, 3).unwrap();
+    // 2 turns × (1 user + 4 tools + 1 assistant) = 12 entries.
+    assert_eq!(window.timeline.len(), 12, "only 2 turns exist: load all");
+    assert_eq!(window.earliest_seq, None, "nothing older to page");
+}
+
+#[test]
+fn history_before_pages_older_entries_in_order() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = SessionStore::open(dir.path(), dir.path()).unwrap();
+    store.create_session("s1", "gpt-4").unwrap();
+    for i in 1..=8 {
+        store
+            .insert_message("s1", &Uuid::new_v4().to_string(), "User", &format!("m{i}"), i)
+            .unwrap();
+    }
+
+    let (messages, _tools, timeline, earliest) = store.load_history_before("s1", 6, 3).unwrap();
+    // Entries strictly before seq 6 are 1..=5; latest 3 of those are 3,4,5.
+    assert_eq!(timeline.len(), 3);
+    assert_eq!(earliest, Some(3), "next cursor is this page's earliest seq");
+    let bodies: Vec<&str> = messages.iter().map(|m| m.body.as_str()).collect();
+    assert_eq!(bodies, vec!["m3", "m4", "m5"], "ascending order, most recent 3");
+}
+
+#[test]
+fn load_tool_detail_returns_uncapped_stored_fields() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = SessionStore::open(dir.path(), dir.path()).unwrap();
+    store.create_session("s1", "gpt-4").unwrap();
+    let tool_id = Uuid::new_v4().to_string();
+    store
+        .insert_tool("s1", &make_tool(&tool_id, "call-1"), 1)
+        .unwrap();
+
+    let detail = store.load_tool_detail("s1", &tool_id).unwrap();
+    assert_eq!(detail.raw_input.as_deref(), Some("input-call-1"));
+    assert_eq!(detail.raw_output.as_deref(), Some("output-call-1"));
+    assert!(store.load_tool_detail("s1", &Uuid::new_v4().to_string()).is_err());
+}
