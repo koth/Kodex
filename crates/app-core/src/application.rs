@@ -777,6 +777,14 @@ impl Application {
             &mut self.pending_image_degradation,
             &mut runtime.pending_image_degradation,
         );
+        std::mem::swap(
+            &mut self.history_total_count,
+            &mut runtime.history_total_count,
+        );
+        std::mem::swap(
+            &mut self.history_earliest_seq,
+            &mut runtime.history_earliest_seq,
+        );
     }
 
     fn install_runtime_as_visible(&mut self, mut runtime: SessionRuntime) -> SessionRuntime {

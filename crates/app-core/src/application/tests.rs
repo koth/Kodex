@@ -1225,6 +1225,39 @@ fn live_runtime_reuse_avoids_session_load_when_switching_back() {
 }
 
 #[test]
+fn session_switch_keeps_history_window_fields_per_session() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = test_app(&dir);
+    wait_for_control(&mut app, SessionConfigCategory::Model);
+    let first_session_id = app.ui.session.id.to_string();
+
+    // Simulate a long first session whose history only partially fits the
+    // in-memory window (as loaded by `runtime_for_stored_session`).
+    app.history_total_count = 500;
+    app.history_earliest_seq = Some(301);
+
+    // A brand-new session must NOT inherit the previous session's window
+    // fields; otherwise the UI would render the "load earlier history"
+    // affordance on an empty conversation.
+    app.session_create(None).unwrap();
+    wait_for_control(&mut app, SessionConfigCategory::Model);
+    assert_ne!(app.ui.session.id.to_string(), first_session_id);
+    assert_eq!(app.history_total_count, 0);
+    assert_eq!(app.history_earliest_seq, None);
+    let new_snapshot = app.lightweight_ui_snapshot();
+    assert_eq!(new_snapshot.history_total, 0);
+    assert_eq!(new_snapshot.history_earliest_seq, None);
+
+    // Switching back restores the stored session's own window fields instead
+    // of carrying the just-created empty session's values.
+    app.session_switch(&first_session_id).unwrap();
+    wait_for_control(&mut app, SessionConfigCategory::Model);
+    assert_eq!(app.ui.session.id.to_string(), first_session_id);
+    assert_eq!(app.history_total_count, 500);
+    assert_eq!(app.history_earliest_seq, Some(301));
+}
+
+#[test]
 fn switched_away_in_flight_prompt_completes_under_original_session() {
     let dir = tempfile::tempdir().unwrap();
     let mut app = test_app(&dir);

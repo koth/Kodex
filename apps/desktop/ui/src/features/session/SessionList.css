@@ -14,6 +14,11 @@
   overflow-y: auto;
   padding: 12px 10px 18px;
   scrollbar-width: none;
+  /* The list refreshes every few seconds (session list polling/status
+     updates). Without this the browser's scroll anchoring fights wheel
+     input against the periodic reflow — most ticks get cancelled and only a
+     hard flick breaks through. We own scroll position here; never anchor. */
+  overflow-anchor: none;
 }
 
 .sl-workspaces::-webkit-scrollbar {
@@ -1152,6 +1157,29 @@
   flex-direction: column;
   gap: 2px;
   padding: 4px 10px 8px;
+  /* Long chat lists used to overflow the sidebar below the projects list and
+     get clipped with no way to reach the remaining sessions. Bound the
+     section and let it scroll on its own instead. */
+  flex-shrink: 1;
+  min-height: 0;
+  max-height: 40%;
+}
+
+/* The list itself is the scroll container (flex: 1 + min-height: 0 keeps the
+   scroll box inside the bounded section instead of overflowing it), which
+   avoids the WebKit flex-item-overflow quirk where a flex column with
+   overflow on the container scrolls erratically. */
+.sl-chats-list {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  scrollbar-width: none;
+}
+
+.sl-chats-list::-webkit-scrollbar {
+  width: 0;
+  height: 0;
+  display: none;
 }
 
 .sl-chats-list.is-hidden {

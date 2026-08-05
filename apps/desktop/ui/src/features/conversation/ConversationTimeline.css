@@ -847,6 +847,13 @@
   width: min(320px, 72vw);
   max-width: 100%;
   max-height: 320px;
+  /* Reserve a stable box before the image loads/decodes. Without this the
+     element starts at zero height and jumps to its natural height when the
+     decode finishes, shifting the layout under the cursor — WKWebView's
+     scroll anchoring then yanks the view back up, making the transcript feel
+     stuck a turn or two above the end. object-fit: contain letterboxes any
+     non-square image inside the fixed box. */
+  aspect-ratio: 1;
   margin: 4px 0;
   border: 1px solid var(--border-subtle);
   border-radius: 16px;
@@ -1163,8 +1170,11 @@
 }
 
 /* ── 对话导航虚线（左侧刻度 + 悬浮预览） ── */
-/* 导航钉在非滚动的 timeline-host 上，absolute 垂直居中——
-   与内部滚动完全解耦，滚动任何位置都保持在视野左侧中间。 */
+/* 导航钉在非滚动的容器上，absolute 垂直居中——与内部滚动完全解耦，
+   滚动任何位置都保持在视野左侧中间。定位包含块是 .conversation-container，
+   其 padding-box 左缘即面板内容区左缘，所以 left: 0 已贴边；
+   刻度线再通过左 padding: 0 顶到最左缘（不能再往负偏移，会超出
+   .center-panel 的 overflow: hidden 被整体裁掉）。 */
 .timeline-user-nav {
   position: absolute;
   left: 0;
@@ -1176,18 +1186,20 @@
   justify-content: center;
   align-items: flex-start;
   pointer-events: auto;
-  /* 刻度列垫一层与面板同色背景，窄面板内容挤压到左侧时不至于
-     被文字 visually 压住看不清。 */
-  background: var(--app-bg);
-  border-radius: 6px;
+  /* 不设背景：之前垫了一层不透明 --app-bg，宽度被 padding+tick 撑到 30px+，
+     会把右侧的 ChangesBar/消息内容压住。透明后包围块视觉宽度≈刻度宽度，
+     右侧不再遮挡内容；hover 预览卡自带深色背景兜底。 */
+  background: transparent;
+  border-radius: 0;
   /* 用 padding 撑出一条连续、无空隙的命中带，避免鼠标在刻度间隙移动时
-     反复触发 mouseenter/mouseleave 造成 hover 特效闪烁。 */
-  padding: 10px 6px 10px 4px;
+     反复触发 mouseenter/mouseleave 造成 hover 特效闪烁。左侧 0（贴边），
+     右侧只留少量命中余量，不再撑出遮挡块。 */
+  padding: 10px 2px 10px 0;
 }
 
 .timeline-user-nav-tick {
   pointer-events: auto;
-  width: 26px;
+  width: 22px;
   /* 每个刻度高度做成连续可命中（无垂直空隙），消除 hover 断点。 */
   height: 9px;
   padding: 0;
@@ -1201,18 +1213,15 @@
 .timeline-user-nav-tick::before {
   content: "";
   display: block;
-  /* 用固定基准宽 + scaleX 缩放做展开动画（合成层 transform，不触发 layout，
-     避免 hover 时整列重排造成的闪烁/卡顿）。--nav-tick-w 由 JS 按刻度
-     与 hover 目标的距离计算，范围 8~22px。 */
-  width: 22px;
-  transform: scaleX(calc(var(--nav-tick-w, 10) / 22));
-  transform-origin: left center;
+  /* 直接动画真实宽度（起点天然在 tick 左缘），而不是 scaleX + transform-origin：
+     后者在 WebKit 里原点解析有歧义，会让短刻度左右各缩一点、左边看起来留了空。
+     宽度是 GPU 可合成属性，刻度数量少，不会触发整列重排。 */
+  width: calc(var(--nav-tick-w, 10) * 1px);
   height: 2px;
   border-radius: 1.5px;
   background: var(--text-soft);
   opacity: 0.45;
-  transition: transform 0.18s ease-out, opacity 0.15s ease, background-color 0.15s ease;
-  will-change: transform;
+  transition: width 0.18s ease-out, opacity 0.15s ease, background-color 0.15s ease;
 }
 
 .timeline-user-nav-tick.is-hovered::before,
@@ -1228,7 +1237,7 @@
 
 .timeline-user-nav-preview {
   position: absolute;
-  left: 28px;
+  left: 30px;
   z-index: 7;
   width: min(320px, 70vw);
   max-height: 220px;

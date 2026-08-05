@@ -1800,6 +1800,109 @@ describe("ThinkingIndicator", () => {
     expect(scrollTop).toBe(100);
   });
 
+  it("does not re-pin an idle restored session to the bottom on re-renders", async () => {
+    const snapshot = makeSnapshot({
+      session: { ...makeSnapshot().session, status: "Idle" },
+      timeline: [{ Message: "msg-1" }],
+      messages: [{ id: "msg-1", role: "Assistant", body: "hello" }],
+    });
+
+    const { container, rerender } = render(
+      <ConversationTimeline snapshot={snapshot} onPermissionSelect={() => {}} />,
+    );
+
+    await new Promise((resolve) => requestAnimationFrame(resolve));
+
+    const scroller = container.querySelector(".timeline-scroll") as HTMLDivElement;
+    let scrollTop = 100;
+    Object.defineProperty(scroller, "scrollHeight", { configurable: true, value: 1000 });
+    Object.defineProperty(scroller, "clientHeight", { configurable: true, value: 200 });
+    Object.defineProperty(scroller, "scrollTop", {
+      configurable: true,
+      get: () => scrollTop,
+      set: (value: number) => {
+        scrollTop = value;
+      },
+    });
+
+    // The user scrolled up and stopped mid-list.
+    fireEvent.wheel(scroller, { deltaY: -40 });
+    fireEvent.scroll(scroller);
+
+    // A background revision bump on an idle session must not yank the
+    // timeline back to the bottom — the user is browsing history.
+    rerender(
+      <ConversationTimeline
+        snapshot={{ ...snapshot, revision: 2 }}
+        onPermissionSelect={() => {}}
+      />,
+    );
+    await new Promise((resolve) => requestAnimationFrame(resolve));
+    await new Promise((resolve) => requestAnimationFrame(resolve));
+
+    expect(scrollTop).toBe(100);
+  });
+
+  it("lands on a freshly submitted user message even after browsing up", async () => {
+    const snapshot = makeSnapshot({
+      session: { ...makeSnapshot().session, status: "Idle" },
+      timeline: [{ Message: "user-msg-1" }, { Message: "assistant-msg-1" }],
+      messages: [
+        { id: "user-msg-1", role: "User", body: "你好" },
+        { id: "assistant-msg-1", role: "Assistant", body: "hello" },
+      ],
+    });
+
+    const { container, rerender } = render(
+      <ConversationTimeline snapshot={snapshot} onPermissionSelect={() => {}} />,
+    );
+
+    await new Promise((resolve) => requestAnimationFrame(resolve));
+
+    const scroller = container.querySelector(".timeline-scroll") as HTMLDivElement;
+    let scrollTop = 100;
+    Object.defineProperty(scroller, "scrollHeight", { configurable: true, value: 1000 });
+    Object.defineProperty(scroller, "clientHeight", { configurable: true, value: 200 });
+    Object.defineProperty(scroller, "scrollTop", {
+      configurable: true,
+      get: () => scrollTop,
+      set: (value: number) => {
+        scrollTop = value;
+      },
+    });
+
+    // The user scrolled up to re-read an earlier turn and stopped mid-list.
+    fireEvent.wheel(scroller, { deltaY: -40 });
+    fireEvent.scroll(scroller);
+
+    // Submitting a prompt appends a new user message to the end of the
+    // timeline. The view must move to it even though the user is mid-history.
+    rerender(
+      <ConversationTimeline
+        snapshot={{
+          ...snapshot,
+          revision: 2,
+          timeline: [
+            { Message: "user-msg-1" },
+            { Message: "assistant-msg-1" },
+            { Message: "user-msg-2" },
+          ],
+          messages: [
+            { id: "user-msg-1", role: "User", body: "你好" },
+            { id: "assistant-msg-1", role: "Assistant", body: "hello" },
+            { id: "user-msg-2", role: "User", body: "继续" },
+          ],
+        }}
+        onPermissionSelect={() => {}}
+      />,
+    );
+    await new Promise((resolve) => window.setTimeout(resolve, 100));
+    await new Promise((resolve) => requestAnimationFrame(resolve));
+    await new Promise((resolve) => requestAnimationFrame(resolve));
+
+    expect(scrollTop).toBe(1000);
+  });
+
   it("stays pinned to bottom across unrelated parent re-renders", async () => {
     const snapshot = makeSnapshot({
       timeline: [{ Message: "msg-1" }],
@@ -1943,6 +2046,33 @@ describe("ConversationTimeline – window paging trigger", () => {
     ).toHaveLength(0);
   });
 
+  it("never offers backend paging on an empty timeline even with a stale earliest seq", () => {
+    // Regression: after the backend swap fix, a brand-new session's snapshot
+    // carries history_earliest_seq: null. Guard regardless so a stale value
+    // (e.g. from a patch-merged snapshot during session switching) can never
+    // surface the "加载更早历史" button on an empty conversation.
+    const snapshot = makeSnapshot({
+      timeline: [],
+      messages: [],
+      history_total: 500,
+      history_earliest_seq: 42,
+    });
+
+    const { container } = render(
+      <ConversationTimeline
+        snapshot={snapshot}
+        onPermissionSelect={() => {}}
+        onLoadOlderHistory={() => Promise.resolve(true)}
+      />,
+    );
+
+    expect(
+      Array.from(container.querySelectorAll(".timeline-load-older")).filter(
+        (button) => button.textContent?.includes("加载更早历史"),
+      ),
+    ).toHaveLength(0);
+  });
+
   it("prefers widening the local slice over paging while hidden items remain", () => {
     const timeline = Array.from({ length: 120 }, (_, index) => ({
       Message: `msg-${index}`,
@@ -2042,5 +2172,57 @@ describe("ConversationTimeline – window paging trigger", () => {
     expect(container.textContent).not.toContain("run 2-5");
     // …while its final answer stays visible.
     expect(container.textContent).toContain("answer 2");
+  });
+
+  it("renders a turn-nav anchor on collapsed-turn summaries", () => {
+    const timeline: TimelineItem[] = [];
+    const messages: UiSnapshot["messages"] = [];
+    const tools: ToolInvocation[] = [];
+    messages.push({
+      id: "collapsed-user",
+      role: "User",
+      body: "question",
+      created_at: "2026-05-12T00:00:00Z",
+    });
+    for (let index = 0; index < 5; index += 1) {
+      tools.push(
+        makePermissionTool({
+          id: `collapsed-tool-${index}`,
+          call_id: `collapsed-tool-${index}`,
+          kind: "execute",
+          name: `run ${index}`,
+          summary: `run ${index}`,
+          status: "Succeeded",
+          permission_options: [],
+        }),
+      );
+      timeline.push({ Tool: `collapsed-tool-${index}` });
+    }
+    messages.push({
+      id: "collapsed-answer",
+      role: "Assistant",
+      body: "answer",
+      created_at: "2026-05-12T00:00:30Z",
+    });
+    timeline.splice(0, 0, { Message: "collapsed-user" });
+    timeline.push({ Message: "collapsed-answer" });
+
+    const snapshot = makeSnapshot({
+      session: { ...makeSnapshot().session, status: "Idle" },
+      timeline,
+      messages,
+      tools,
+    });
+
+    const { container } = render(
+      <ConversationTimeline snapshot={snapshot} onPermissionSelect={() => {}} />,
+    );
+
+    // A collapsed turn hides its user row, so the summary must carry the nav
+    // anchor — otherwise the turn-nav ruler can never highlight the last
+    // turns of a restored session and stays stuck a few turns back.
+    const summary = container.querySelector(".timeline-collapse-toggle");
+    expect(summary).not.toBeNull();
+    expect(summary?.getAttribute("data-nav-user-id")).toBe("collapsed-user");
   });
 });

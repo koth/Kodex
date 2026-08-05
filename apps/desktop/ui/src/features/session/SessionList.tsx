@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useRef } from "react";
+import { useState, useEffect, useLayoutEffect, useCallback, useRef } from "react";
 import { createPortal } from "react-dom";
 import type { AgentCliId, AgentSettingsSnapshot, RemoteLinuxWorkspace, SessionListItem, SessionStatus, UiSnapshot, WorkspaceSessionList } from "../../types";
 import {
@@ -85,7 +85,36 @@ export function SessionList({
   const [comingSoonFeature, setComingSoonFeature] = useState<string | null>(null);
   const agentDropdownRef = useRef<HTMLDivElement>(null);
   const workspaceMenuRef = useRef<HTMLDivElement>(null);
+  const workspacesScrollRef = useRef<HTMLDivElement>(null);
+  const chatsScrollRef = useRef<HTMLDivElement>(null);
   const refreshInFlightRef = useRef(false);
+  // Scroll positions captured right before a background list refresh. The
+  // sidebar refreshes every few seconds; Safari/WKWebView does not support
+  // `overflow-anchor`, so the browser's scroll anchoring fights wheel input
+  // whenever the re-render nudges layout. We restore the exact position after
+  // the new list commits so a background refresh can never yank the viewport.
+  const preservedWorkspacesScrollRef = useRef<number | null>(null);
+  const preservedChatsScrollRef = useRef<number | null>(null);
+
+  // Runs after every commit; a no-op unless a refresh captured a position.
+  useLayoutEffect(() => {
+    const workspaces = workspacesScrollRef.current;
+    if (workspaces && preservedWorkspacesScrollRef.current != null) {
+      const target = preservedWorkspacesScrollRef.current;
+      preservedWorkspacesScrollRef.current = null;
+      if (Math.abs(workspaces.scrollTop - target) > 1) {
+        workspaces.scrollTop = target;
+      }
+    }
+    const chats = chatsScrollRef.current;
+    if (chats && preservedChatsScrollRef.current != null) {
+      const target = preservedChatsScrollRef.current;
+      preservedChatsScrollRef.current = null;
+      if (Math.abs(chats.scrollTop - target) > 1) {
+        chats.scrollTop = target;
+      }
+    }
+  });
 
   const setComingSoon = useCallback((feature: string) => {
     setComingSoonFeature(feature);
@@ -103,7 +132,29 @@ export function SessionList({
     refreshInFlightRef.current = true;
     setSessionsRefreshing(true);
     sessionList()
-      .then(setWorkspaceSessions)
+      .then((next) => {
+        setWorkspaceSessions((current) => {
+          // Identical lists mean the re-render would change nothing in the
+          // DOM — skip it entirely so a background refresh can never disturb
+          // the scroll position or trigger scroll anchoring in the first
+          // place.
+          if (current != null && JSON.stringify(current) === JSON.stringify(next)) {
+            preservedWorkspacesScrollRef.current = null;
+            preservedChatsScrollRef.current = null;
+            return current;
+          }
+          // Capture the user's CURRENT scroll position at commit time — the
+          // list fetch took a few milliseconds and the user may have kept
+          // scrolling meanwhile. The layout effect above restores this after
+          // the new list renders, so a background refresh can never yank the
+          // viewport back to a stale position.
+          preservedWorkspacesScrollRef.current =
+            workspacesScrollRef.current?.scrollTop ?? null;
+          preservedChatsScrollRef.current =
+            chatsScrollRef.current?.scrollTop ?? null;
+          return next;
+        });
+      })
       .catch(() => {})
       .finally(() => {
         refreshInFlightRef.current = false;
@@ -513,7 +564,10 @@ export function SessionList({
         </div>
       </div>
 
-      <div className={`sl-workspaces${projectsCollapsed ? " is-hidden" : ""}`}>
+      <div
+        className={`sl-workspaces${projectsCollapsed ? " is-hidden" : ""}`}
+        ref={workspacesScrollRef}
+      >
         {workspaceSessions.length === 0 && (
           sessionsRefreshing ? (
             <div className="sl-loading" role="status" aria-live="polite">
@@ -562,7 +616,10 @@ export function SessionList({
             <FolderIcon open={!chatsCollapsed} />
             <span>聊天</span>
           </button>
-          <div className={`sl-chats-list${chatsCollapsed ? " is-hidden" : ""}`}>
+          <div
+            className={`sl-chats-list${chatsCollapsed ? " is-hidden" : ""}`}
+            ref={chatsScrollRef}
+          >
             <WorkspaceSection
               item={chatsItem}
               isChats

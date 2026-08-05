@@ -130,6 +130,9 @@ interface TimelineCollapseGroup {
   items: TimelineCollapseCandidate[];
   itemCount: number;
   durationLabel: string | null;
+  /** User message id that starts the turn; anchors the turn-nav ruler even
+   *  when the turn is collapsed (its user row is not rendered). */
+  userMessageId: string | null;
 }
 
 interface TimelineCollapseState {
@@ -182,10 +185,12 @@ function TimelineCollapseSummary({
   group,
   expanded,
   onToggle,
+  navUserId,
 }: {
   group: TimelineCollapseGroup;
   expanded: boolean;
   onToggle: () => void;
+  navUserId?: string | null;
 }) {
   const collapsible = group.itemCount > 0;
   const content = (
@@ -206,7 +211,10 @@ function TimelineCollapseSummary({
 
   if (!collapsible) {
     return (
-      <div className="timeline-turn-summary is-completed">
+      <div
+        className="timeline-turn-summary is-completed"
+        data-nav-user-id={navUserId ?? undefined}
+      >
         {content}
       </div>
     );
@@ -219,6 +227,7 @@ function TimelineCollapseSummary({
       aria-expanded={expanded}
       aria-label={expanded ? "收起已处理上下文" : "展开已处理上下文"}
       onClick={onToggle}
+      data-nav-user-id={navUserId ?? undefined}
     >
       {content}
     </button>
@@ -753,6 +762,7 @@ function buildTimelineCollapseState({
       items: itemsToCollapse,
       itemCount: itemsToCollapse.length,
       durationLabel: elapsedLabelForTurn(turnStartMessage, finalAssistant.message, itemsToCollapse),
+      userMessageId: turnStartMessage?.id ?? null,
     });
 
     turnItems = [];
@@ -861,6 +871,14 @@ export function ConversationTimeline({
   const bottomSentinelRef = useRef<HTMLDivElement>(null);
   const userScrolledUp = useRef(false);
   const manualScrollIntent = useRef(false);
+  // User's manual scroll position. WKWebView does not support
+  // `overflow-anchor`, so any re-render that nudges layout lets WebKit's
+  // scroll anchoring yank the viewport back to the anchor node — the
+  // "scroll down a bit, snap back" loop. While the user is browsing
+  // (manual mode), we capture the position before the commit and restore it
+  // after the browser's layout/anchoring pass, so a background refresh can
+  // never move the user.
+  const manualScrollTopRef = useRef<number | null>(null);
   // Upstream retry status (502/429/transport) pushed by the codex_api_proxy
   // via the `proxy:retry` event. Rendered as a retry animation near the
   // timeline bottom while the proxy is backing off and resending.
@@ -1012,8 +1030,14 @@ export function ConversationTimeline({
           userScrolledUp.current = true;
           return;
         }
-        userScrolledUp.current = false;
-        manualScrollIntent.current = false;
+        if (turnIsActiveRef.current) {
+          userScrolledUp.current = false;
+          manualScrollIntent.current = false;
+        } else {
+          // Idle/restored sessions are free to browse: near the bottom is not
+          // "following", it is just where the user stopped. Never re-pin.
+          userScrolledUp.current = true;
+        }
         return;
       }
       if (manualScrollIntent.current || userScrolledUp.current) {
@@ -1022,7 +1046,7 @@ export function ConversationTimeline({
       }
       // Still sticky, but layout/overflow-anchor/right-panel work nudged us off
       // the bottom. Snap back instead of leaving the transcript stranded.
-      if (!stickCorrectionActive.current) {
+      if (turnIsActiveRef.current && !stickCorrectionActive.current) {
         scrollToBottom();
       }
     };
@@ -1071,10 +1095,27 @@ export function ConversationTimeline({
 
   // Parent workbench re-renders (right-panel Git/Files clicks, git status
   // refresh) can reflow the center column without bumping timeline revision.
-  // While sticky, re-pin after commit/layout so we don't stay stranded.
+  // While a turn is active and sticky, re-pin after commit/layout so we don't
+  // stay stranded. Idle sessions must never re-pin — the user is browsing.
   useLayoutEffect(() => {
-    if (userScrolledUp.current || scrollbarDragging.current) return;
+    if (!turnIsActive || userScrolledUp.current || scrollbarDragging.current) return;
     scrollToBottom();
+  });
+
+  // Neutralize WebKit's scroll anchoring for manual browsing: after the new
+  // layout runs (and anchoring may have yanked the viewport back to the
+  // anchor node), restore the exact position captured before the commit.
+  // The local `target` is read before `el.scrollTop` forces the layout, so a
+  // yank-induced scroll event cannot pollute the value we restore to.
+  useLayoutEffect(() => {
+    if (!userScrolledUp.current || scrollbarDragging.current) return;
+    const target = manualScrollTopRef.current;
+    if (target == null) return;
+    const el = scrollRef.current;
+    if (!el) return;
+    if (Math.abs(el.scrollTop - target) > 1) {
+      el.scrollTop = target;
+    }
   });
 
   useEffect(() => {
@@ -1117,6 +1158,7 @@ export function ConversationTimeline({
     userScrolledUp.current = false;
     manualScrollIntent.current = false;
     stickCorrectionActive.current = false;
+    lastUserMessageIdRef.current = null;
   }, [snapshot.session.id]);
 
   useEffect(() => {
@@ -1139,6 +1181,20 @@ export function ConversationTimeline({
   const turnIsActive =
     snapshot.session.status === "Streaming" ||
     snapshot.session.status === "WaitingForTool";
+  // Fresh value for the once-registered scroll/observer handlers: sticky
+  // follow must only apply while a turn is actually running, never on an
+  // idle restored session (otherwise every re-render yanks the user back to
+  // the bottom and they can never browse the history).
+  const turnIsActiveRef = useRef(turnIsActive);
+  turnIsActiveRef.current = turnIsActive;
+  // Pre-commit capture for the manual scroll restore below: read while the
+  // DOM is still the pre-render one so we hold the user's exact position
+  // before any layout/anchoring pass runs against the new content. Re-read
+  // every render so user scrolls between renders are picked up; the restore
+  // effect below only overrides when the browser moved the viewport itself.
+  if (userScrolledUp.current) {
+    manualScrollTopRef.current = scrollRef.current?.scrollTop ?? null;
+  }
   const allMessagesById = useMemo(
     () => new Map(snapshot.messages.map((message) => [message.id, message])),
     [snapshot.messages],
@@ -1272,6 +1328,31 @@ export function ConversationTimeline({
     if (userNavEntries.some((entry) => entry.id === navActiveId)) return;
     setNavActiveId(userNavEntries[userNavEntries.length - 1].id);
   }, [userNavEntries, navActiveId]);
+
+  // 用户提交新 prompt 后（timeline 末尾新增一条 User 消息，含 steer 追加指令），
+  // 重新接管吸底并滚动到新消息处——即使用户之前向上浏览过历史
+  // （userScrolledUp = true）。普通 revision 刷新 / 后台轮询不会触发，
+  // 因为最后一条 User 消息 id 未变化。
+  const lastUserMessageIdRef = useRef<string | null>(null);
+  useEffect(() => {
+    let lastUserId: string | null = null;
+    for (let i = snapshot.timeline.length - 1; i >= 0; i -= 1) {
+      const item = snapshot.timeline[i];
+      if (typeof item !== "object" || !("Message" in item)) continue;
+      if (allMessagesById.get(item.Message)?.role === "User") {
+        lastUserId = item.Message;
+        break;
+      }
+    }
+    const prev = lastUserMessageIdRef.current;
+    lastUserMessageIdRef.current = lastUserId ?? prev;
+    if (prev === null || lastUserId === null || lastUserId === prev) return;
+    // 刚提交的消息需要立刻可见：解除手动浏览状态并钉回底部。
+    userScrolledUp.current = false;
+    manualScrollIntent.current = false;
+    manualScrollTopRef.current = null;
+    scrollToBottom();
+  }, [snapshot.timeline, allMessagesById]);
 
   const navHoverEntry = navHoverId
     ? userNavEntries.find((entry) => entry.id === navHoverId) ?? null
@@ -1542,7 +1623,10 @@ export function ConversationTimeline({
             显示更早 {Math.min(hiddenCount, TIMELINE_WINDOW_STEP)} 条
           </button>
         )}
-        {hiddenCount === 0 && snapshot.history_earliest_seq != null && onLoadOlderHistory && (
+        {hiddenCount === 0 &&
+          snapshot.timeline.length > 0 &&
+          snapshot.history_earliest_seq != null &&
+          onLoadOlderHistory && (
           <button
             className="timeline-load-older"
             type="button"
@@ -1600,6 +1684,7 @@ export function ConversationTimeline({
                 group={group}
                 expanded={expanded}
                 onToggle={() => toggleCollapseGroup(group.key)}
+                navUserId={group.userMessageId}
               />
               {expanded && renderExpandedItems(expandedBeforeItems)}
               {renderTimelineItem(item, i)}
