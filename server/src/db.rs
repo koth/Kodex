@@ -10,6 +10,8 @@ const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/0003_pairings.sql"),
     include_str!("../migrations/0004_accounts.sql"),
     include_str!("../migrations/0005_subscriptions.sql"),
+    include_str!("../migrations/0006_login_codes.sql"),
+    include_str!("../migrations/0007_accounts_email.sql"),
 ];
 
 #[derive(Clone)]
@@ -324,6 +326,117 @@ self.blocking(move |c| {
             Ok(())
         })
         .await
+    }
+
+    // ---- login codes (passwordless email OTP) ----
+
+    pub async fn upsert_login_code(&self, email: String, code: String) -> Result<()> {
+        self.blocking(move |c| {
+            c.execute(
+                "INSERT INTO login_codes (email, code, issued_at, attempts, consumed) \
+                 VALUES (?1, ?2, ?3, 0, 0) \
+                 ON CONFLICT(email) DO UPDATE SET \
+                   code = excluded.code, issued_at = excluded.issued_at, \
+                   attempts = 0, consumed = 0",
+                params![email, code, now_ms()],
+            )?;
+            Ok(())
+        })
+        .await
+    }
+
+    /// `(code, issued_at, attempts, consumed)` for the email's in-flight code.
+    pub async fn login_code(
+        &self,
+        email: String,
+    ) -> Result<Option<(String, i64, i32, i32)>> {
+        self.blocking(move |c| {
+            let row: Option<(String, i64, i32, i32)> = c
+                .query_row(
+                    "SELECT code, issued_at, attempts, consumed FROM login_codes \
+                     WHERE email = ?1",
+                    params![email],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+                )
+                .optional()?;
+            Ok(row)
+        })
+        .await
+    }
+
+    pub async fn increment_login_attempt(&self, email: String) -> Result<()> {
+        self.blocking(move |c| {
+            c.execute(
+                "UPDATE login_codes SET attempts = attempts + 1 WHERE email = ?1",
+                params![email],
+            )?;
+            Ok(())
+        })
+        .await
+    }
+
+    pub async fn consume_login_code(&self, email: String) -> Result<()> {
+        self.blocking(move |c| {
+            c.execute(
+                "UPDATE login_codes SET consumed = 1 WHERE email = ?1",
+                params![email],
+            )?;
+            Ok(())
+        })
+        .await
+    }
+
+    // ---- accounts: passwordless login session ----
+
+    pub async fn account_id_by_email(&self, email: String) -> Result<Option<String>> {
+        self.blocking(move |c| {
+            let row: Option<String> = c
+                .query_row(
+                    "SELECT account_id FROM accounts WHERE email = ?1",
+                    params![email],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            Ok(row)
+        })
+        .await
+    }
+
+    /// Create or refresh a session auth_token for the account bound to
+    /// `email`. An existing account keeps its stable `account_id` but gets a
+    /// fresh token (the previous token is invalidated, so prior bound
+    /// pairings must re-bind with the new token). Returns
+    /// `(account_id, auth_token)`.
+    pub async fn issue_account_session(&self, email: String) -> Result<(String, String)> {
+        let auth_token = uuid::Uuid::new_v4().to_string();
+        let new_account_id = uuid::Uuid::new_v4().to_string();
+        self.blocking({
+            // Clone into the 'static closure; the originals are returned /
+            // reused on the outer task below.
+            let email = email.clone();
+            let auth_token = auth_token.clone();
+            let new_account_id = new_account_id.clone();
+            move |c| {
+                let updated = c.execute(
+                    "UPDATE accounts SET auth_token = ?1 WHERE email = ?2",
+                    params![auth_token, email],
+                )?;
+                if updated == 0 {
+                    c.execute(
+                        "INSERT INTO accounts (account_id, credentials, auth_token, email) \
+                         VALUES (?1, ?2, ?3, ?4)",
+                        params![new_account_id, "{}", auth_token, email],
+                    )?;
+                }
+                Ok(())
+            }
+        })
+        .await?;
+        let id = self
+            .account_id_by_email(email.clone())
+            .await?
+            .unwrap_or(new_account_id);
+        Ok((id, auth_token))
     }
 }
 

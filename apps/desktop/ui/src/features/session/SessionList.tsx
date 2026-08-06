@@ -15,6 +15,7 @@ import {
 import { onSessionStatus } from "../../lib/events";
 import { open } from "@tauri-apps/plugin-dialog";
 import { RemoteOpenPanel } from "../workbench/RemoteOpenPanel";
+import { AccountButton } from "../account/AccountButton";
 import "./SessionList.css";
 import { appConfirm, archiveWorkspaceConfirmRequest } from "../../lib/confirm";
 
@@ -642,6 +643,7 @@ export function SessionList({
       )}
 
       <div className="sl-footer">
+        <AccountButton />
         <button className="sl-settings-btn" type="button" onClick={onOpenSettings} title="设置" aria-label="打开设置">
           <SettingsIcon />
           <span>设置</span>
@@ -909,7 +911,14 @@ function WorkspaceSection({
   onArchiveWorkspace: (workspaceRoot: string, isActive: boolean, workspaceName?: string) => void;
 }) {
   const sessions = sortSessions(item.sessions);
-  const collapsed = collapsedState ?? !item.is_active;
+  // The project-less "聊天" workspace renders inside its own collapsible
+  // group (the outer "聊天" header toggles `chatsCollapsed`). Its inner
+  // WorkspaceSection has no folder toggle button (`!isChats` skips the
+  // workspace row), so defaulting to collapsed when it is not the active
+  // workspace would hide the session list with no way to expand it. Always
+  // keep the chats inner section expanded; the outer group toggle controls
+  // visibility.
+  const collapsed = isChats ? false : (collapsedState ?? !item.is_active);
   const setCollapsed = (next: boolean) => onCollapsedChange(item.workspace.root, next);
   const workspaceRoot = item.workspace.root;
   const isRemoteWorkspace = item.workspace.location?.kind === "remote_linux";

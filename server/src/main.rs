@@ -1,5 +1,6 @@
 use maju_relay_server::{
-    config::Config, db::Db, errors::Result, health, state::AppState, subscription, transport,
+    config::Config, db::Db, errors::Result, health, http_auth, state::AppState, subscription,
+    transport,
 };
 
 #[tokio::main]
@@ -14,6 +15,15 @@ async fn main() -> Result<()> {
     // Background tasks: periodic subscription-expiry sweeper + health probe.
     tokio::spawn(subscription::run_sweeper(state.clone()));
     tokio::spawn(health::run(health_addr));
+    // Passwordless email-OTP login surface (HTTP). Only started when a mail
+    // provider is configured; without it the login flow cannot deliver codes.
+    if !state.config.resend_api_key.is_empty() && !state.config.resend_from.is_empty() {
+        tokio::spawn(http_auth::run(state.clone(), state.config.auth_http_addr));
+    } else {
+        tracing::warn!(
+            "RESEND_API_KEY / RELAY_MAIL_FROM not set; passwordless login disabled"
+        );
+    }
 
     tokio::select! {
         res = transport::run(state) => {

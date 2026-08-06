@@ -9,6 +9,7 @@ import {
   sessionList,
   sessionSwitch,
   workspaceArchive,
+  workspaceChatsRoot,
   workspaceSetActive,
   settingsGetAgentSnapshot,
   settingsGetRemoteProfiles,
@@ -38,8 +39,16 @@ vi.mock("../../lib/tauri", async () => {
     settingsGetAgentSnapshot: vi.fn(),
     settingsGetRemoteProfiles: vi.fn(),
     settingsValidateRemoteProfile: vi.fn(),
+    workspaceChatsRoot: vi.fn(),
     workspaceSetActive: vi.fn(),
     workspaceOpenRemoteProfile: vi.fn(),
+    // AccountButton (rendered in the footer) polls status on mount.
+    remoteControlStatus: vi.fn().mockResolvedValue({
+      enabled: true,
+      connected: false,
+      bound: false,
+      logged_in: false,
+    }),
   };
 });
 
@@ -234,6 +243,7 @@ describe("SessionList agent picker", () => {
     vi.mocked(sessionArchive).mockResolvedValue(undefined);
     vi.mocked(workspaceArchive).mockResolvedValue(null);
     vi.mocked(appConfirm).mockResolvedValue(true);
+    vi.mocked(workspaceChatsRoot).mockResolvedValue("");
     vi.mocked(workspaceSetActive).mockResolvedValue({} as never);
     vi.mocked(workspaceOpenRemoteProfile).mockResolvedValue({} as never);
   });
@@ -1067,5 +1077,45 @@ const workspaceButton = await screen.findByTitle(/^双击连接远程工作区/)
     fireEvent.click(screen.getByText("Kodex"));
     await waitFor(() => expect(screen.getByText("Feature work")).toBeInTheDocument());
     expect(workspaceSetActive).not.toHaveBeenCalled();
+  });
+
+  it("shows chat sessions in the chats group even when the chats workspace is not active", async () => {
+    const chatsRoot = "/Users/kothchen/.kodex/chats";
+    vi.mocked(workspaceChatsRoot).mockResolvedValue(chatsRoot);
+    vi.mocked(sessionList).mockResolvedValue([
+      workspaceSessions[0],
+      {
+        workspace: {
+          ...workspaceSessions[0].workspace,
+          id: "chats-workspace",
+          root: chatsRoot,
+          name: "chats",
+        },
+        sessions: [
+          sessionItem({ id: "chat-1", title: "历史聊天一" }),
+          sessionItem({ id: "chat-2", title: "历史聊天二" }),
+        ],
+        active_session_id: "",
+        is_active: false,
+        connected: false,
+      },
+    ]);
+
+    render(
+      <SessionList
+        activeSessionId="session-current"
+        activeSessionTitle="Current"
+        activeWorkspaceRoot="/Users/kothchen/code/Kodex"
+        currentSessionStatus="Idle"
+        onOpenSettings={vi.fn()}
+        onSessionChanged={vi.fn()}
+        onWorkspaceChanged={vi.fn()}
+      />,
+    );
+
+    // The chats workspace is not the active one, but its sessions must still
+    // render under the "聊天" group (no inner collapse hides them).
+    expect(await screen.findByText("历史聊天一")).toBeInTheDocument();
+    expect(screen.getByText("历史聊天二")).toBeInTheDocument();
   });
 });

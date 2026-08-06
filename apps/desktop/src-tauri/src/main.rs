@@ -206,6 +206,9 @@ fn main() {
             commands::remote_control::remote_control_set_enabled,
             commands::remote_control::remote_control_pairing_qr,
             commands::remote_control::remote_control_status,
+            commands::remote_control::remote_control_send_login_code,
+            commands::remote_control::remote_control_login,
+            commands::remote_control::remote_control_logout,
         ])
         .build(tauri::generate_context!())
         .expect("error while building Maju")

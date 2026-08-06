@@ -8,6 +8,7 @@ publish = false
 
 [dependencies]
 relay-protocol = { path = "../crates/relay-protocol" }
+reqwest = { workspace = true }
 anyhow.workspace = true
 serde.workspace = true
 serde_json.workspace = true

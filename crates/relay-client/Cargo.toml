@@ -23,6 +23,7 @@ sha2 = "0.10"
 rand_core = { version = "0.6", features = ["std"] }
 x25519-dalek = { version = "2", features = ["static_secrets"] }
 base64 = "0.22"
+reqwest = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros", "time", "net", "io-util", "sync"] }

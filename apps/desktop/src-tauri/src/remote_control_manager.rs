@@ -9,13 +9,15 @@
 
 use crate::commands::remote_control::RemoteControlStatus;
 use relay_client::{
-    DeviceIdentity, PairingCode, DEFAULT_PAIRING_TTL, build_qr_payload,
+    AccountSession, DeviceIdentity, LoginClient, PairingCode, DEFAULT_PAIRING_TTL,
+    auth_base_url_from_ws_endpoint, build_qr_payload,
 };
 use std::sync::Mutex;
 
 pub struct RemoteControlManager {
     inner: Mutex<Inner>,
     app_paths: app_core::AppPaths,
+    login: LoginClient,
 }
 
 struct Inner {
@@ -27,6 +29,7 @@ struct Inner {
     subscription_active: Option<bool>,
     bound: bool,
     relay_endpoint: String,
+    account_session: Option<AccountSession>,
 }
 
 impl RemoteControlManager {
@@ -36,6 +39,18 @@ impl RemoteControlManager {
             .unwrap_or(true);
         let relay_endpoint = std::env::var("KODEX_RELAY_ENDPOINT")
             .unwrap_or_else(|_| "wss://relay.kodex.app".to_string());
+        // Auth HTTP origin for the passwordless login endpoints. Prefer an
+        // explicit override (dev relay on a separate port); otherwise derive
+        // it from the WebSocket endpoint (prod reverse-proxies `/auth/*` on
+        // the same origin). Empty when neither is configured — login
+        // commands then fail fast with a clear message instead of dialing
+        // nowhere.
+        let auth_base = std::env::var("KODEX_RELAY_AUTH_ENDPOINT")
+            .ok()
+            .filter(|s| !s.trim().is_empty())
+            .or_else(|| auth_base_url_from_ws_endpoint(&relay_endpoint))
+            .unwrap_or_default();
+        let login = LoginClient::new(auth_base);
         Self {
             inner: Mutex::new(Inner {
                 enabled,
@@ -46,8 +61,10 @@ impl RemoteControlManager {
                 subscription_active: None,
                 bound: false,
                 relay_endpoint,
+                account_session: None,
             }),
             app_paths,
+            login,
         }
     }
 
@@ -58,8 +75,53 @@ impl RemoteControlManager {
         let key_path = self.app_paths.root().join("remote-control-device.key");
         let identity = DeviceIdentity::load_or_create(&key_path)?;
         let device_id = identity.device_id();
+        // Best-effort: load a previously stored account session so the UI
+        // can surface logged-in state (and a later bind can reuse the
+        // auth_token) without re-prompting for a login code.
+        let account = AccountSession::load(&self.account_session_path()).unwrap_or(None);
         let mut inner = self.inner.lock().expect("rc manager mutex poisoned");
         inner.device_id = Some(device_id);
+        inner.account_session = account;
+        Ok(())
+    }
+
+    /// Path to the persisted account session JSON
+    /// (`~/.kodex/remote-control-account.json`), next to the device key.
+    /// Holds the email-OTP-acquired `auth_token` that feeds a subsequent
+    /// `BindDeviceRequest`. Neither the E2E session key nor the device
+    /// private key is stored here.
+    fn account_session_path(&self) -> std::path::PathBuf {
+        self.app_paths.root().join("remote-control-account.json")
+    }
+
+    /// `POST /auth/send-code { email }` on the relay's auth HTTP origin.
+    /// Surfaces the server's rate-limit / validation messages verbatim.
+    pub async fn send_login_code(&self, email: &str) -> Result<(), String> {
+        self.login.send_code(email).await.map_err(|e| e.to_string())
+    }
+
+    /// `POST /auth/login { email, code }`, then persist the issued account
+    /// session locally so it survives restarts (a later bind reuses the
+    /// `auth_token`). The HTTP call runs without holding the manager mutex.
+    pub async fn login_with_code(&self, email: &str, code: &str) -> Result<(), String> {
+        let session = self
+            .login
+            .login(email, code)
+            .await
+            .map_err(|e| e.to_string())?;
+        let path = self.account_session_path();
+        session.persist(&path).map_err(|e| e.to_string())?;
+        let mut inner = self.inner.lock().expect("rc manager mutex poisoned");
+        inner.account_session = Some(session);
+        Ok(())
+    }
+
+    /// Forget the stored account session (logout). Does not touch the
+    /// device key or any in-flight pairing/binding.
+    pub fn logout(&self) -> Result<(), String> {
+        AccountSession::clear(&self.account_session_path()).map_err(|e| e.to_string())?;
+        let mut inner = self.inner.lock().expect("rc manager mutex poisoned");
+        inner.account_session = None;
         Ok(())
     }
 
@@ -116,6 +178,8 @@ impl RemoteControlManager {
             pairing_qr: inner.pairing_qr.clone(),
             subscription_active: inner.subscription_active,
             bound: inner.bound,
+            account_email: inner.account_session.as_ref().map(|s| s.email.clone()),
+            logged_in: inner.account_session.is_some(),
         }
     }
 }

@@ -1,0 +1,274 @@
+/* Account / remote-control login surface. Self-contained feature styles
+ * that reuse the shared theme tokens (see theme.css) for visual parity with
+ * the rest of the shell. Mirrors the SessionList footer button + modal
+ * chrome so the login entry reads as native shell UI. */
+
+/* ---- footer button (sits next to the settings button in sl-footer) ---- */
+.account-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-start;
+  flex: 1 1 0;
+  min-width: 0;
+  min-height: 32px;
+  gap: 10px;
+  padding: 0 8px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  font: inherit;
+  font-size: 13px;
+  font-weight: 560;
+  text-align: left;
+}
+
+.account-btn:hover {
+  background: var(--interactive-hover);
+  color: var(--text-strong);
+}
+
+.account-btn:focus-visible {
+  outline: 2px solid var(--border-focus);
+  outline-offset: 2px;
+}
+
+.account-btn > .account-btn-icon {
+  display: inline-flex;
+  flex-shrink: 0;
+}
+
+.account-btn > .account-btn-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.account-btn.is-logged-in {
+  color: var(--text-strong);
+}
+
+.account-status-dot {
+  margin-left: auto;
+  width: 6px;
+  height: 6px;
+  border-radius: var(--radius-pill);
+  background: var(--success);
+  flex-shrink: 0;
+}
+
+.account-btn:not(.is-logged-in) .account-status-dot {
+  background: var(--text-soft);
+  opacity: 0.5;
+}
+
+/* ---- modal overlay (portal-rendered) ---- */
+.account-modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  display: grid;
+  place-items: center;
+  background: rgba(0, 0, 0, 0.42);
+}
+
+.account-modal {
+  position: relative;
+  z-index: 1;
+  width: min(380px, calc(100vw - 32px));
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-md);
+  background: color-mix(in srgb, var(--panel-bg) 96%, var(--app-bg));
+  box-shadow: var(--shadow-shell);
+  color: var(--text-strong);
+  padding: 16px;
+}
+
+.account-modal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  color: var(--text-strong);
+  font-size: 15px;
+  font-weight: 600;
+  margin-bottom: 12px;
+}
+
+.account-close {
+  width: 26px;
+  height: 26px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 7px;
+  background: transparent;
+  color: var(--text-strong);
+  cursor: pointer;
+  font-weight: 600;
+}
+
+.account-close:hover {
+  background: var(--interactive-hover);
+}
+
+.account-body {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.account-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.account-label {
+  font-size: 12px;
+  color: var(--text-muted);
+  font-weight: 560;
+}
+
+.account-input {
+  width: 100%;
+  min-width: 0;
+  padding: 8px 10px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 8px;
+  background: rgba(0, 0, 0, 0.16);
+  color: var(--text-strong);
+  font: inherit;
+  font-size: 13px;
+}
+
+.account-input:focus {
+  outline: 2px solid var(--border-focus);
+  outline-offset: 1px;
+}
+
+.account-input::placeholder {
+  color: var(--text-soft);
+}
+
+.account-input.account-code-input {
+  font-family: var(--font-mono);
+  letter-spacing: 4px;
+  text-align: center;
+}
+
+.account-hint {
+  font-size: 11px;
+  color: var(--text-muted);
+  line-height: 1.4;
+}
+
+.account-hint .account-email {
+  color: var(--text-strong);
+}
+
+.account-link {
+  background: none;
+  border: 0;
+  padding: 0;
+  color: var(--accent);
+  cursor: pointer;
+  font: inherit;
+  font-size: 11px;
+  text-decoration: underline;
+}
+
+.account-error {
+  font-size: 12px;
+  color: var(--danger);
+  background: var(--danger-soft);
+  border-radius: 8px;
+  padding: 6px 8px;
+  word-break: break-word;
+}
+
+.account-success {
+  font-size: 12px;
+  color: var(--success);
+}
+
+.account-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 2px;
+}
+
+.account-primary-btn {
+  min-height: 32px;
+  padding: 0 14px;
+  border: 0;
+  border-radius: 8px;
+  background: var(--accent);
+  color: #0b0d10;
+  cursor: pointer;
+  font: inherit;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.account-primary-btn:hover:not(:disabled) {
+  background: var(--accent-hover);
+}
+
+.account-primary-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.account-secondary-btn {
+  min-height: 32px;
+  padding: 0 14px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text-strong);
+  cursor: pointer;
+  font: inherit;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.account-secondary-btn:hover:not(:disabled) {
+  background: var(--interactive-hover);
+}
+
+.account-secondary-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.account-spinner {
+  display: inline-block;
+  width: 12px;
+  height: 12px;
+  margin-right: 6px;
+  border: 2px solid currentColor;
+  border-top-color: transparent;
+  border-radius: var(--radius-pill);
+  animation: account-spin 0.7s linear infinite;
+}
+
+@keyframes account-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.account-logged-in {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.account-logged-in .account-email {
+  font-family: var(--font-mono);
+  font-size: 13px;
+  color: var(--text-strong);
+  word-break: break-all;
+}

@@ -9,6 +9,9 @@ pub struct Config {
     pub heartbeat_timeout_secs: u64,
     pub require_tls: bool,
     pub health_addr: SocketAddr,
+    pub auth_http_addr: SocketAddr,
+    pub resend_api_key: String,
+    pub resend_from: String,
 }
 
 impl Default for Config {
@@ -21,6 +24,9 @@ impl Default for Config {
             heartbeat_timeout_secs: 60,
             require_tls: false,
             health_addr: "0.0.0.0:8788".parse().expect("valid default health addr"),
+            auth_http_addr: "0.0.0.0:8789".parse().expect("valid default auth http addr"),
+            resend_api_key: String::new(),
+            resend_from: String::new(),
         }
     }
 }
@@ -58,6 +64,17 @@ impl Config {
             if let Ok(parsed) = v.parse() {
                 c.health_addr = parsed;
             }
+        }
+        if let Ok(v) = std::env::var("RELAY_AUTH_HTTP_ADDR") {
+            if let Ok(parsed) = v.parse() {
+                c.auth_http_addr = parsed;
+            }
+        }
+        if let Ok(v) = std::env::var("RESEND_API_KEY") {
+            c.resend_api_key = v;
+        }
+        if let Ok(v) = std::env::var("RELAY_MAIL_FROM") {
+            c.resend_from = v;
         }
         c
     }

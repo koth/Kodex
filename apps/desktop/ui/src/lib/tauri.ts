@@ -880,3 +880,50 @@ export async function terminalList(
     workspaceRoot: workspaceRoot ?? null,
   });
 }
+
+/** Snapshot of the mobile remote-control plane surfaced to the UI. */
+export interface RemoteControlStatus {
+  enabled: boolean;
+  connected: boolean;
+  device_id?: string;
+  pairing_qr?: string;
+  subscription_active?: boolean;
+  bound: boolean;
+  /** Email of the logged-in account, when a session is stored locally. */
+  account_email?: string;
+  /** Whether an account session (auth_token) is stored locally. */
+  logged_in: boolean;
+}
+
+/** Kill switch: disable the relay-client (fail-open to disconnected). */
+export async function remoteControlSetEnabled(enabled: boolean): Promise<void> {
+  return invoke<void>("remote_control_set_enabled", { enabled });
+}
+
+/** Mint a fresh pairing QR payload (JSON string) for the phone to scan. */
+export async function remoteControlPairingQr(): Promise<string | null> {
+  return invoke<string | null>("remote_control_pairing_qr");
+}
+
+/** Current remote-control status for the UI status indicator. */
+export async function remoteControlStatus(): Promise<RemoteControlStatus> {
+  return invoke<RemoteControlStatus>("remote_control_status");
+}
+
+/** Step 1 of passwordless email-OTP login: ask the relay to email a code. */
+export async function remoteControlSendLoginCode(email: string): Promise<void> {
+  return invoke<void>("remote_control_send_login_code", { email });
+}
+
+/** Step 2: verify the emailed code; on success persists the account session. */
+export async function remoteControlLogin(
+  email: string,
+  code: string,
+): Promise<void> {
+  return invoke<void>("remote_control_login", { email, code });
+}
+
+/** Forget the locally stored account session (logout). */
+export async function remoteControlLogout(): Promise<void> {
+  return invoke<void>("remote_control_logout");
+}

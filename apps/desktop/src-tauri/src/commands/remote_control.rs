@@ -25,6 +25,12 @@ pub struct RemoteControlStatus {
     pub subscription_active: Option<bool>,
     /// Whether the device is bound (persisted pairing) vs free (re-scan).
     pub bound: bool,
+    /// Email of the logged-in account, when a session is stored locally.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account_email: Option<String>,
+    /// Whether an account session (auth_token) is stored locally, ready to
+    /// feed a `BindDeviceRequest`. Independent of `connected`/`bound`.
+    pub logged_in: bool,
 }
 
 /// Kill switch: disable the relay-client (fail-open to "disconnected"; local
@@ -52,4 +58,38 @@ pub fn remote_control_pairing_qr(
 #[tauri::command]
 pub fn remote_control_status(state: State<'_, AppState>) -> Result<RemoteControlStatus, String> {
     Ok(state.remote_control().status())
+}
+
+/// Step 1 of the passwordless email-OTP login: ask the relay to email a
+/// one-time code. Surfaces the relay's rate-limit / validation message on
+/// error (e.g. "请求过于频繁，请稍后再试").
+#[tauri::command]
+pub async fn remote_control_send_login_code(
+    state: State<'_, AppState>,
+    email: String,
+) -> Result<(), String> {
+    state.remote_control().send_login_code(&email).await
+}
+
+/// Step 2: verify the emailed code; on success the relay issues an account
+/// session that the manager persists locally (the `auth_token` later feeds
+/// `BindDeviceRequest`). Surfaces the relay's error message on a wrong /
+/// expired / consumed code.
+#[tauri::command]
+pub async fn remote_control_login(
+    state: State<'_, AppState>,
+    email: String,
+    code: String,
+) -> Result<(), String> {
+    state
+        .remote_control()
+        .login_with_code(&email, &code)
+        .await
+}
+
+/// Forget the locally stored account session (logout). Does not affect the
+/// device key, an in-flight pairing, or local sessions.
+#[tauri::command]
+pub fn remote_control_logout(state: State<'_, AppState>) -> Result<(), String> {
+    state.remote_control().logout()
 }

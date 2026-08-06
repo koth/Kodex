@@ -23,6 +23,7 @@ mod crypto;
 mod connection;
 mod driver;
 mod binding;
+mod account;
 mod identity;
 mod pairing;
 
@@ -30,5 +31,6 @@ pub use crypto::{SessionKey, decrypt, encrypt};
 pub use connection::{RelayConnection, RelayTransport, WsTransport, dial_plain, spawn_mock_relay};
 pub use driver::{ControlHandler, EventSource, RelayDriver};
 pub use binding::{BindOutcome, BoundDevice, SubscriptionState};
+pub use account::{AccountSession, LoginClient, auth_base_url_from_ws_endpoint};
 pub use identity::DeviceIdentity;
 pub use pairing::{PairingCode, PairingQrPayload, DEFAULT_PAIRING_TTL, build_qr_payload, ecdh_shared_secret};
