@@ -30,6 +30,7 @@ struct Inner {
     bound: bool,
     relay_endpoint: String,
     account_session: Option<AccountSession>,
+    insecure_tls: bool,
 }
 
 impl RemoteControlManager {
@@ -38,7 +39,13 @@ impl RemoteControlManager {
             .map(|v| !matches!(v.trim().to_ascii_lowercase().as_str(), "0" | "false" | "off"))
             .unwrap_or(true);
         let relay_endpoint = std::env::var("KODEX_RELAY_ENDPOINT")
-            .unwrap_or_else(|_| "wss://relay.kodex.app".to_string());
+            .unwrap_or_else(|_| "wss://120.48.49.190".to_string());
+        // Skip TLS certificate verification for the relay endpoint. Hardcoded
+        // on for the self-signed relay host (no domain yet); flip to false
+        // and use wss://relay.kodex.app once a real cert exists.
+        let insecure_tls = std::env::var("KODEX_RELAY_INSECURE_TLS")
+            .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "on"))
+            .unwrap_or(true);
         // Auth HTTP origin for the passwordless login endpoints. Prefer an
         // explicit override (dev relay on a separate port); otherwise derive
         // it from the WebSocket endpoint (prod reverse-proxies `/auth/*` on
@@ -50,7 +57,7 @@ impl RemoteControlManager {
             .filter(|s| !s.trim().is_empty())
             .or_else(|| auth_base_url_from_ws_endpoint(&relay_endpoint))
             .unwrap_or_default();
-        let login = LoginClient::new(auth_base);
+        let login = LoginClient::new(auth_base, insecure_tls);
         Self {
             inner: Mutex::new(Inner {
                 enabled,
@@ -61,6 +68,7 @@ impl RemoteControlManager {
                 subscription_active: None,
                 bound: false,
                 relay_endpoint,
+                insecure_tls,
                 account_session: None,
             }),
             app_paths,
@@ -181,5 +189,12 @@ impl RemoteControlManager {
             account_email: inner.account_session.as_ref().map(|s| s.email.clone()),
             logged_in: inner.account_session.is_some(),
         }
+    }
+
+    /// Whether TLS certificate verification is skipped for this relay
+    /// endpoint (development against a self-signed host). Driven by the
+    /// `KODEX_RELAY_INSECURE_TLS` env var; defaults to off.
+    pub fn insecure_tls(&self) -> bool {
+        self.inner.lock().expect("rc manager mutex poisoned").insecure_tls
     }
 }

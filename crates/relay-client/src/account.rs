@@ -78,13 +78,22 @@ impl LoginClient {
     /// Build a client for the given auth HTTP origin. A trailing `/` is
     /// trimmed. The request timeout caps a stuck relay so the UI does not
     /// hang indefinitely on send-code/login.
-    pub fn new(base_url: String) -> Self {
+    ///
+    /// `insecure` skips TLS certificate verification for the HTTP requests
+    /// (self-signed relay host in development). Must be gated behind an
+    /// explicit opt-in by the caller.
+    pub fn new(base_url: String, insecure: bool) -> Self {
         let mut base = base_url;
         while base.ends_with('/') {
             base.pop();
         }
-        let http = reqwest::Client::builder()
-            .timeout(Duration::from_secs(15))
+        let mut builder = reqwest::Client::builder().timeout(Duration::from_secs(15));
+        if insecure {
+            // Accept self-signed certs on the auth HTTP origin. Only enabled
+            // by an explicit opt-in for development against a self-signed relay.
+            builder = builder.danger_accept_invalid_certs(true);
+        }
+        let http = builder
             .build()
             .unwrap_or_else(|_| reqwest::Client::new());
         Self { base_url: base, http }
@@ -354,7 +363,7 @@ mod tests {
     async fn send_code_posts_email_and_succeeds_on_200() {
         let responder = CannedResponder::new(200, r#"{"ok":true}"#);
         let url = spawn_mock_auth_http(responder.clone()).await;
-        let client = LoginClient::new(url);
+        let client = LoginClient::new(url, false);
         client.send_code("user@example.com").await.expect("200 ok");
 
         let (method, path, body) = responder.last_request().expect("request recorded");
@@ -368,7 +377,7 @@ mod tests {
     async fn send_code_surfaces_error_message_on_400() {
         let responder = CannedResponder::new(400, r#"{"error":"请求过于频繁，请稍后再试"}"#);
         let url = spawn_mock_auth_http(responder.clone()).await;
-        let client = LoginClient::new(url);
+        let client = LoginClient::new(url, false);
         let err = client
             .send_code("user@example.com")
             .await
@@ -381,7 +390,7 @@ mod tests {
         let responder =
             CannedResponder::new(200, r#"{"auth_token":"tok-abc","account_id":"acc-7"}"#);
         let url = spawn_mock_auth_http(responder.clone()).await;
-        let client = LoginClient::new(url);
+        let client = LoginClient::new(url, false);
         let session = client
             .login("user@example.com", "123456")
             .await
@@ -402,7 +411,7 @@ mod tests {
     async fn login_surfaces_error_message_on_400() {
         let responder = CannedResponder::new(400, r#"{"error":"验证码错误"}"#);
         let url = spawn_mock_auth_http(responder.clone()).await;
-        let client = LoginClient::new(url);
+        let client = LoginClient::new(url, false);
         let err = client
             .login("user@example.com", "000000")
             .await
@@ -417,7 +426,7 @@ mod tests {
         let responder =
             CannedResponder::new(200, r#"{"auth_token":"t","account_id":"a"}"#);
         let url = spawn_mock_auth_http(responder.clone()).await;
-        let client = LoginClient::new(format!("{url}/"));
+        let client = LoginClient::new(format!("{url}/"), false);
         client.login("u@e.com", "1").await.unwrap();
         let (_, path, _) = responder.last_request().unwrap();
         assert_eq!(path, "/auth/login");

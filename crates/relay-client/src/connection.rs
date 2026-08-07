@@ -14,6 +14,7 @@ use relay_protocol::{EncryptedEnvelope, Envelope, Message};
 use std::time::Duration;
 use tokio_tungstenite::tungstenite::Message as WsMessage;
 use tokio_tungstenite::WebSocketStream;
+use tokio_tungstenite::Connector;
 
 use crate::crypto::{SessionKey, decrypt, encrypt};
 
@@ -230,15 +231,97 @@ pub async fn spawn_passthrough_relay() -> Result<String> {
 
 /// Dial a (plain ws://) endpoint. The real client uses `connect_async` with
 /// TLS; tests use this against the mock relays.
+///
+/// `insecure` skips TLS certificate verification (for self-signed relay
+/// hosts during development). It has no effect on plain `ws://` URLs and
+/// MUST be gated behind an explicit opt-in by the caller — never default
+/// to `true`.
 pub async fn dial_plain(
     url: &str,
     heartbeat: Duration,
+    insecure: bool,
 ) -> Result<RelayConnection<WsTransport<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>>>
 {
-    let (ws, _response) = tokio_tungstenite::connect_async(url)
-        .await
-        .context("dial relay")?;
+    let (ws, _response) = if insecure {
+        dial_tls_insecure(url).await.context("dial relay (insecure TLS)")?
+    } else {
+        tokio_tungstenite::connect_async(url)
+            .await
+            .context("dial relay")?
+    };
     Ok(RelayConnection::new(WsTransport::new(ws), heartbeat))
+}
+
+/// Dial a `wss://` endpoint with a rustls config that accepts any server
+/// certificate. Used only when the caller has explicitly opted into
+/// insecure TLS (e.g. a self-signed relay host in development). The
+/// returned stream type matches `connect_async` so callers stay uniform.
+async fn dial_tls_insecure(
+    url: &str,
+) -> Result<(
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
+    tokio_tungstenite::tungstenite::handshake::client::Response,
+)> {
+    use std::sync::Arc;
+
+    let config = rustls::ClientConfig::builder()
+        .dangerous()
+        .with_custom_certificate_verifier(Arc::new(NoVerifyServerCert))
+        .with_no_client_auth();
+    tokio_tungstenite::connect_async_tls_with_config(
+        url,
+        None,
+        false,
+        Some(Connector::Rustls(Arc::new(config))),
+    )
+    .await
+    .context("dial relay (insecure TLS)")
+}
+
+/// A `ServerCertVerifier` that accepts every certificate chain and
+/// signature without checking anything. **Only safe for debugging against
+/// a self-signed host you control.** Gated behind `dial_tls_insecure`.
+#[derive(Debug)]
+struct NoVerifyServerCert;
+
+impl rustls::client::danger::ServerCertVerifier for NoVerifyServerCert {
+    fn verify_server_cert(
+        &self,
+        _end_entity: &rustls::pki_types::CertificateDer<'_>,
+        _intermediates: &[rustls::pki_types::CertificateDer<'_>],
+        _server_name: &rustls::pki_types::ServerName<'_>,
+        _ocsp_response: &[u8],
+        _now: rustls::pki_types::UnixTime,
+    ) -> Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
+        Ok(rustls::client::danger::ServerCertVerified::assertion())
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        _message: &[u8],
+        _cert: &rustls::pki_types::CertificateDer<'_>,
+        _dss: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        _message: &[u8],
+        _cert: &rustls::pki_types::CertificateDer<'_>,
+        _dss: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
+        // Delegate to rustls's default supported schemes so the handshake
+        // can negotiate a cipher suite; we just skip the actual checks.
+        rustls::crypto::aws_lc_rs::default_provider()
+            .signature_verification_algorithms
+            .supported_schemes()
+            .to_vec()
+    }
 }
 
 #[cfg(test)]
@@ -252,7 +335,7 @@ mod tests {
         let url = spawn_mock_relay(|envelope| Box::pin(async move { Some(envelope) }))
             .await
             .unwrap();
-        let mut conn = dial_plain(&url, Duration::from_secs(30)).await.unwrap();
+        let mut conn = dial_plain(&url, Duration::from_secs(30), false).await.unwrap();
 
         let request_id = Uuid::new_v4();
         let envelope = Envelope::from_message(
@@ -295,7 +378,7 @@ mod tests {
         })
         .await
         .unwrap();
-        let mut conn = dial_plain(&url, Duration::from_secs(30)).await.unwrap();
+        let mut conn = dial_plain(&url, Duration::from_secs(30), false).await.unwrap();
         conn.authenticate("dev-pc", "sig-b64", 1_700_000_000_000)
             .await
             .expect("auth handshake succeeds");
@@ -305,7 +388,7 @@ mod tests {
     #[tokio::test]
     async fn recv_returns_none_on_clean_close() {
         let url = spawn_mock_relay(|_| Box::pin(async move { None })).await.unwrap();
-        let mut conn = dial_plain(&url, Duration::from_secs(30)).await.unwrap();
+        let mut conn = dial_plain(&url, Duration::from_secs(30), false).await.unwrap();
         let request_id = Uuid::new_v4();
         let envelope = Envelope::from_message(
             Some(request_id),
@@ -322,7 +405,7 @@ mod tests {
         // Both endpoints share a session key; the relay forwards ciphertext
         // unchanged. Proves encrypt -> relay -> decrypt recovers the envelope.
         let url = spawn_passthrough_relay().await.unwrap();
-        let mut conn = dial_plain(&url, Duration::from_secs(30)).await.unwrap();
+        let mut conn = dial_plain(&url, Duration::from_secs(30), false).await.unwrap();
         let key = SessionKey::derive(b"pairing-secret", b"kodex-relay-salt");
         conn.install_session_key(key.clone(), "dev-phone".to_string());
 

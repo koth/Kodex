@@ -41,8 +41,18 @@ impl Db {
     }
 
     fn init(conn: Connection) -> Result<Self> {
-        for sql in MIGRATIONS {
+        // Track applied migrations via SQLite's `user_version` PRAGMA so the
+        // server can restart safely. Without this, every start re-runs all
+        // migrations and the non-idempotent `ALTER TABLE ... ADD COLUMN` in
+        // migration 0007 fails with "duplicate column name: email".
+        let current: u32 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+        for (idx, sql) in MIGRATIONS.iter().enumerate() {
+            let version = (idx + 1) as u32;
+            if version <= current {
+                continue;
+            }
             conn.execute_batch(sql)?;
+            conn.pragma_update(None, "user_version", version)?;
         }
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),

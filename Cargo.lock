@@ -3471,6 +3471,7 @@ dependencies = [
  "rand_core 0.6.4",
  "relay-protocol",
  "reqwest",
+ "rustls",
  "serde",
  "serde_json",
  "sha2",

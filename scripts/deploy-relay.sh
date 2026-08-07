@@ -39,7 +39,7 @@ for arg in "$@"; do
     *) argv+=("$arg") ;;
   esac
 done
-set -- "${argv[@]}"
+set -- ${argv[@]+"${argv[@]}"}
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 REPO_SLUG="koth/Maju"            # override with REPO_SLUG env if forked
@@ -235,6 +235,10 @@ info "Deploying to ${RELAY_HOST}:${REMOTE_DIR}"
 ssh "${RELAY_HOST}" "mkdir -p '${REMOTE_DIR}'"
 scp "$tarball" "${RELAY_HOST}:/tmp/maju-relay-server-linux-x64.tar.gz"
 
+# Unpack the tarball and (re)start the systemd service if it is installed.
+# The binary has no --help/clap surface, so we never exec it directly here —
+# running it would bind sockets and block. Lifecycle goes through systemd,
+# which is the only thing that injects /etc/maju-relay/env into the process.
 ssh "${RELAY_HOST}" "set -euo pipefail
   mkdir -p '${REMOTE_DIR}'
   # Extract to a staging dir then atomically swap into place.
@@ -251,8 +255,50 @@ ssh "${RELAY_HOST}" "set -euo pipefail
   chmod +x '${REMOTE_DIR}/bin/maju-relay-server'
   rm -f /tmp/maju-relay-server-linux-x64.tar.gz
   ls -l '${REMOTE_DIR}/bin/maju-relay-server'
-  '${REMOTE_DIR}/bin/maju-relay-server' --help 2>&1 | head -3 || true
 "
 
-ok "Deployed to ${RELAY_HOST}:${REMOTE_DIR}/bin/maju-relay-server"
-ok "Next: start the relay (see server/README.md) and reload nginx."
+ok "Binary deployed to ${RELAY_HOST}:${REMOTE_DIR}/bin/maju-relay-server"
+
+# ---------------------------------------------------------------------------
+# Step 4: restart the systemd service and smoke-test /health.
+# ---------------------------------------------------------------------------
+
+info "Restarting maju-relay.service (if installed)..."
+
+# `systemctl cat` exits non-zero when the unit does not exist, so gate on it
+# rather than calling restart unconditionally. Without the service installed
+# we leave the binary in place and tell the user how to wire it up.
+if ssh "${RELAY_HOST}" "systemctl cat maju-relay.service >/dev/null 2>&1"; then
+  ssh "${RELAY_HOST}" "set -euo pipefail
+    systemctl daemon-reload
+    systemctl restart maju-relay.service
+    # Wait up to ~10s for the service to report active.
+    for _ in \$(seq 1 20); do
+      if [ \"\$(systemctl is-active maju-relay.service)\" = active ]; then break; fi
+      sleep 0.5
+    done
+    state=\$(systemctl is-active maju-relay.service)
+    if [ \"\$state\" != active ]; then
+      echo 'maju-relay failed to become active (\$state); recent logs:' >&2
+      journalctl -u maju-relay.service --no-pager -n 30 >&2 || true
+      exit 1
+    fi
+    # Health probe: relay exposes GET /health on RELAY_HEALTH_ADDR (default
+    # 127.0.0.1:8788). 200 confirms the binary matches the env/config.
+    code=\$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8788/health || true)
+    echo \"health: \$code\"
+    if [ \"\$code\" != 200 ]; then
+      echo 'health endpoint did not return 200; recent logs:' >&2
+      journalctl -u maju-relay.service --no-pager -n 30 >&2 || true
+      exit 1
+    fi
+    systemctl --no-pager status maju-relay.service | head -8
+  "
+  ok "maju-relay.service restarted and /health returned 200."
+else
+  err "maju-relay.service not installed on ${RELAY_HOST}."
+  err "Install it with: scripts/relay/install-relay-service.sh ${RELAY_HOST}"
+  err "Then start with: ssh ${RELAY_HOST} 'systemctl start maju-relay'"
+fi
+
+ok "Done. wss://${RELAY_HOST#*@}/ -> nginx -> 127.0.0.1:8787"

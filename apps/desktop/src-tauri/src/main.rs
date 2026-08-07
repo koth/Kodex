@@ -290,10 +290,11 @@ fn start_remote_control_driver(app: tauri::AppHandle) {
     if !manager.status().enabled {
         return;
     }
-    let endpoint = std::env::var("KODEX_RELAY_ENDPOINT").unwrap_or_default();
-    if endpoint.is_empty() {
-        return;
-    }
+    let endpoint = std::env::var("KODEX_RELAY_ENDPOINT")
+        .unwrap_or_else(|_| "wss://120.48.49.190".to_string());
+    // Reuse the manager's TLS policy (it already parsed the env var) so the
+    // dial path and the login HTTP client stay consistent.
+    let insecure_tls = manager.insecure_tls();
 
     let app_for_loop = app.clone();
     tauri::async_runtime::spawn(async move {
@@ -308,7 +309,7 @@ fn start_remote_control_driver(app: tauri::AppHandle) {
                 tokio::time::sleep(Duration::from_secs(30)).await;
                 continue;
             }
-            let dial = dial_plain(&endpoint, Duration::from_secs(30)).await;
+            let dial = dial_plain(&endpoint, Duration::from_secs(30), insecure_tls).await;
             let conn = match dial {
                 Ok(conn) => {
                     backoff = Duration::from_secs(2);
