@@ -14,11 +14,32 @@
 #   - ssh access to RELAY_HOST (key-based; no password prompts).
 #
 # Usage:
-#   scripts/deploy-relay.sh                 # deploy to default host
-#   scripts/deploy-relay.sh user@host       # deploy to a different host
-#   REF=master scripts/deploy-relay.sh      # build a specific git ref
+#   scripts/deploy-relay.sh                       # trigger build, wait, deploy
+#   scripts/deploy-relay.sh --download-only       # skip build, deploy latest artifact
+#   scripts/deploy-relay.sh user@host             # deploy to a different host
+#   REF=master scripts/deploy-relay.sh            # build a specific git ref
+#   SKIP_BUILD=1 scripts/deploy-relay.sh          # same as --download-only
+#
+# --download-only / SKIP_BUILD=1: do not trigger a new run; download the
+# artifact from the most recent successful run and deploy that. Useful when
+# a build already completed and you just want to (re)deploy it.
 
 set -euo pipefail
+
+# Parse flags before positional args so "user@host" still works after an
+# optional --download-only.
+SKIP_BUILD="${SKIP_BUILD:-0}"
+argv=()
+for arg in "$@"; do
+  case "$arg" in
+    --download-only|--no-build) SKIP_BUILD=1 ;;
+    -h|--help)
+      sed -n '2,45p' "${BASH_SOURCE[0]}"
+      exit 0 ;;
+    *) argv+=("$arg") ;;
+  esac
+done
+set -- "${argv[@]}"
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 REPO_SLUG="koth/Maju"            # override with REPO_SLUG env if forked
@@ -46,16 +67,16 @@ have_gh() { command -v gh >/dev/null 2>&1 && gh auth status >/dev/null 2>&1; }
 if have_gh; then
   GH=gh
 else
+  GH=""
+fi
+
+api() {  # REST API helper used by the fallback path
   if [[ -z "${GITHUB_TOKEN:-}" ]]; then
     err "gh CLI not available/authenticated and GITHUB_TOKEN is not set."
     err "Either run 'brew install gh && gh auth login' or export a PAT with"
     err "actions:read + contents:read scope as GITHUB_TOKEN."
     exit 1
   fi
-  GH=""
-fi
-
-api() {  # REST API helper used by the fallback path
   curl -fsSL \
     -H "Accept: application/vnd.github+json" \
     -H "Authorization: Bearer ${GITHUB_TOKEN}" \
@@ -63,72 +84,109 @@ api() {  # REST API helper used by the fallback path
     "$@"
 }
 
-# ---------------------------------------------------------------------------
-# Step 1: trigger the workflow and capture the run id.
-# ---------------------------------------------------------------------------
+require_auth() {
+  if [[ -z "$GH" && -z "${GITHUB_TOKEN:-}" ]]; then
+    err "gh CLI not available/authenticated and GITHUB_TOKEN is not set."
+    err "Either run 'brew install gh && gh auth login' or export a PAT with"
+    err "actions:read + contents:read scope as GITHUB_TOKEN."
+    exit 1
+  fi
+}
 
-info "Triggering workflow '${WORKFLOW}' on ${REPO_SLUG} (ref=${REF:-default branch})"
-
-if [[ -n "$GH" ]]; then
-  # gh workflow run accepts an optional ref flag.
-  if [[ -n "$REF" ]]; then
-    gh workflow run "$WORKFLOW" --repo "$REPO_SLUG" --ref "$REF" \
-      -f ref="$REF"
+# Most recent successful run id for the relay workflow. --download-only uses
+# this directly; the build path also reuses it after dispatching a new run.
+latest_successful_run_id() {
+  if [[ -n "$GH" ]]; then
+    gh run list --repo "$REPO_SLUG" --workflow "$WORKFLOW" \
+      --status success --limit 1 \
+      --json databaseId --jq '.[0].databaseId'
   else
-    gh workflow run "$WORKFLOW" --repo "$REPO_SLUG"
+    api "https://api.github.com/repos/${REPO_SLUG}/actions/workflows/relay-server.yml/runs?status=success&per_page=1" \
+      | python3 -c 'import sys,json
+r=json.load(sys.stdin)["workflow_runs"]
+print(r[0]["id"] if r else "")'
   fi
-else
-  ref_for_api="$REF"
-  if [[ -z "$ref_for_api" ]]; then
-    # default branch
-    ref_for_api="$(api "https://api.github.com/repos/${REPO_SLUG}" \
-      | python3 -c 'import sys,json;print(json.load(sys.stdin)["default_branch"])')"
+}
+
+require_auth
+
+# ---------------------------------------------------------------------------
+# Step 1: trigger the workflow and watch it (skipped in download-only mode).
+# ---------------------------------------------------------------------------
+
+if [[ "$SKIP_BUILD" == "1" ]]; then
+  info "Skip-build mode: looking up the latest successful run of '${WORKFLOW}'."
+  RUN_ID="$(latest_successful_run_id)"
+  if [[ -z "$RUN_ID" ]]; then
+    err "No successful run found for workflow '${WORKFLOW}'."
+    err "Trigger a build first without --download-only."
+    exit 1
   fi
-  api -X POST "https://api.github.com/repos/${REPO_SLUG}/actions/workflows/relay-server.yml/dispatches" \
-    -d "{\"ref\":\"${ref_for_api}\",\"inputs\":{\"ref\":\"${ref_for_api}\"}}"
-fi
-
-ok "Workflow dispatched. Waiting for the run to appear..."
-sleep 5
-
-# Resolve the most recent run id for this workflow.
-if [[ -n "$GH" ]]; then
-  RUN_ID="$(gh run list --repo "$REPO_SLUG" --workflow "$WORKFLOW" --limit 1 \
-    --json databaseId,status --jq '.[0].databaseId')"
+  ok "Using existing successful run ${RUN_ID}."
 else
-  RUN_ID="$(api "https://api.github.com/repos/${REPO_SLUG}/actions/workflows/relay-server.yml/runs?per_page=1" \
-    | python3 -c 'import sys,json;print(json.load(sys.stdin)["workflow_runs"][0]["id"])')"
-fi
+  info "Triggering workflow '${WORKFLOW}' on ${REPO_SLUG} (ref=${REF:-default branch})"
 
-if [[ -z "$RUN_ID" ]]; then
-  err "Could not resolve a workflow run id. Trigger may have failed."
-  exit 1
-fi
-
-info "Watching run ${RUN_ID}..."
-
-if [[ -n "$GH" ]]; then
-  gh run watch "$RUN_ID" --repo "$REPO_SLUG" --exit-status
-else
-  # Poll the run status until completion.
-  while :; do
-    state_json="$(api "https://api.github.com/repos/${REPO_SLUG}/actions/runs/${RUN_ID}")"
-    status="$(printf '%s' "$state_json" | python3 -c 'import sys,json;print(json.load(sys.stdin)["status"])')"
-    conclusion="$(printf '%s' "$state_json" | python3 -c 'import sys,json;print(json.load(sys.stdin).get("conclusion") or "")')"
-    if [[ "$status" == "completed" ]]; then
-      if [[ "$conclusion" != "success" ]]; then
-        err "Workflow run ${RUN_ID} ended with conclusion=${conclusion}"
-        err "Inspect logs: https://github.com/${REPO_SLUG}/actions/runs/${RUN_ID}"
-        exit 1
-      fi
-      break
+  if [[ -n "$GH" ]]; then
+    # gh workflow run accepts an optional ref flag.
+    if [[ -n "$REF" ]]; then
+      gh workflow run "$WORKFLOW" --repo "$REPO_SLUG" --ref "$REF" \
+        -f ref="$REF"
+    else
+      gh workflow run "$WORKFLOW" --repo "$REPO_SLUG"
     fi
-    printf '.' ; sleep 10
-  done
-  printf '\n'
-fi
+  else
+    ref_for_api="$REF"
+    if [[ -z "$ref_for_api" ]]; then
+      # default branch
+      ref_for_api="$(api "https://api.github.com/repos/${REPO_SLUG}" \
+        | python3 -c 'import sys,json;print(json.load(sys.stdin)["default_branch"])')"
+    fi
+    api -X POST "https://api.github.com/repos/${REPO_SLUG}/actions/workflows/relay-server.yml/dispatches" \
+      -d "{\"ref\":\"${ref_for_api}\",\"inputs\":{\"ref\":\"${ref_for_api}\"}}"
+  fi
 
-ok "Run ${RUN_ID} succeeded."
+  ok "Workflow dispatched. Waiting for the run to appear..."
+  sleep 5
+
+  # Resolve the most recent run id for this workflow (the one we just queued).
+  if [[ -n "$GH" ]]; then
+    RUN_ID="$(gh run list --repo "$REPO_SLUG" --workflow "$WORKFLOW" --limit 1 \
+      --json databaseId,status --jq '.[0].databaseId')"
+  else
+    RUN_ID="$(api "https://api.github.com/repos/${REPO_SLUG}/actions/workflows/relay-server.yml/runs?per_page=1" \
+      | python3 -c 'import sys,json;print(json.load(sys.stdin)["workflow_runs"][0]["id"])')"
+  fi
+
+  if [[ -z "$RUN_ID" ]]; then
+    err "Could not resolve a workflow run id. Trigger may have failed."
+    exit 1
+  fi
+
+  info "Watching run ${RUN_ID}..."
+
+  if [[ -n "$GH" ]]; then
+    gh run watch "$RUN_ID" --repo "$REPO_SLUG" --exit-status
+  else
+    # Poll the run status until completion.
+    while :; do
+      state_json="$(api "https://api.github.com/repos/${REPO_SLUG}/actions/runs/${RUN_ID}")"
+      status="$(printf '%s' "$state_json" | python3 -c 'import sys,json;print(json.load(sys.stdin)["status"])')"
+      conclusion="$(printf '%s' "$state_json" | python3 -c 'import sys,json;print(json.load(sys.stdin).get("conclusion") or "")')"
+      if [[ "$status" == "completed" ]]; then
+        if [[ "$conclusion" != "success" ]]; then
+          err "Workflow run ${RUN_ID} ended with conclusion=${conclusion}"
+          err "Inspect logs: https://github.com/${REPO_SLUG}/actions/runs/${RUN_ID}"
+          exit 1
+        fi
+        break
+      fi
+      printf '.' ; sleep 10
+    done
+    printf '\n'
+  fi
+
+  ok "Run ${RUN_ID} succeeded."
+fi
 
 # ---------------------------------------------------------------------------
 # Step 2: download the artifact.

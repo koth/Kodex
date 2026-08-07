@@ -51,7 +51,9 @@ jobs:
           test -x "${bin}"
           file "${bin}"
           ldd "${bin}" || true
-          "${bin}" --help 2>&1 | head -5 || true
+          # The server has no --help/clap surface; running it would bind
+          # sockets and block in the accept loop until the step times out.
+          # Static checks only here; runtime smoke test happens after deploy.
 
       - name: Package
         run: |
