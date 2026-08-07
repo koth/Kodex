@@ -1,0 +1,76 @@
+name: Build Relay Server
+
+on:
+  # Manual trigger from the Actions tab. Optional `ref` lets you build any
+  # branch/tag without checking it out locally.
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Git ref to build (defaults to current branch)"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build maju-relay-server (linux-x64)
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.ref || github.ref }}
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential \
+            libssl-dev \
+            pkg-config
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: ". -> target"
+          key: relay-server
+
+      - name: Build relay server
+        run: cargo build --release -p maju-relay-server
+
+      - name: Verify binary
+        run: |
+          set -euo pipefail
+          bin="target/release/maju-relay-server"
+          test -x "${bin}"
+          file "${bin}"
+          ldd "${bin}" || true
+          "${bin}" --help 2>&1 | head -5 || true
+
+      - name: Package
+        run: |
+          set -euo pipefail
+          mkdir -p dist/maju-relay-server/bin
+          cp target/release/maju-relay-server dist/maju-relay-server/bin/
+          # Include migrations so deployments without the repo can init a fresh DB
+          # (the binary embeds migrations via include_str!, but keep them for reference).
+          cp -r server/migrations dist/maju-relay-server/
+          cp server/README.md dist/maju-relay-server/
+          tar -czf maju-relay-server-linux-x64.tar.gz -C dist maju-relay-server
+          shasum -a 256 maju-relay-server-linux-x64.tar.gz | tee maju-relay-server-linux-x64.tar.gz.sha256
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: maju-relay-server-linux-x64
+          path: |
+            maju-relay-server-linux-x64.tar.gz
+            maju-relay-server-linux-x64.tar.gz.sha256
+          if-no-files-found: error
+          retention-days: 30
