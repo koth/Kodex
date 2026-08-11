@@ -3,7 +3,7 @@ import type { PairingQrPayload, PairingConfirm } from "../types/relay-protocol";
 import { fromMessage } from "../relay/framing";
 import { PROTO_VERSION } from "../types/relay-protocol";
 import type { DeviceIdentity } from "../crypto/identity";
-import { deviceId, authSignature, publicKeyB64 } from "../crypto/identity";
+import { deviceId, authSignature, devicePubkeyB64, publicKeyB64 } from "../crypto/identity";
 import { generatePrivateKey, getPublicKey, ecdhSharedSecret } from "../crypto/ecdh";
 import { encodeBase64UrlNoPad } from "../util/base64url";
 import { deriveSessionKey, type SessionKey } from "../crypto/session-key";
@@ -68,12 +68,14 @@ export async function runPairingHandshake(
 /** Build a DeviceAuth envelope for the connection-layer authenticate step. */
 export function buildDeviceAuthArgs(identity: DeviceIdentity): {
   deviceId: string;
+  devicePubkey: string;
   signature: string;
   timestampMs: number;
 } {
   const ts = Date.now();
   return {
   deviceId: deviceId(identity),
+  devicePubkey: devicePubkeyB64(identity),
   signature: authSignature(identity, ts),
   timestampMs: ts,
   };

@@ -50,14 +50,14 @@ describe("relay connection E2E + auth", () => {
   const [phoneT, pcT] = linkedPair();
   const phone = new RelayConnection(phoneT, 30_000);
   const pc = new RelayConnection(pcT, 30_000);
-  const authPromise = phone.authenticate("dev-phone", "sig-b64", 1_700_000_000_000);
+  const authPromise = phone.authenticate("dev-phone", "dev-pubkey", "sig-b64", 1_700_000_000_000);
   const got = (await pc.recvEnvelope())!;
   expect(got.type).toBe("device_auth");
   const ack: Envelope = {
   proto_version: PROTO_VERSION,
   id: null,
   type: "device_auth",
-  payload: { device_id: "relay-ack", signature: "", timestamp_ms: 0 },
+  payload: { device_id: "relay-ack", device_pubkey: undefined, signature: "", timestamp_ms: 0 },
   };
   await pc.sendEnvelope(ack);
   await expect(authPromise).resolves.toBeUndefined();

@@ -6,6 +6,8 @@ pub enum RelayError {
     InvalidDeviceId(String),
     #[error("timestamp_ms out of allowed window")]
     StaleTimestamp,
+    #[error("invalid device auth signature")]
+    InvalidSignature,
     #[error("device not registered and not pairing: {0}")]
     DeviceNotRegistered(String),
     #[error("pairing code not found, expired, or already used")]

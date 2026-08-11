@@ -134,15 +134,19 @@ impl<T: RelayTransport> RelayConnection<T> {
     }
 
     /// Pre-pairing auth: send a `DeviceAuth` envelope (plain) and await an
-    /// ack. Must be called before `install_session_key`.
+    /// ack. Must be called before `install_session_key`. `device_pubkey` is
+    /// the Ed25519 verifying key (base64url-no-pad) the relay uses to verify
+    /// `signature`; pass `None` only for tests/legacy peers.
     pub async fn authenticate(
         &mut self,
         device_id: &str,
+        device_pubkey: Option<&str>,
         signature: &str,
         timestamp_ms: u64,
     ) -> Result<()> {
         let auth = Message::DeviceAuth(relay_protocol::DeviceAuth {
             device_id: device_id.to_string(),
+            device_pubkey: device_pubkey.map(|s| s.to_string()),
             signature: signature.to_string(),
             timestamp_ms,
         });
@@ -365,6 +369,7 @@ mod tests {
             None,
             &Message::DeviceAuth(DeviceAuth {
                 device_id: "relay-ack".to_string(),
+                device_pubkey: None,
                 signature: String::new(),
                 timestamp_ms: 0,
             }),
@@ -379,7 +384,7 @@ mod tests {
         .await
         .unwrap();
         let mut conn = dial_plain(&url, Duration::from_secs(30), false).await.unwrap();
-        conn.authenticate("dev-pc", "sig-b64", 1_700_000_000_000)
+        conn.authenticate("dev-pc", None, "sig-b64", 1_700_000_000_000)
             .await
             .expect("auth handshake succeeds");
         conn.close().await;

@@ -291,7 +291,7 @@ fn start_remote_control_driver(app: tauri::AppHandle) {
         return;
     }
     let endpoint = std::env::var("KODEX_RELAY_ENDPOINT")
-        .unwrap_or_else(|_| "wss://120.48.49.190".to_string());
+        .unwrap_or_else(|_| "ws://120.48.49.190".to_string());
     // Reuse the manager's TLS policy (it already parsed the env var) so the
     // dial path and the login HTTP client stay consistent.
     let insecure_tls = manager.insecure_tls();

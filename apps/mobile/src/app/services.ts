@@ -104,7 +104,7 @@ export class AppController {
 
     this.connState.transition("authenticating");
     const auth = buildDeviceAuthArgs(identity);
-    await this.conn.authenticate(auth.deviceId, auth.signature, auth.timestampMs);
+    await this.conn.authenticate(auth.deviceId, auth.devicePubkey, auth.signature, auth.timestampMs);
 
     this.connState.transition("paired/e2e");
     const result = await runPairingHandshake(this.conn, identity, qr);

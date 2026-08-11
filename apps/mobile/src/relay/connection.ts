@@ -54,13 +54,20 @@ export class RelayConnection {
   }
 
   /** Pre-pairing auth: send a DeviceAuth envelope (plain) and await an ack.
-   * Must be called before installSessionKey. */
+   * Must be called before installSessionKey. `devicePubkey` is the Ed25519
+   * verifying key (base64url-no-pad) the relay verifies `signature` with. */
   async authenticate(
     deviceId: string,
+    devicePubkey: string,
     signature: string,
     timestampMs: number,
   ): Promise<void> {
-    const auth: DeviceAuth = { device_id: deviceId, signature, timestamp_ms: timestampMs };
+    const auth: DeviceAuth = {
+      device_id: deviceId,
+      device_pubkey: devicePubkey,
+      signature,
+      timestamp_ms: timestampMs,
+    };
     const env: Envelope = {
       proto_version: PROTO_VERSION,
       id: null,

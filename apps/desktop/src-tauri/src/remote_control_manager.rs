@@ -38,14 +38,17 @@ impl RemoteControlManager {
         let enabled = std::env::var("KODEX_REMOTE_CONTROL")
             .map(|v| !matches!(v.trim().to_ascii_lowercase().as_str(), "0" | "false" | "off"))
             .unwrap_or(true);
+        // Plain ws:// during the no-domain dev window: the mobile companion's
+        // React Native WebSocket can't skip self-signed TLS verification, so
+        // the phone dials plain ws:// through Nginx :80. The PC driver follows
+        // the same endpoint so the pairing QR it mints is phone-compatible.
+        // Flip to wss://120.48.49.190 + insecure_tls=true once the phone can
+        // trust a cert, and to wss://relay.kodex.app once a real cert exists.
         let relay_endpoint = std::env::var("KODEX_RELAY_ENDPOINT")
-            .unwrap_or_else(|_| "wss://120.48.49.190".to_string());
-        // Skip TLS certificate verification for the relay endpoint. Hardcoded
-        // on for the self-signed relay host (no domain yet); flip to false
-        // and use wss://relay.kodex.app once a real cert exists.
+            .unwrap_or_else(|_| "ws://120.48.49.190".to_string());
         let insecure_tls = std::env::var("KODEX_RELAY_INSECURE_TLS")
             .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "on"))
-            .unwrap_or(true);
+            .unwrap_or(false);
         // Auth HTTP origin for the passwordless login endpoints. Prefer an
         // explicit override (dev relay on a separate port); otherwise derive
         // it from the WebSocket endpoint (prod reverse-proxies `/auth/*` on

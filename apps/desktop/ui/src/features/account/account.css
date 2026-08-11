@@ -272,3 +272,62 @@
   color: var(--text-strong);
   word-break: break-all;
 }
+
+.account-pairing {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 8px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border-subtle, rgba(255, 255, 255, 0.08));
+}
+
+.account-pairing-body {
+  display: flex;
+  gap: 16px;
+  align-items: flex-start;
+}
+
+.account-qr-canvas {
+  flex-shrink: 0;
+  border-radius: var(--radius-sm, 6px);
+  background: #ffffff;
+}
+
+.account-pairing-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--text-muted, rgba(255, 255, 255, 0.55));
+}
+
+.account-pairing-step {
+  margin: 0;
+  line-height: 1.45;
+}
+
+.account-pairing-conn {
+  margin-top: 4px;
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+
+.account-pairing-conn.is-on {
+  color: var(--green, #3fb950);
+}
+
+.account-pairing-conn.is-off {
+  color: var(--text-dim, rgba(255, 255, 255, 0.4));
+}
+
+.account-pairing-ttl {
+  margin: 0;
+  font-size: 11px;
+  color: var(--text-dim, rgba(255, 255, 255, 0.4));
+}
+
+.account-pairing .account-secondary-btn {
+  align-self: flex-start;
+  margin-top: 6px;
+}

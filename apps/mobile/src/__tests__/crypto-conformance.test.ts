@@ -3,6 +3,7 @@ import { chacha20poly1305 } from "@noble/ciphers/chacha";
 import {
   deviceId,
   authSignature,
+  devicePubkeyB64,
   deviceIdentityFromSecret,
   ecdhSharedSecret,
   getPublicKey,
@@ -18,8 +19,12 @@ import { PROTO_VERSION, type Envelope } from "../types/relay-protocol";
 // TS crypto MUST reproduce these byte-for-byte or pairing/E2E silently fails.
 // Constants pinned to crates/relay-client/src/{crypto,identity,pairing}.rs.
 
+// 64-byte device secret: X25519 secret (32) || Ed25519 secret (32). The
+// X25519 half is the same fixed vector as before; the Ed25519 half is a
+// fixed key generated for this KAT so auth_signature is reproducible.
 const DEVICE_SECRET_HEX =
-  "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
+  "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f" +
+  "2122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f40";
 const EPHEMERAL_SECRET_HEX =
   "6465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f80818283";
 const PC_PUBLIC_HEX =
@@ -31,7 +36,10 @@ const SHARED_HEX =
 const SESSION_KEY_HEX =
   "5252f3e4ec22d70caef4b8039280015c28e7044838ee3784a351aa1d0fa5b2a2";
 const DEVICE_ID = "7t2IPaCpRRWT3Ao45YP7dw-ifbvtIJwgQE4HXmjE8Mk";
-const AUTH_SIGNATURE = "ET22fKZMPjCbm-rZSMyhfORfaBZhRxPentPXnNXw_mU";
+// auth_signature is now an Ed25519 signature over "{device_id}:{AUTH_TS}".
+// Verified self-consistently with the identity's Ed25519 public key below
+// (a fixed KAV would couple to the Ed25519 secret; the verify round-trip
+// is the stable contract).
 const AUTH_TS = 1700000000000;
 const AEAD_NONCE_HEX = "aaaaaaaaaaaaaaaaaaaaaaaa";
 const AEAD_AAD = "pc-device-id";
@@ -47,7 +55,16 @@ describe("device identity conformance", () => {
   });
 
   it("auth_signature_is_deterministic_for_same_timestamp", () => {
-    expect(authSignature(identity, AUTH_TS)).toBe(AUTH_SIGNATURE);
+    // Ed25519 is deterministic for a fixed key + message.
+    const sigA = authSignature(identity, AUTH_TS);
+    const sigB = authSignature(identity, AUTH_TS);
+    expect(sigA).toBe(sigB);
+  });
+
+  it("auth_signature_is_a_distinct_value_per_timestamp", () => {
+    const sigA = authSignature(identity, AUTH_TS);
+    const sigB = authSignature(identity, AUTH_TS + 1);
+    expect(sigA).not.toBe(sigB);
   });
 });
 

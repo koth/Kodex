@@ -6,6 +6,7 @@ import {
   remoteControlSendLoginCode,
 } from "../../lib/tauri";
 import "./account.css";
+import { PairingQrPanel } from "./PairingQrPanel";
 
 interface Props {
   /** Login state captured when the modal opened. */
@@ -36,6 +37,8 @@ export function LoginModal({ loggedIn, accountEmail, onClose, onChanged }: Props
   const [code, setCode] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Bumps after a login/logout so the pairing panel re-mints its QR.
+  const [pairingRefresh, setPairingRefresh] = useState(0);
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
@@ -68,6 +71,7 @@ export function LoginModal({ loggedIn, accountEmail, onClose, onChanged }: Props
     setError(null);
     try {
       await remoteControlLogin(trimmedEmail, trimmedCode);
+      setPairingRefresh((n) => n + 1);
       onChanged();
       onClose();
     } catch (e) {
@@ -83,6 +87,7 @@ export function LoginModal({ loggedIn, accountEmail, onClose, onChanged }: Props
     setError(null);
     try {
       await remoteControlLogout();
+      setPairingRefresh((n) => n + 1);
       onChanged();
       onClose();
     } catch (e) {
@@ -123,6 +128,7 @@ export function LoginModal({ loggedIn, accountEmail, onClose, onChanged }: Props
               <span className="account-hint">已登录账号</span>
               <span className="account-email">{accountEmail ?? "—"}</span>
               {error && <div className="account-error">{error}</div>}
+              <PairingQrPanel refreshKey={pairingRefresh} />
               <div className="account-actions">
                 <button
                   type="button"

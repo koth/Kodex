@@ -105,6 +105,9 @@ export interface PairingRegister {
 }
 export interface DeviceAuth {
   device_id: string;
+  /** Ed25519 verifying key (base64url-no-pad). Optional for legacy peers. */
+  device_pubkey?: string;
+  /** Ed25519 signature over `{device_id}:{timestamp_ms}`, base64url-no-pad. */
   signature: string;
   timestamp_ms: number;
 }

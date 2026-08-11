@@ -38,7 +38,13 @@ pub struct PairingRegister {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DeviceAuth {
     pub device_id: String,
-    /// Signature over `{device_id,timestamp_ms}`, base64-encoded.
+    /// Ed25519 public key (base64url-no-pad) the device uses to sign. The
+    /// relay verifies `signature` with this key and, when present, that
+    /// `device_id` is derived from it. Optional for backward compat with
+    /// pre-Ed25519 peers (the relay skips signature verification then).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub device_pubkey: Option<String>,
+    /// Ed25519 signature over `{device_id}:{timestamp_ms}` (base64url-no-pad).
     pub signature: String,
     pub timestamp_ms: u64,
 }

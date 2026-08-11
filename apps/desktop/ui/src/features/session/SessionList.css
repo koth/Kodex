@@ -1160,7 +1160,7 @@
   display: flex;
   flex-direction: column;
   gap: 2px;
-  padding: 4px 10px 8px;
+  padding: 4px 14px 8px;
   /* Long chat lists used to overflow the sidebar below the projects list and
      get clipped with no way to reach the remaining sessions. Bound the
      section and let it scroll on its own instead. */

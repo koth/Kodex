@@ -24,12 +24,14 @@ export function PairingScreen() {
   async function pairFromJson(qrJson: string) {
     setError(null);
     try {
-      const qr = parsePairingQr(qrJson, false);
+      const allowInsecure =
+        process.env.EXPO_PUBLIC_RELAY_ALLOW_INSECURE_WS === "1";
+      const qr = parsePairingQr(qrJson, allowInsecure);
       setPhase("dialing");
       const transport = new WsTransport(qr.relay_endpoint);
       await transport.ready;
       setPhase("authenticating");
-      await controller.pairFromTransport(transport, qrJson, false);
+      await controller.pairFromTransport(transport, qrJson, allowInsecure);
       setPhase("connected");
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
