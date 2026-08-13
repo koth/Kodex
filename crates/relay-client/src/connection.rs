@@ -119,18 +119,26 @@ impl<T: RelayTransport> RelayConnection<T> {
     /// Receive the next envelope: decrypt an `EncryptedEnvelope` when a
     /// session key is installed, otherwise parse a plain `Envelope`.
     pub async fn recv_envelope(&mut self) -> Result<Option<Envelope>> {
-        let Some(frame) = self.transport.recv_text().await? else {
-            return Ok(None);
-        };
-        let envelope = match &self.session_key {
-            Some(key) => {
-                let enc: EncryptedEnvelope = serde_json::from_str(&frame)
-                    .context("decode encrypted envelope")?;
-                decrypt(key, &enc)?
-            }
-            None => serde_json::from_str(&frame).context("decode plain envelope")?,
-        };
-        Ok(Some(envelope))
+        loop {
+            let Some(frame) = self.transport.recv_text().await? else {
+                return Ok(None);
+            };
+            let envelope = match &self.session_key {
+                Some(key) => {
+                    let enc: EncryptedEnvelope = serde_json::from_str(&frame)
+                        .context("decode encrypted envelope")?;
+                    decrypt(key, &enc)?
+                }
+                None => {
+                    if frame.contains("\"to_device_id\"") {
+                        eprintln!("[remote-control] recv_envelope: skipping encrypted frame before key installed");
+                        continue;
+                    }
+                    serde_json::from_str(&frame).context("decode plain envelope")?
+                }
+            };
+            return Ok(Some(envelope));
+        }
     }
 
     /// Pre-pairing auth: send a `DeviceAuth` envelope (plain) and await an

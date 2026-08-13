@@ -29,7 +29,7 @@ mod pairing;
 
 pub use crypto::{SessionKey, decrypt, encrypt};
 pub use connection::{RelayConnection, RelayTransport, WsTransport, dial_plain, spawn_mock_relay};
-pub use driver::{ControlHandler, EventSource, RelayDriver};
+pub use driver::{ControlHandler, EventSource, PairingHandler, RelayDriver};
 pub use binding::{BindOutcome, BoundDevice, SubscriptionState};
 pub use account::{AccountSession, LoginClient, auth_base_url_from_ws_endpoint};
 pub use identity::DeviceIdentity;

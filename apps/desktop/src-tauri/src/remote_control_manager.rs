@@ -12,12 +12,17 @@ use relay_client::{
     AccountSession, DeviceIdentity, LoginClient, PairingCode, DEFAULT_PAIRING_TTL,
     auth_base_url_from_ws_endpoint, build_qr_payload,
 };
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
+use tokio::sync::Notify;
 
 pub struct RemoteControlManager {
     inner: Mutex<Inner>,
     app_paths: app_core::AppPaths,
     login: LoginClient,
+    /// Notified when a fresh pairing code is minted so the driver loop can
+    /// re-register it with the relay on the current connection (or reconnect
+    /// to do so). Shared with the driver task.
+    pairing_notify: Arc<Notify>,
 }
 
 struct Inner {
@@ -76,7 +81,14 @@ impl RemoteControlManager {
             }),
             app_paths,
             login,
+            pairing_notify: Arc::new(Notify::new()),
         }
+    }
+
+    /// A `Notify` handle the driver loop selects on so a freshly minted
+    /// pairing code can be re-registered on the current relay connection.
+    pub fn pairing_notify(&self) -> Arc<Notify> {
+        self.pairing_notify.clone()
     }
 
     /// Load (or create) the device identity and record its id. Called once
@@ -162,6 +174,10 @@ impl RemoteControlManager {
             .map_err(|e| format!("encode qr payload: {e}"))?;
         inner.pairing_code = Some(code);
         inner.pairing_qr = Some(json.clone());
+        // Wake the driver loop so it re-registers this code with the relay
+        // on the current connection (reconnecting if needed).
+        drop(inner);
+        self.pairing_notify.notify_one();
         Ok(Some(json))
     }
 
@@ -199,5 +215,24 @@ impl RemoteControlManager {
     /// `KODEX_RELAY_INSECURE_TLS` env var; defaults to off.
     pub fn insecure_tls(&self) -> bool {
         self.inner.lock().expect("rc manager mutex poisoned").insecure_tls
+    }
+
+    /// Load (or create) the device identity from the persisted key file.
+    /// Used by the driver loop to authenticate to the relay.
+    pub fn device_identity(&self) -> anyhow::Result<DeviceIdentity> {
+        let key_path = self.app_paths.root().join("remote-control-device.key");
+        DeviceIdentity::load_or_create(&key_path)
+    }
+
+    /// The currently minted pairing code, if any (and not yet expired).
+    /// The driver registers this with the relay after authenticating so a
+    /// scanning phone's `PairingInitiate` can be routed to this PC.
+    pub fn current_pairing_code(&self) -> Option<String> {
+        let mut inner = self.inner.lock().expect("rc manager mutex poisoned");
+        let code = inner.pairing_code.as_mut()?;
+        if code.is_expired() {
+            return None;
+        }
+        Some(code.code().to_string())
     }
 }

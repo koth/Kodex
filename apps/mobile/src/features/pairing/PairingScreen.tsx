@@ -1,7 +1,8 @@
 import { useState } from "react";
 import { View, Text, TextInput, Pressable, ActivityIndicator, ScrollView, Platform } from "react-native";
-import { CameraView, useCameraPermissions } from "expo-camera";
+import { CameraView, useCameraPermissions, scanFromURLAsync } from "expo-camera";
 import type { BarcodeScanningResult } from "expo-camera";
+import * as ImagePicker from "expo-image-picker";
 import { useAppController, useConnectionState } from "../../app/AppServicesContext";
 import { WsTransport } from "../../relay/transport";
 import { parsePairingQr } from "../../pairing/qr-parse";
@@ -45,6 +46,35 @@ export function PairingScreen() {
     void pairFromJson(result.data);
   }
 
+  async function pickQrImage() {
+    if (busy) return;
+    setError(null);
+    try {
+      const perm = await ImagePicker.requestMediaLibraryPermissionsAsync();
+      if (!perm.granted) {
+        setError("photo permission denied");
+        setPhase("error");
+        return;
+      }
+      const result = await ImagePicker.launchImageLibraryAsync({
+        mediaTypes: ["images"],
+        allowsEditing: false,
+        quality: 1,
+      });
+      if (result.canceled || !result.assets?.length) return;
+      const uri = result.assets[0].uri;
+      const scanned = await scanFromURLAsync(uri, ["qr"]);
+      if (!scanned.length) {
+        setError("no QR code found in image");
+        setPhase("error");
+        return;
+      }
+      void pairFromJson(scanned[0].data);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+      setPhase("error");
+    }
+  }
   const busy = phase === "dialing" || phase === "authenticating" || phase === "pairing" || connState === "connecting" || connState === "authenticating" || connState === "paired/e2e";
 
   return (
@@ -72,6 +102,15 @@ export function PairingScreen() {
           />
         </View>
       )}
+
+      <Text style={[styles.sectionHeader, { marginTop: spacing.lg }]}>Or upload QR image</Text>
+      <Pressable
+        style={[styles.button, { marginTop: spacing.sm }, busy && { opacity: 0.5 }]}
+        disabled={busy}
+        onPress={pickQrImage}
+      >
+        <Text style={styles.buttonText}>Pick QR from photos</Text>
+      </Pressable>
 
       <Text style={[styles.sectionHeader, { marginTop: spacing.lg }]}>Or paste payload</Text>
       <TextInput

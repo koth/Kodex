@@ -9,9 +9,10 @@
 //! `Application::subscribe_updates` + `UiPatchCursor` into `EventSource`.
 
 use anyhow::Result;
-use relay_protocol::{ControlRequest, ControlResponse, Envelope, Message};
+use relay_protocol::{ControlRequest, ControlResponse, Envelope, Message, PairingConfirm};
 
 use crate::connection::RelayConnection;
+use crate::crypto::SessionKey;
 use crate::RelayTransport;
 
 /// Handles an inbound `ControlRequest`, returning the matching
@@ -32,22 +33,34 @@ pub trait EventSource: Send {
     ) -> impl std::future::Future<Output = Option<Envelope>> + Send;
 }
 
+/// Derives the E2E session key from a `PairingConfirm` received over the
+/// relay. The shell implements this with the PC's static X25519 secret and
+/// the phone's ephemeral public key carried in `session_key_material`.
+pub trait PairingHandler: Send {
+    fn derive_session_key(
+        &mut self,
+        confirm: PairingConfirm,
+    ) -> impl std::future::Future<Output = Result<(SessionKey, String)>> + Send;
+}
+
 /// Drives a relay connection: routes inbound control requests to a
 /// `ControlHandler` and pushes outbound events from an `EventSource`,
 /// both over the same E2E connection. Fail-open: any connection error
 /// ends `run` without panicking; local sessions are unaffected.
-pub struct RelayDriver<T: RelayTransport, H: ControlHandler, E: EventSource> {
+pub struct RelayDriver<T: RelayTransport, H: ControlHandler, E: EventSource, P: PairingHandler> {
     conn: RelayConnection<T>,
     handler: H,
     events: E,
+    pairing: P,
 }
 
-impl<T: RelayTransport, H: ControlHandler, E: EventSource> RelayDriver<T, H, E> {
-    pub fn new(conn: RelayConnection<T>, handler: H, events: E) -> Self {
+impl<T: RelayTransport, H: ControlHandler, E: EventSource, P: PairingHandler> RelayDriver<T, H, E, P> {
+    pub fn new(conn: RelayConnection<T>, handler: H, events: E, pairing: P) -> Self {
         Self {
             conn,
             handler,
             events,
+            pairing,
         }
     }
 
@@ -87,13 +100,33 @@ impl<T: RelayTransport, H: ControlHandler, E: EventSource> RelayDriver<T, H, E> 
             Ok(message) => message,
             Err(_) => return Ok(()),
         };
-        let request = match message {
-            Message::ControlRequest(request) => request,
-            _ => return Ok(()),
-        };
-        let response = self.handler.handle(request).await;
-        let reply = Envelope::from_message(request_id, &Message::ControlResponse(response))?;
-        self.conn.send_envelope(&reply).await
+        match message {
+            Message::ControlRequest(request) => {
+                let has_key = self.conn.has_session_key();
+                eprintln!("[remote-control] received ControlRequest op={:?} has_key={}", std::mem::discriminant(&request), has_key);
+                let response = self.handler.handle(request).await;
+                let reply = Envelope::from_message(request_id, &Message::ControlResponse(response))?;
+                eprintln!("[remote-control] sending ControlResponse");
+                self.conn.send_envelope(&reply).await
+            }
+            Message::PairingConfirm(confirm) => {
+                eprintln!("[remote-control] received PairingConfirm: phone={}, pc={}, material_len={}", confirm.phone_device_id, confirm.pc_device_id, confirm.session_key_material.len());
+                // The relay forwards the phone's ephemeral public key in
+                // `session_key_material`. Derive the E2E session key and
+                // install it so subsequent control requests decrypt.
+                let (key, peer_device_id) = match self.pairing.derive_session_key(confirm).await {
+                    Ok(v) => v,
+                    Err(e) => {
+                        eprintln!("[remote-control] pairing key derivation failed: {e}");
+                        return Err(e);
+                    }
+                };
+                eprintln!("[remote-control] installed session key, peer={}", peer_device_id);
+                self.conn.install_session_key(key, peer_device_id);
+                Ok(())
+            }
+            _ => Ok(()),
+        }
     }
 }
 
@@ -174,6 +207,18 @@ mod tests {
         }
     }
 
+    /// Pairing handler that never derives a key (no pairing in these tests).
+    struct NoopPairing;
+
+    impl PairingHandler for NoopPairing {
+        async fn derive_session_key(
+            &mut self,
+            _confirm: PairingConfirm,
+        ) -> Result<(SessionKey, String)> {
+            anyhow::bail!("no pairing expected in this test")
+        }
+    }
+
     /// Event source that yields N canned event envelopes then stops.
     struct FixedEvents {
         frames: Vec<Envelope>,
@@ -202,7 +247,7 @@ mod tests {
         let events = FixedEvents {
             frames: Vec::new(),
         };
-        let driver = RelayDriver::new(pc_conn, handler, events);
+        let driver = RelayDriver::new(pc_conn, handler, events, NoopPairing);
         let task = tokio::spawn(async move { driver.run().await });
 
         let request_id = Uuid::new_v4();
@@ -234,7 +279,7 @@ mod tests {
         let events = FixedEvents {
             frames: Vec::new(),
         };
-        let driver = RelayDriver::new(pc_conn, handler, events);
+        let driver = RelayDriver::new(pc_conn, handler, events, NoopPairing);
         let task = tokio::spawn(async move { driver.run().await });
 
         let request_id = Uuid::new_v4();
@@ -273,7 +318,7 @@ mod tests {
         let events = FixedEvents {
             frames: vec![event],
         };
-        let driver = RelayDriver::new(pc_conn, handler, events);
+        let driver = RelayDriver::new(pc_conn, handler, events, NoopPairing);
         let task = tokio::spawn(async move { driver.run().await });
 
         let env = phone
@@ -303,7 +348,7 @@ mod tests {
         let events = FixedEvents {
             frames: Vec::new(),
         };
-        let driver = RelayDriver::new(pc_conn, handler, events);
+        let driver = RelayDriver::new(pc_conn, handler, events, NoopPairing);
         let result = tokio::time::timeout(Duration::from_secs(5), driver.run()).await;
         assert!(result.is_ok(), "driver run completes (does not hang)");
     }
@@ -324,7 +369,7 @@ mod tests {
         let events = FixedEvents {
             frames: Vec::new(),
         };
-        let driver = RelayDriver::new(pc_conn, handler, events);
+        let driver = RelayDriver::new(pc_conn, handler, events, NoopPairing);
         let task = tokio::spawn(async move { driver.run().await });
 
         let request_id = Uuid::new_v4();

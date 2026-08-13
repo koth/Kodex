@@ -126,6 +126,26 @@ impl DeviceIdentity {
         base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(self.public.to_bytes())
     }
 
+    /// Derive the E2E session key from the PC static X25519 secret and the
+    /// phone's ephemeral public key (base64url-no-pad), matching the phone's
+    /// `ecdhSharedSecret` + `deriveSessionKey`. Salt defaults to the same
+    /// `kodex-relay-salt` the phone uses.
+    pub fn derive_pairing_session_key(
+        &self,
+        phone_ephemeral_pubkey_b64: &str,
+        salt: &[u8],
+    ) -> Result<crate::crypto::SessionKey> {
+        let pub_bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(phone_ephemeral_pubkey_b64)?;
+        let arr: [u8; 32] = pub_bytes
+            .as_slice()
+            .try_into()
+            .map_err(|_| anyhow::anyhow!("phone ephemeral pubkey must be 32 bytes"))?;
+        let phone_pub = PublicKey::from(arr);
+        let shared = self.secret.diffie_hellman(&phone_pub).to_bytes();
+        Ok(crate::crypto::SessionKey::derive(&shared, salt))
+    }
+
     /// Ed25519 signature over `{device_id}:{timestamp_ms}`, base64url-no-pad.
     /// The relay verifies this with `device_pubkey_b64`.
     pub fn auth_signature(&self, timestamp_ms: u64) -> String {

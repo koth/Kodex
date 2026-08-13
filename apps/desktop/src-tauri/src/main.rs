@@ -284,7 +284,8 @@ fn try_start_codebuddy_proxy_at_launch(app: tauri::AppHandle) {
 /// events stream through `AppUpdateEventSource`.
 fn start_remote_control_driver(app: tauri::AppHandle) {
     use relay_client::{ControlHandler, EventSource, RelayDriver, dial_plain};
-    use std::time::Duration;
+    use relay_protocol::{Envelope, Message, PairingRegister};
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
     let manager = app.state::<AppState>().remote_control();
     if !manager.status().enabled {
@@ -297,6 +298,7 @@ fn start_remote_control_driver(app: tauri::AppHandle) {
     let insecure_tls = manager.insecure_tls();
 
     let app_for_loop = app.clone();
+    let pairing_notify = app.state::<AppState>().remote_control().pairing_notify();
     tauri::async_runtime::spawn(async move {
         let mut backoff = Duration::from_secs(2);
         loop {
@@ -310,7 +312,7 @@ fn start_remote_control_driver(app: tauri::AppHandle) {
                 continue;
             }
             let dial = dial_plain(&endpoint, Duration::from_secs(30), insecure_tls).await;
-            let conn = match dial {
+            let mut conn = match dial {
                 Ok(conn) => {
                     backoff = Duration::from_secs(2);
                     conn
@@ -321,14 +323,80 @@ fn start_remote_control_driver(app: tauri::AppHandle) {
                     continue;
                 }
             };
-            // Auth + run. The session key is installed later by the pairing
-            // flow; until then this drives the handshake channel only.
+            // Authenticate with the device identity (Ed25519 signature), then
+            // register the current pairing code so a scanning phone's
+            // PairingInitiate can be routed to this PC. Both are fail-open:
+            // on error we drop the connection and let the loop reconnect.
+            let manager = app_for_loop.state::<AppState>().remote_control();
+            let auth_ok = manager.device_identity().ok().and_then(|identity| {
+                let ts = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .map(|d| d.as_millis() as u64)
+                    .unwrap_or(0);
+                Some((
+                    identity.device_id(),
+                    identity.device_pubkey_b64(),
+                    identity.auth_signature(ts),
+                    ts,
+                ))
+            });
+            let authenticated = match auth_ok {
+                Some((device_id, pubkey, sig, ts)) => {
+                    conn.authenticate(&device_id, Some(&pubkey), &sig, ts)
+                        .await
+                        .is_ok()
+                }
+                None => false,
+            };
+            if !authenticated {
+                eprintln!("[remote-control] relay auth failed; reconnecting");
+                let _ = conn.close().await;
+                app_for_loop
+                    .state::<AppState>()
+                    .remote_control()
+                    .set_connected(false);
+                tokio::time::sleep(backoff).await;
+                backoff = (backoff * 2).min(Duration::from_secs(60));
+                continue;
+            }
+            // Register the current pairing code (if any) so the phone's
+            // PairingInitiate can be routed here. Best-effort: a missing or
+            // expired code just means no pairing is in flight right now.
+            if let Some(code) = manager.current_pairing_code() {
+                let reg = Envelope::from_message(
+                    None,
+                    &Message::PairingRegister(PairingRegister { pairing_code: code }),
+                );
+                if let Ok(env) = reg {
+                    if conn.send_envelope(&env).await.is_ok() {
+                        // Consume the relay's SubscriptionStatus ack.
+                        let _ = conn.recv_envelope().await;
+                    }
+                }
+            }
+            app_for_loop
+                .state::<AppState>()
+                .remote_control()
+                .set_connected(true);
+            // Run the control-request router + event pusher. Select against
+            // `pairing_notify` so a freshly minted pairing code interrupts the
+            // run, drops this connection, and reconnects to re-register the
+            // new code (the relay binds a pairing code to a connection).
             let handler =
                 crate::remote_control_bridge::DesktopControlHandler::new(app_for_loop.clone());
             let events =
                 crate::remote_control_bridge::AppUpdateEventSource::new(app_for_loop.clone());
-            let driver = RelayDriver::new(conn, handler, events);
-            let _ = driver.run().await;
+            let pairing =
+                crate::remote_control_bridge::DesktopPairingHandler::new(app_for_loop.clone());
+            let driver = RelayDriver::new(conn, handler, events, pairing);
+            let run_fut = driver.run();
+            tokio::pin!(run_fut);
+            tokio::select! {
+                _ = &mut run_fut => {}
+                _ = pairing_notify.notified() => {
+                    eprintln!("[remote-control] pairing code minted; reconnecting to register");
+                }
+            }
             app_for_loop
                 .state::<AppState>()
                 .remote_control()

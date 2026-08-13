@@ -38,6 +38,7 @@ export class RelayConnection {
             encrypt(this.sessionKey, this.peerDeviceId, envelope),
           )
         : serializeEnvelope(envelope);
+    console.log(`[conn] send ${envelope.type} encrypted=${!!this.sessionKey}`);
     await this.transport.sendText(frame);
   }
 
@@ -45,11 +46,22 @@ export class RelayConnection {
    * installed, otherwise parse a plain Envelope. Returns null on clean close. */
   async recvEnvelope(): Promise<Envelope | null> {
     const frame = await this.transport.recvText();
-    if (frame === null) return null;
+    if (frame === null) {
+      console.log("[conn] recv closed");
+      return null;
+    }
     if (this.sessionKey) {
       const enc = JSON.parse(frame) as EncryptedEnvelope;
-      return decrypt(this.sessionKey, enc);
+      try {
+        const env = decrypt(this.sessionKey, enc);
+        console.log(`[conn] recv ${env.type} decrypted=ok`);
+        return env;
+      } catch (e) {
+        console.log(`[conn] recv decrypt FAILED: ${e}`);
+        throw e;
+      }
     }
+    console.log("[conn] recv plain");
     return parseEnvelope(frame);
   }
 

@@ -90,7 +90,11 @@ pub async fn handle_pairing_initiate(
         phone_device_id: phone_device_id.to_string(),
     });
 
-    send_message(tx, None, &phone_confirm).await?;
+    // Send PC's confirm FIRST so it installs the session key before the
+    // phone (which starts sending encrypted control requests immediately
+    // after receiving its confirm). Reversing this order causes a race:
+    // the phone's first encrypted frame can arrive at the PC before the
+    // PC has installed the key, crashing the driver.
     if let Some(pc_tx) = state.connections.get(&pc_device_id) {
         send_message(&pc_tx, None, &pc_confirm).await?;
     } else {
@@ -99,5 +103,6 @@ pub async fn handle_pairing_initiate(
             "PC offline during pairing confirm; phone confirmed only (PC will not receive E2E material)"
         );
     }
+    send_message(tx, None, &phone_confirm).await?;
     Ok(())
 }

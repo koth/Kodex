@@ -7,13 +7,47 @@
 //! for the phone.
 
 use app_core::{AppUpdate, RemoteControl, UiPatchCursor, UiSnapshotUpdate};
-use relay_client::{ControlHandler, EventSource};
-use relay_protocol::{ControlRequest, ControlResponse, Envelope, EventFrame, Message};
+use relay_client::{ControlHandler, EventSource, PairingHandler, SessionKey};
+use relay_protocol::{ControlRequest, ControlResponse, Envelope, EventFrame, Message, PairingConfirm};
 use tauri::{AppHandle, Manager};
 use tokio::sync::broadcast;
 
 use crate::remote_control::DesktopRemoteControl;
 use crate::state::AppState;
+
+/// Salt for the E2E session key HKDF. Must match the phone's
+/// `RELAY_SALT = "kodex-relay-salt"` and `relay-client`'s default usage.
+const RELAY_E2E_SALT: &[u8] = b"kodex-relay-salt";
+
+/// Adapts the PC's device identity to the driver's `PairingHandler` trait.
+/// On `PairingConfirm` it derives the E2E session key from the PC static
+/// X25519 secret and the phone ephemeral public key carried in
+/// `session_key_material`, and returns it for the driver to install.
+pub struct DesktopPairingHandler {
+    app: AppHandle,
+}
+
+impl DesktopPairingHandler {
+    pub fn new(app: AppHandle) -> Self {
+        Self { app }
+    }
+}
+
+impl PairingHandler for DesktopPairingHandler {
+    async fn derive_session_key(
+        &mut self,
+        confirm: PairingConfirm,
+    ) -> anyhow::Result<(SessionKey, String)> {
+        let manager = self.app.state::<AppState>().remote_control();
+        let identity = manager.device_identity()?;
+        let key = identity.derive_pairing_session_key(
+            &confirm.session_key_material,
+            RELAY_E2E_SALT,
+        )?;
+        // The phone's device id is the peer for E2E AAD.
+        Ok((key, confirm.phone_device_id))
+    }
+}
 
 /// Adapts `DesktopRemoteControl` to the driver's `ControlHandler` trait.
 /// Each inbound `ControlRequest` is dispatched to the matching

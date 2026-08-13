@@ -108,6 +108,12 @@ export class AppController {
 
     this.connState.transition("paired/e2e");
     const result = await runPairingHandshake(this.conn, identity, qr);
+    // Diagnostic: log session key prefix + peer id so it can be matched
+    // against the PC's derived key. (Hermes console -> logcat ReactNativeJS.)
+    const keyHex = Array.from(result.sessionKey.bytes.slice(0, 8))
+      .map((b) => b.toString(16).padStart(2, "0"))
+      .join("");
+    console.log(`[pairing] sessionKey prefix=${keyHex} pcDeviceId=${result.pcDeviceId} phoneDeviceId=${result.phoneDeviceId}`);
     this.conn.installSessionKey(result.sessionKey, result.pcDeviceId);
 
     this.control = new ControlClient(this.conn);

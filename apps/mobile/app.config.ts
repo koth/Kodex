@@ -17,7 +17,7 @@ export default ({ config }: ConfigContext): ExpoConfig => ({
     bundleIdentifier: "com.kodex.mobile",
     supportsTablet: true,
   },
-  plugins: ["expo-secure-store"],
+  plugins: ["expo-secure-store", "expo-image-picker"],
   experiments: {
     tsconfigPaths: true,
   },
