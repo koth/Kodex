@@ -12,6 +12,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/0005_subscriptions.sql"),
     include_str!("../migrations/0006_login_codes.sql"),
     include_str!("../migrations/0007_accounts_email.sql"),
+    include_str!("../migrations/0008_pairings_x25519.sql"),
 ];
 
 #[derive(Clone)]
@@ -174,13 +175,15 @@ self.blocking(move |c| {
         pairing_id: String,
         pc_device_id: String,
         phone_device_id: String,
+        pc_x25519_pubkey: String,
     ) -> Result<()> {
 self.blocking(move |c| {
             c.execute(
                 "INSERT INTO pairings \
-                 (pairing_id, pc_device_id, phone_device_id, created_at, bound, account_id) \
-                 VALUES (?1, ?2, ?3, ?4, 0, NULL)",
-                params![pairing_id, pc_device_id, phone_device_id, now_ms()],
+                 (pairing_id, pc_device_id, phone_device_id, created_at, bound, account_id, \
+                  pc_x25519_pubkey) \
+                 VALUES (?1, ?2, ?3, ?4, 0, NULL, ?5)",
+                params![pairing_id, pc_device_id, phone_device_id, now_ms(), pc_x25519_pubkey],
             )?;
             Ok(())
         })
@@ -323,6 +326,27 @@ self.blocking(move |c| {
                 out.push(row?);
             }
             Ok(out)
+        })
+        .await
+    }
+
+    /// `(pc_device_id, phone_device_id, account_id)` for a bound pairing
+    /// identified by its `pairing_id` (the `pairing_token` sent to peers).
+    /// Returns `None` for an unknown or unbound pairing.
+    pub async fn bound_pairing_by_token(
+        &self,
+        pairing_token: String,
+    ) -> Result<Option<(String, String, String, String)>> {
+        self.blocking(move |c| {
+            let row: Option<(String, String, String, String)> = c
+                .query_row(
+                    "SELECT pc_device_id, phone_device_id, account_id, pc_x25519_pubkey FROM pairings \
+                     WHERE pairing_id = ?1 AND bound = 1 AND account_id IS NOT NULL",
+                    params![pairing_token],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+                )
+                .optional()?;
+            Ok(row)
         })
         .await
     }
@@ -476,7 +500,7 @@ mod tests {
         let db = Db::open_in_memory().unwrap();
         db.register_device("pc".into(), "pk".into()).await.unwrap();
         db.register_device("ph".into(), "pk2".into()).await.unwrap();
-        db.create_pairing("p-1".into(), "pc".into(), "ph".into())
+        db.create_pairing("p-1".into(), "pc".into(), "ph".into(), "pc-x".into())
             .await
             .unwrap();
         assert_eq!(

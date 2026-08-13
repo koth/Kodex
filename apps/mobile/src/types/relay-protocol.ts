@@ -100,6 +100,10 @@ export interface PairingConfirm {
   pc_device_id: string;
   phone_device_id: string;
 }
+export interface PairingResume {
+  pairing_token: string;
+  phone_ephemeral_pubkey: string;
+}
 export interface PairingRegister {
   pairing_code: string;
 }
@@ -132,6 +136,7 @@ export type Message =
   | { type: "event"; payload: EventFrame }
   | { type: "pairing_initiate"; payload: PairingInitiate }
   | { type: "pairing_confirm"; payload: PairingConfirm }
+  | { type: "pairing_resume"; payload: PairingResume }
   | { type: "pairing_register"; payload: PairingRegister }
   | { type: "device_auth"; payload: DeviceAuth }
   | { type: "bind_device_request"; payload: BindDeviceRequest }

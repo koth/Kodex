@@ -15,5 +15,5 @@ pub use envelope::{EncryptedEnvelope, Envelope, Message, PROTO_VERSION};
 pub use events::EventFrame;
 pub use pairing::{
     BindDeviceRequest, BindDeviceResponse, DeviceAuth, PairingConfirm, PairingInitiate,
-    PairingRegister, SubscriptionStatus,
+    PairingRegister, PairingResume, SubscriptionStatus,
 };

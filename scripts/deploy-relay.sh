@@ -260,7 +260,7 @@ ssh "${RELAY_HOST}" "set -euo pipefail
 ok "Binary deployed to ${RELAY_HOST}:${REMOTE_DIR}/bin/maju-relay-server"
 
 # ---------------------------------------------------------------------------
-# Step 4: restart the systemd service and smoke-test /health.
+# Step 4: run DB migrations, restart the systemd service, and smoke-test /health.
 # ---------------------------------------------------------------------------
 
 info "Restarting maju-relay.service (if installed)..."
@@ -271,6 +271,18 @@ info "Restarting maju-relay.service (if installed)..."
 if ssh "${RELAY_HOST}" "systemctl cat maju-relay.service >/dev/null 2>&1"; then
   ssh "${RELAY_HOST}" "set -euo pipefail
     systemctl daemon-reload
+    # SQLite schema migrations are embedded in the binary and applied by
+    # Db::open, which normal startup also runs. Execute them explicitly
+    # here (with the same env file systemd reads) so a migration failure
+    # aborts the deploy before we stop the currently-running service.
+    env_file=/etc/maju-relay/env
+    db_path='/var/lib/maju-relay/kodex-relay.sqlite'
+    if [[ -r \"\$env_file\" ]]; then
+      configured=\$(sed -n 's/^RELAY_DB_PATH=//p' \"\$env_file\" | tail -n1)
+      if [[ -n \"\$configured\" ]]; then db_path=\"\$configured\"; fi
+    fi
+    runuser -u maju-relay -- env RELAY_DB_PATH=\"\$db_path\" \
+      '${REMOTE_DIR}/bin/maju-relay-server' migrate
     systemctl restart maju-relay.service
     # Wait up to ~10s for the service to report active.
     for _ in \$(seq 1 20); do

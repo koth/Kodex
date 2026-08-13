@@ -6,6 +6,21 @@ use maju_relay_server::{
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt().init();
+
+    // `maju-relay-server migrate` runs schema migrations and exits without
+    // binding any sockets. Deploy runs this manually before restarting
+    // systemd so a failed/unsafe migration is visible as a deploy failure
+    // rather than surfacing after the service has already been restarted.
+    // SQLite migrations are idempotent and load in the same order as the
+    // server's normal startup (`Db::open`).
+    if std::env::args().nth(1).as_deref() == Some("migrate") {
+        let config = Config::from_env();
+        tracing::info!(db_path = %config.db_path, "running schema migrations");
+        let _db = Db::open(&config.db_path)?;
+        tracing::info!("migrations complete");
+        return Ok(());
+    }
+
     let config = Config::from_env();
     tracing::info!(?config, "starting maju-relay-server");
     let db = Db::open(&config.db_path)?;

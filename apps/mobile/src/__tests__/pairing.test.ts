@@ -2,12 +2,13 @@ import { describe, it, expect } from "vitest";
 import { RelayConnection } from "../relay/connection";
 import { linkedPair } from "./mock-relay";
 import { parsePairingQr, pcStaticPublicKey } from "../pairing/qr-parse";
-import { runPairingHandshake } from "../pairing/pairing-flow";
+import { runPairingHandshake, runPairingResume } from "../pairing/pairing-flow";
 import { deviceIdentityFromSecret, getPublicKey, ecdhSharedSecret, deriveSessionKey } from "../crypto";
 import { encodeBase64UrlNoPad, decodeBase64UrlNoPad, bytesToHex } from "../util/base64url";
 import { fromMessage } from "../relay/framing";
 import { encrypt, decrypt } from "../crypto/aead";
 import type { PairingInitiate, PairingQrPayload } from "../types/relay-protocol";
+import type { BoundDevice } from "../account/binding";
 
 // PC static secret [200..231]; its public key is the KAT PC_PUBLIC_HEX.
 const PC_SECRET = Uint8Array.from({ length: 32 }, (_, i) => 200 + i);
@@ -103,6 +104,53 @@ describe("pairing handshake", () => {
   // and the reverse direction decrypts too
   const enc = encrypt(result.sessionKey, "phone-dev", env);
   expect(decrypt(pcSessionKey, enc)).toEqual(env);
+  });
+});
+
+describe("pairing resume", () => {
+  it("derives a fresh session key from the persisted PC static pubkey", async () => {
+    const [phoneT, pcT] = linkedPair();
+    const phoneConn = new RelayConnection(phoneT, 30_000);
+    const pcConn = new RelayConnection(pcT, 30_000);
+    const pcStatic = getPublicKey(PC_SECRET);
+    const bound: BoundDevice = {
+      device_id: "phone-dev",
+      auth_token: "tok",
+      pairing_token: "ptok",
+      peer_device_id: "pc-dev",
+      peer_static_pubkey_b64: encodeBase64UrlNoPad(pcStatic),
+    };
+
+    const phonePromise = runPairingResume(phoneConn, bound);
+
+    const resumeEnv = (await pcConn.recvEnvelope())!;
+    expect(resumeEnv.type).toBe("pairing_resume");
+    const resume = resumeEnv.payload as {
+      pairing_token: string;
+      phone_ephemeral_pubkey: string;
+    };
+    expect(resume.pairing_token).toBe("ptok");
+    const phoneEphPub = decodeBase64UrlNoPad(resume.phone_ephemeral_pubkey);
+    const pcShared = ecdhSharedSecret(PC_SECRET, phoneEphPub);
+    const pcSessionKey = deriveSessionKey(pcShared);
+
+    await pcConn.sendEnvelope(
+      fromMessage(null, {
+        type: "pairing_confirm",
+        payload: {
+          pairing_token: "ptok",
+          session_key_material: resume.phone_ephemeral_pubkey,
+          pc_device_id: "pc-dev",
+          phone_device_id: "phone-dev",
+        },
+      }),
+    );
+
+    const result = await phonePromise;
+    expect(result.pcDeviceId).toBe("pc-dev");
+    expect(bytesToHex(result.sessionKey.bytes)).toBe(
+      bytesToHex(pcSessionKey.bytes),
+    );
   });
 });
 // end of file

@@ -1,19 +1,26 @@
 import type { RelayConnection } from "../relay/connection";
-import type { PairingQrPayload, PairingConfirm } from "../types/relay-protocol";
+import type {
+  PairingQrPayload,
+  PairingConfirm,
+  PairingResume,
+} from "../types/relay-protocol";
 import { fromMessage } from "../relay/framing";
 import { PROTO_VERSION } from "../types/relay-protocol";
 import type { DeviceIdentity } from "../crypto/identity";
 import { deviceId, authSignature, devicePubkeyB64, publicKeyB64 } from "../crypto/identity";
 import { generatePrivateKey, getPublicKey, ecdhSharedSecret } from "../crypto/ecdh";
-import { encodeBase64UrlNoPad } from "../util/base64url";
+import { decodeBase64UrlNoPad, encodeBase64UrlNoPad } from "../util/base64url";
 import { deriveSessionKey, type SessionKey } from "../crypto/session-key";
 import { pcStaticPublicKey } from "./qr-parse";
+import type { BoundDevice } from "../account/binding";
 
 export interface PairingResult {
   sessionKey: SessionKey;
   pcDeviceId: string;
   phoneDeviceId: string;
   pairingToken: string;
+  /** PC static X25519 public key, base64url-no-pad, for bound reconnect. */
+  pcStaticPubkeyB64: string;
 }
 
 /**
@@ -62,6 +69,48 @@ export async function runPairingHandshake(
   pcDeviceId: confirm.pc_device_id,
   phoneDeviceId: confirm.phone_device_id,
   pairingToken: confirm.pairing_token,
+  pcStaticPubkeyB64: qr.pc_device_pubkey,
+  };
+}
+
+/**
+ * Bound-account resume: the phone already has a persisted `BoundDevice`; it
+ * mints a fresh ephemeral X25519 keypair, asks the relay to forward the fresh
+ * public key to the paired PC, and derives a fresh session key from the PC's
+ * stored static public key. The ephemeral secret is discarded after use.
+ */
+export async function runPairingResume(
+  conn: RelayConnection,
+  bound: BoundDevice,
+): Promise<{ sessionKey: SessionKey; pcDeviceId: string }> {
+  const pcStaticPubB64 = bound.peer_static_pubkey_b64;
+  if (!pcStaticPubB64) {
+    throw new Error("bound device is missing the PC static public key; re-scan required");
+  }
+  const ephemeralSecret = generatePrivateKey();
+  const phoneEphPub = getPublicKey(ephemeralSecret);
+  const pcStaticPub = decodeBase64UrlNoPad(pcStaticPubB64);
+
+  const resume: PairingResume = {
+    pairing_token: bound.pairing_token,
+    phone_ephemeral_pubkey: encodeBase64UrlNoPad(phoneEphPub),
+  };
+  const env = fromMessage(null, { type: "pairing_resume", payload: resume });
+  await conn.sendEnvelope(env);
+
+  const confirmEnv = await conn.recvEnvelope();
+  if (confirmEnv === null) {
+    throw new Error("relay closed during pairing resume");
+  }
+  if (confirmEnv.type !== "pairing_confirm") {
+    throw new Error(`unexpected pairing resume response: ${confirmEnv.type}`);
+  }
+  const confirm = confirmEnv.payload as PairingConfirm;
+
+  const shared = ecdhSharedSecret(ephemeralSecret, pcStaticPub);
+  return {
+    sessionKey: deriveSessionKey(shared),
+    pcDeviceId: confirm.pc_device_id,
   };
 }
 

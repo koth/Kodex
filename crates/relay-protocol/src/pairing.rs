@@ -26,6 +26,18 @@ pub struct PairingConfirm {
     pub phone_device_id: String,
 }
 
+/// Already-paired device -> relay: resume a persisted (bound) pairing without
+/// re-scanning. The phone mints a fresh ephemeral X25519 keypair and sends its
+/// public key so the relay can forward it to the paired PC; the PC re-derives
+/// the E2E session key from its static secret, matching the phone's fresh
+/// derivation. The relay never sees either peer's secret.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PairingResume {
+    pub pairing_token: String,
+    /// Phone's fresh ephemeral X25519 public key, base64url-no-pad.
+    pub phone_ephemeral_pubkey: String,
+}
+
 /// PC -> relay: register a one-time pairing code against the sender's
 /// connection so a scanning phone's `PairingInitiate` can be routed to this PC.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

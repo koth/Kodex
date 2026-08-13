@@ -10,6 +10,7 @@
 
 use anyhow::Result;
 use relay_protocol::{ControlRequest, ControlResponse, Envelope, Message, PairingConfirm};
+use std::sync::{Arc, Mutex};
 
 use crate::connection::RelayConnection;
 use crate::crypto::SessionKey;
@@ -52,15 +53,36 @@ pub struct RelayDriver<T: RelayTransport, H: ControlHandler, E: EventSource, P: 
     handler: H,
     events: E,
     pairing: P,
+    session_sink: Arc<Mutex<Option<(SessionKey, String)>>>,
 }
 
 impl<T: RelayTransport, H: ControlHandler, E: EventSource, P: PairingHandler> RelayDriver<T, H, E, P> {
     pub fn new(conn: RelayConnection<T>, handler: H, events: E, pairing: P) -> Self {
+        Self::new_with_session_sink(
+            conn,
+            handler,
+            events,
+            pairing,
+            Arc::new(Mutex::new(None)),
+        )
+    }
+
+    /// Same as [`RelayDriver::new`], but records the most recently installed
+    /// E2E session key so a caller-owned reconnect loop can reinstall it on
+    /// the next connection without a fresh pairing handshake.
+    pub fn new_with_session_sink(
+        conn: RelayConnection<T>,
+        handler: H,
+        events: E,
+        pairing: P,
+        session_sink: Arc<Mutex<Option<(SessionKey, String)>>>,
+    ) -> Self {
         Self {
             conn,
             handler,
             events,
             pairing,
+            session_sink,
         }
     }
 
@@ -123,6 +145,12 @@ impl<T: RelayTransport, H: ControlHandler, E: EventSource, P: PairingHandler> Re
                 };
                 eprintln!("[remote-control] installed session key, peer={}", peer_device_id);
                 self.conn.install_session_key(key, peer_device_id);
+                if let Ok(mut guard) = self.session_sink.lock() {
+                    *guard = self
+                        .conn
+                        .session_key()
+                        .zip(self.conn.peer_device_id());
+                }
                 Ok(())
             }
             _ => Ok(()),

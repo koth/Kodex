@@ -10,6 +10,9 @@ export interface BoundDevice {
   auth_token: string;
   pairing_token: string;
   peer_device_id: string;
+  /** PC static X25519 public key (base64url-no-pad) for resume derivation.
+   * Optional for legacy bound records created before this field existed. */
+  peer_static_pubkey_b64?: string;
 }
 
 export const BOUND_DEVICE_KEY = "kodex.bound-device";
@@ -54,6 +57,7 @@ export function bindOutcomeFromResponse(
   authToken: string,
   pairingToken: string,
   peerDeviceId: string,
+  peerStaticPubkeyB64?: string,
 ): BindOutcome {
   if (response.ok) {
   return {
@@ -63,6 +67,7 @@ export function bindOutcomeFromResponse(
   auth_token: authToken,
   pairing_token: pairingToken,
   peer_device_id: peerDeviceId,
+  peer_static_pubkey_b64: peerStaticPubkeyB64,
   },
   };
   }

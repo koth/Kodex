@@ -97,6 +97,10 @@ impl Session {
                 let did = self.require_device()?;
                 crate::pairing::handle_pairing_initiate(&self.state, pi, did, &self.tx).await?;
             }
+            Message::PairingResume(pr) => {
+                let did = self.require_device()?;
+                crate::pairing::handle_pairing_resume(&self.state, pr, did, &self.tx).await?;
+            }
             other => {
                 tracing::debug!(message = ?other, "ignoring envelope");
             }

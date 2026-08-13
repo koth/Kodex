@@ -13,7 +13,11 @@ import { loadOrCreateIdentity, deviceId } from "../crypto/identity";
 import type { SessionKey } from "../crypto/session-key";
 import type { PairingQrPayload, Envelope, EventFrame, SubscriptionStatus } from "../types/relay-protocol";
 import { parsePairingQr } from "../pairing/qr-parse";
-import { runPairingHandshake, buildDeviceAuthArgs } from "../pairing/pairing-flow";
+import {
+  runPairingHandshake,
+  runPairingResume,
+  buildDeviceAuthArgs,
+} from "../pairing/pairing-flow";
 import type { UiSnapshot, PermissionInputResponse } from "../types";
 import {
   loadBoundDevice,
@@ -161,13 +165,54 @@ export class AppController {
   }
 
   /** Best-effort bound reconnect: re-scan is required unless bound+active. */
-  canReconnectWithoutRescan(): boolean {
-    return canReconnectWithoutRescan(this.subscription.active, null);
+  async canReconnectWithoutRescan(): Promise<boolean> {
+    const bound = await loadBoundDevice(this.secretStore);
+    return canReconnectWithoutRescan(this.subscription.active, bound);
   }
 
   async loadBoundIfAny(): Promise<boolean> {
     const bound = await loadBoundDevice(this.secretStore);
     return bound !== null && this.subscription.active;
+  }
+
+  /**
+   * Reconnect to the previously bound PC without scanning a fresh QR. The
+   * persisted `BoundDevice` supplies the pairing token and PC static public
+   * key; this runs DeviceAuth + a fresh E2E resume handshake, installs the
+   * derived key, and restarts the receive loop.
+   */
+  async resumeFromBoundTransport(transport: RelayTransport): Promise<void> {
+    const bound = await loadBoundDevice(this.secretStore);
+    if (!bound || !this.subscription.active) {
+      throw new Error("no active bound device to resume");
+    }
+    const identity = await this.ensureIdentity();
+    this.connState.transition("connecting");
+    this.conn = new RelayConnection(transport);
+
+    this.connState.transition("authenticating");
+    const auth = buildDeviceAuthArgs(identity);
+    await this.conn.authenticate(auth.deviceId, auth.devicePubkey, auth.signature, auth.timestampMs);
+
+    this.connState.transition("paired/e2e");
+    const result = await runPairingResume(this.conn, bound);
+    this.conn.installSessionKey(result.sessionKey, result.pcDeviceId);
+
+    this.control = new ControlClient(this.conn);
+    this.permissions.setControlClient(this.control);
+    this.connState.transition("connected");
+
+    this.stopLoop = false;
+    this.loopPromise = this.runLoop().catch(() => {
+      // fail-open: a loop error demotes to disconnected for reconnect.
+    });
+
+    try {
+      const res = await this.control.getState();
+      this.sessionStore.setSnapshot(res.snapshot);
+    } catch {
+      // best-effort; pushed events will still populate the snapshot
+    }
   }
 
   async unbindAndClear(): Promise<void> {

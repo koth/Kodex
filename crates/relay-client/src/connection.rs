@@ -103,6 +103,16 @@ impl<T: RelayTransport> RelayConnection<T> {
         self.session_key.is_some()
     }
 
+    /// Clone of the installed E2E session key, if any.
+    pub fn session_key(&self) -> Option<SessionKey> {
+        self.session_key.clone()
+    }
+
+    /// Clone of the peer device id bound to the E2E session key, if any.
+    pub fn peer_device_id(&self) -> Option<String> {
+        self.peer_device_id.clone()
+    }
+
     /// Send an envelope: encrypt to `EncryptedEnvelope` when a session key
     /// is installed, otherwise send plain `Envelope` JSON (auth phase).
     pub async fn send_envelope(&mut self, envelope: &Envelope) -> Result<()> {

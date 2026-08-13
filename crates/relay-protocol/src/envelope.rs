@@ -6,7 +6,7 @@ use crate::control::{ControlRequest, ControlResponse};
 use crate::events::EventFrame;
 use crate::pairing::{
     BindDeviceRequest, BindDeviceResponse, DeviceAuth, PairingConfirm, PairingInitiate,
-    PairingRegister, SubscriptionStatus,
+    PairingRegister, PairingResume, SubscriptionStatus,
 };
 
 /// Wire protocol version. Bumped only on incompatible envelope/message
@@ -47,6 +47,7 @@ pub enum Message {
     Event(EventFrame),
     PairingInitiate(PairingInitiate),
     PairingConfirm(PairingConfirm),
+    PairingResume(PairingResume),
     PairingRegister(PairingRegister),
     DeviceAuth(DeviceAuth),
     BindDeviceRequest(BindDeviceRequest),
@@ -97,6 +98,9 @@ impl Envelope {
             }
             "pairing_confirm" => {
                 Message::PairingConfirm(serde_json::from_value(self.payload.clone())?)
+            }
+            "pairing_resume" => {
+                Message::PairingResume(serde_json::from_value(self.payload.clone())?)
             }
             "pairing_register" => {
                 Message::PairingRegister(serde_json::from_value(self.payload.clone())?)

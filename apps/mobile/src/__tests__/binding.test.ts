@@ -28,6 +28,7 @@ function makeBound(): BoundDevice {
     auth_token: "tok-abc",
     pairing_token: "ptok",
     peer_device_id: "pc-dev",
+    peer_static_pubkey_b64: "pc-x25519",
   };
 }
 
@@ -79,6 +80,7 @@ describe("bindOutcomeFromResponse", () => {
       bound.auth_token,
       bound.pairing_token,
       bound.peer_device_id,
+      bound.peer_static_pubkey_b64,
     );
     expect(outcome.kind).toBe("bound");
     if (outcome.kind === "bound") {
@@ -97,6 +99,7 @@ describe("bindOutcomeFromResponse", () => {
       bound.auth_token,
       bound.pairing_token,
       bound.peer_device_id,
+      bound.peer_static_pubkey_b64,
     );
     expect(outcome.kind).toBe("subscription_required");
   });
@@ -112,6 +115,7 @@ describe("bindOutcomeFromResponse", () => {
       bound.auth_token,
       bound.pairing_token,
       bound.peer_device_id,
+      bound.peer_static_pubkey_b64,
     );
     expect(outcome.kind).toBe("failed");
     if (outcome.kind === "failed") {
@@ -129,6 +133,7 @@ describe("bindOutcomeFromResponse", () => {
       bound.auth_token,
       bound.pairing_token,
       bound.peer_device_id,
+      bound.peer_static_pubkey_b64,
     );
     expect(outcome.kind).toBe("failed");
     if (outcome.kind === "failed") {

@@ -283,7 +283,7 @@ fn try_start_codebuddy_proxy_at_launch(app: tauri::AppHandle) {
 /// reachable, control requests route through `DesktopControlHandler` and
 /// events stream through `AppUpdateEventSource`.
 fn start_remote_control_driver(app: tauri::AppHandle) {
-    use relay_client::{ControlHandler, EventSource, RelayDriver, dial_plain};
+    use relay_client::{RelayDriver, SessionKey, dial_plain};
     use relay_protocol::{Envelope, Message, PairingRegister};
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -299,6 +299,7 @@ fn start_remote_control_driver(app: tauri::AppHandle) {
 
     let app_for_loop = app.clone();
     let pairing_notify = app.state::<AppState>().remote_control().pairing_notify();
+    let session_sink = Arc::new(std::sync::Mutex::new(None::<(SessionKey, String)>));
     tauri::async_runtime::spawn(async move {
         let mut backoff = Duration::from_secs(2);
         loop {
@@ -359,6 +360,14 @@ fn start_remote_control_driver(app: tauri::AppHandle) {
                 backoff = (backoff * 2).min(Duration::from_secs(60));
                 continue;
             }
+            // Reinstall the last known E2E session key on this fresh
+            // connection before running the router. This makes a transient
+            // relay/network drop recover without requiring a new QR scan.
+            if let Ok(guard) = session_sink.lock() {
+                if let Some((key, peer)) = guard.as_ref() {
+                    conn.install_session_key(key.clone(), peer.clone());
+                }
+            }
             // Register the current pairing code (if any) so the phone's
             // PairingInitiate can be routed here. Best-effort: a missing or
             // expired code just means no pairing is in flight right now.
@@ -388,7 +397,13 @@ fn start_remote_control_driver(app: tauri::AppHandle) {
                 crate::remote_control_bridge::AppUpdateEventSource::new(app_for_loop.clone());
             let pairing =
                 crate::remote_control_bridge::DesktopPairingHandler::new(app_for_loop.clone());
-            let driver = RelayDriver::new(conn, handler, events, pairing);
+            let driver = RelayDriver::new_with_session_sink(
+                conn,
+                handler,
+                events,
+                pairing,
+                session_sink.clone(),
+            );
             let run_fut = driver.run();
             tokio::pin!(run_fut);
             tokio::select! {
