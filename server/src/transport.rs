@@ -1,4 +1,5 @@
 use std::net::SocketAddr;
+use std::time::Duration;
 
 use futures::{SinkExt, StreamExt};
 use tokio::net::TcpListener;
@@ -39,16 +40,43 @@ async fn handle_connection(
     let ws = tokio_tungstenite::accept_async(stream).await?;
     let (ws_writer, ws_reader) = ws.split();
     let (tx, rx) = tokio::sync::mpsc::channel::<String>(64);
+    // Send protocol-level WebSocket pings periodically so idle peers stay
+    // alive. The read loop below treats *any* inbound frame as activity, so a
+    // peer's automatic Pong response resets its 60s heartbeat timeout even
+    // when no application traffic is flowing.
+    let ping_interval = Duration::from_secs((state.config.heartbeat_timeout_secs / 3).max(2));
+    let mut ping = tokio::time::interval(ping_interval);
 
     let writer = tokio::spawn(async move {
         let mut rx = rx;
         let mut ws_writer = ws_writer;
-        while let Some(text) = rx.recv().await {
-            if ws_writer
-                .send(tungstenite::Message::Text(text.into()))
-                .await
-                .is_err()
-            {
+        loop {
+            tokio::select! {
+                maybe_text = rx.recv() => {
+                    match maybe_text {
+                        Some(text) => {
+                            if ws_writer
+                                .send(tungstenite::Message::Text(text.into()))
+                                .await
+                                .is_err()
+                            {
+                                break;
+                            }
+                        }
+                        None => break,
+                    }
+                }
+                _ = ping.tick() => {
+                    if ws_writer
+                        .send(tungstenite::Message::Ping(vec![].into()))
+                        .await
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+            }
+            if rx.is_closed() {
                 break;
             }
         }
