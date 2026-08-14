@@ -198,13 +198,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn resume_requires_active_subscription() {
+    async fn resume_works_without_active_subscription() {
         let state = app_state();
         seed_bound_pairing(&state, "pc", "phone", "token").await;
         state.db.deactivate_subscription("acct".into()).await.unwrap();
 
-        let (phone_tx, _phone_rx) = mpsc::channel::<String>(8);
-        let err = handle_pairing_resume(
+        let (pc_tx, _pc_rx) = mpsc::channel::<String>(8);
+        state.connections.insert("pc", 1, pc_tx);
+        let (phone_tx, mut phone_rx) = mpsc::channel::<String>(8);
+        handle_pairing_resume(
             &state,
             PairingResume {
                 pairing_token: "token".into(),
@@ -214,15 +216,21 @@ mod tests {
             &phone_tx,
         )
         .await
-        .unwrap_err();
-        assert!(matches!(err, RelayError::SubscriptionRequired));
+        .unwrap();
+
+        let text = phone_rx.recv().await.unwrap();
+        let env: Envelope = serde_json::from_str(&text).unwrap();
+        assert!(matches!(
+            env.into_message().unwrap(),
+            Message::PairingConfirm(_)
+        ));
     }
 }
 
-/// Phone/PC -> relay: resume an already-bound pairing without re-scanning.
+/// Phone/PC -> relay: resume an already-created pairing without re-scanning.
 /// The phone mints a fresh ephemeral keypair and sends its public key; the
-/// relay validates the persisted pairing token (and active subscription),
-/// then forwards the fresh material to the paired PC as a `PairingConfirm`.
+/// relay validates the persisted pairing token, then forwards the fresh
+/// material to the paired PC as a `PairingConfirm`.
 /// Both peers derive the same new E2E session key from their own secret.
 pub async fn handle_pairing_resume(
     state: &AppState,
@@ -230,19 +238,13 @@ pub async fn handle_pairing_resume(
     phone_device_id: &str,
     tx: &mpsc::Sender<String>,
 ) -> Result<()> {
-    let (pc_device_id, paired_phone, account_id, pc_x25519_pubkey) = state
+    let (pc_device_id, paired_phone, _account_id, pc_x25519_pubkey) = state
         .db
-        .bound_pairing_by_token(req.pairing_token.clone())
+        .pairing_by_token(req.pairing_token.clone())
         .await?
         .ok_or(RelayError::InvalidPairingCode)?;
     if paired_phone != phone_device_id {
         return Err(RelayError::NotPaired);
-    }
-
-    let sub = state.db.subscription_status(account_id).await?;
-    if !sub.map(|(active, _, _)| active).unwrap_or(false) {
-        // Fall back to re-scan on the phone; keep the pairing record intact.
-        return Err(RelayError::SubscriptionRequired);
     }
 
     let pairing_token = req.pairing_token;

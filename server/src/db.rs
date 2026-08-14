@@ -351,6 +351,36 @@ self.blocking(move |c| {
         .await
     }
 
+    /// `(pc_device_id, phone_device_id, account_id, pc_x25519_pubkey)` for any
+    /// pairing by its `pairing_token` (bound or unbound). Resume does not
+    /// require an active subscription; it only proves the two already-paired
+    /// device identities are the same, and the fresh E2E key is re-derived
+    /// by the peers from their private keys.
+    pub async fn pairing_by_token(
+        &self,
+        pairing_token: String,
+    ) -> Result<Option<(String, String, Option<String>, String)>> {
+        self.blocking(move |c| {
+            let row: Option<(String, String, Option<String>, String)> = c
+                .query_row(
+                    "SELECT pc_device_id, phone_device_id, account_id, pc_x25519_pubkey FROM pairings \
+                     WHERE pairing_id = ?1",
+                    params![pairing_token],
+                    |r| {
+                        Ok((
+                            r.get(0)?,
+                            r.get(1)?,
+                            r.get::<_, Option<String>>(2)?,
+                            r.get(3)?,
+                        ))
+                    },
+                )
+                .optional()?;
+            Ok(row)
+        })
+        .await
+    }
+
     pub async fn deactivate_subscription(&self, account_id: String) -> Result<()> {
         self.blocking(move |c| {
             c.execute(

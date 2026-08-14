@@ -41,7 +41,12 @@ function MainStack() {
         options={({ route }) => ({ title: route.params.title })}
       >
         {({ route, navigation }) => (
-          <ConversationScreen sessionId={route.params.sessionId} title={route.params.title} onBack={() => navigation.navigate("Sessions")} />
+          <ConversationScreen
+            key={route.params.sessionId}
+            sessionId={route.params.sessionId}
+            title={route.params.title}
+            onBack={() => navigation.navigate("Sessions")}
+          />
         )}
       </Stack.Screen>
       <Stack.Screen name="Settings" options={{ title: "Settings" }}>

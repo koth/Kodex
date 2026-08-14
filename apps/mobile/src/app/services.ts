@@ -52,6 +52,8 @@ export class AppController {
   private control: ControlClient | null = null;
   private loopPromise: Promise<void> | null = null;
   private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
+  private connectingPromise: Promise<boolean> | null = null;
+  private reconnectAttempt = 0;
   private stopLoop = false;
   private subscription: SubscriptionState = { ...NO_SUBSCRIPTION };
   private onSubscriptionChange: ((state: SubscriptionState) => void) | null = null;
@@ -181,6 +183,10 @@ export class AppController {
     }
   }
 
+  private sleep(ms: number): Promise<void> {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+  }
+
   private startHeartbeat(): void {
     this.stopHeartbeat();
     this.heartbeatTimer = setInterval(() => {
@@ -280,11 +286,24 @@ export class AppController {
 
   /** Attempt the persisted pairing resume without input (startup recovery). */
   async tryAutoResume(): Promise<boolean> {
+    if (this.connectingPromise) {
+      return this.connectingPromise;
+    }
+    this.connectingPromise = this.doAutoResume().finally(() => {
+      this.connectingPromise = null;
+    });
+    return this.connectingPromise;
+  }
+
+  private async doAutoResume(): Promise<boolean> {
     try {
-      this.stopLoop = false;
       await this.resumeFromBoundTransport();
+      this.reconnectAttempt = 0;
       return true;
     } catch {
+      this.reconnectAttempt += 1;
+      const delay = Math.min(500 * 2 ** (this.reconnectAttempt - 1), 8_000);
+      await this.sleep(delay);
       this.connState.transition("disconnected");
       return false;
     }

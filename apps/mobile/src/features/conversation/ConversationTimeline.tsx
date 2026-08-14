@@ -34,7 +34,7 @@ function ConversationTimelineImpl({ snapshot, onStopTool }: Props) {
 
   const scrollToEnd = useCallback(() => {
     requestAnimationFrame(() => {
-      listRef.current?.scrollToEnd({ animated: true });
+      listRef.current?.scrollToEnd({ animated: false });
     });
   }, []);
 
@@ -48,8 +48,6 @@ function ConversationTimelineImpl({ snapshot, onStopTool }: Props) {
       renderItem={({ item }) => <View>{item.node}</View>}
       ItemSeparatorComponent={() => <View style={{ height: spacing.xs }} />}
       onContentSizeChange={scrollToEnd}
-      onLayout={scrollToEnd}
-      maintainVisibleContentPosition={{ minIndexForVisible: 0 }}
       ListEmptyComponent={
         <View style={styles.center}>
           <Text style={styles.textDim}>No messages yet.</Text>

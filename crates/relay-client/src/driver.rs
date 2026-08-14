@@ -98,9 +98,18 @@ impl<T: RelayTransport, H: ControlHandler, E: EventSource, P: PairingHandler> Re
         let mut heartbeat_tick = tokio::time::interval(heartbeat_interval);
         loop {
             if outbound_done {
-                match self.conn.recv_envelope().await? {
-                    None => return Ok(()),
-                    Some(envelope) => self.handle_inbound(envelope).await?,
+                tokio::select! {
+                    inbound = self.conn.recv_envelope() => {
+                        match inbound? {
+                            None => return Ok(()),
+                            Some(envelope) => self.handle_inbound(envelope).await?,
+                        }
+                    }
+                    _ = heartbeat_tick.tick() => {
+                        if let Some(heartbeat) = &heartbeat {
+                            self.conn.send_envelope(heartbeat).await?;
+                        }
+                    }
                 }
             } else {
                 tokio::select! {
