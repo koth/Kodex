@@ -91,6 +91,11 @@ impl<T: RelayTransport, H: ControlHandler, E: EventSource, P: PairingHandler> Re
     /// (caller may reconnect).
     pub async fn run(mut self) -> Result<()> {
         let mut outbound_done = false;
+        let heartbeat = Envelope::from_message(None, &Message::Heartbeat).ok();
+        let heartbeat_interval = std::time::Duration::from_millis(
+            (self.conn.heartbeat().as_millis() / 2).max(1000) as u64,
+        );
+        let mut heartbeat_tick = tokio::time::interval(heartbeat_interval);
         loop {
             if outbound_done {
                 match self.conn.recv_envelope().await? {
@@ -109,6 +114,11 @@ impl<T: RelayTransport, H: ControlHandler, E: EventSource, P: PairingHandler> Re
                         match outbound {
                             None => outbound_done = true,
                             Some(envelope) => self.conn.send_envelope(&envelope).await?,
+                        }
+                    }
+                    _ = heartbeat_tick.tick() => {
+                        if let Some(heartbeat) = &heartbeat {
+                            self.conn.send_envelope(heartbeat).await?;
                         }
                     }
                 }

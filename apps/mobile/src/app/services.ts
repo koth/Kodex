@@ -12,6 +12,7 @@ import type { DeviceIdentity, SecretStore } from "../crypto/identity";
 import { loadOrCreateIdentity, deviceId } from "../crypto/identity";
 import type { SessionKey } from "../crypto/session-key";
 import type { PairingQrPayload, Envelope, EventFrame, SubscriptionStatus } from "../types/relay-protocol";
+import { fromMessage } from "../relay/framing";
 import { parsePairingQr } from "../pairing/qr-parse";
 import {
   runPairingHandshake,
@@ -50,6 +51,7 @@ export class AppController {
   private conn: RelayConnection | null = null;
   private control: ControlClient | null = null;
   private loopPromise: Promise<void> | null = null;
+  private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
   private stopLoop = false;
   private subscription: SubscriptionState = { ...NO_SUBSCRIPTION };
   private onSubscriptionChange: ((state: SubscriptionState) => void) | null = null;
@@ -147,6 +149,7 @@ export class AppController {
 
     this.stopLoop = false;
     this.loopPromise = this.runLoop().catch(() => {});
+    this.startHeartbeat();
   }
 
   private async runLoop(): Promise<void> {
@@ -167,6 +170,7 @@ export class AppController {
   /** A receive loop ended. Reconnect when a persisted pairing exists, or
    * surface disconnected otherwise. */
   private async handleConnectionLoss(): Promise<void> {
+    this.stopHeartbeat();
     if (this.stopLoop) {
       this.connState.transition("disconnected");
       return;
@@ -174,6 +178,23 @@ export class AppController {
     const resumed = await this.tryAutoResume();
     if (!resumed && !this.stopLoop) {
       this.connState.transition("disconnected");
+    }
+  }
+
+  private startHeartbeat(): void {
+    this.stopHeartbeat();
+    this.heartbeatTimer = setInterval(() => {
+      if (!this.conn || this.stopLoop) return;
+      this.conn
+        .sendEnvelope(fromMessage(null, { type: "heartbeat", payload: null }))
+        .catch(() => {});
+    }, 20_000);
+  }
+
+  private stopHeartbeat(): void {
+    if (this.heartbeatTimer !== null) {
+      clearInterval(this.heartbeatTimer);
+      this.heartbeatTimer = null;
     }
   }
 
@@ -254,6 +275,7 @@ export class AppController {
 
     this.stopLoop = false;
     this.loopPromise = this.runLoop().catch(() => {});
+    this.startHeartbeat();
   }
 
   /** Attempt the persisted pairing resume without input (startup recovery). */
@@ -407,6 +429,7 @@ export class AppController {
   /** Disconnect: stop the loop, clear the session, drop the session key. */
   async disconnect(): Promise<void> {
     this.stopLoop = true;
+    this.stopHeartbeat();
     try {
       await this.conn?.close();
     } catch {

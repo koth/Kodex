@@ -45,6 +45,7 @@ pub enum Message {
     ControlRequest(ControlRequest),
     ControlResponse(ControlResponse),
     Event(EventFrame),
+    Heartbeat,
     PairingInitiate(PairingInitiate),
     PairingConfirm(PairingConfirm),
     PairingResume(PairingResume),
@@ -93,6 +94,7 @@ impl Envelope {
                 Message::ControlResponse(serde_json::from_value(self.payload.clone())?)
             }
             "event" => Message::Event(serde_json::from_value(self.payload.clone())?),
+            "heartbeat" => Message::Heartbeat,
             "pairing_initiate" => {
                 Message::PairingInitiate(serde_json::from_value(self.payload.clone())?)
             }
