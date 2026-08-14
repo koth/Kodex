@@ -13,6 +13,8 @@ export interface BoundDevice {
   /** PC static X25519 public key (base64url-no-pad) for resume derivation.
    * Optional for legacy bound records created before this field existed. */
   peer_static_pubkey_b64?: string;
+  /** Relay endpoint from the original scan, used to auto-redial on reconnect. */
+  relay_endpoint?: string;
 }
 
 export const BOUND_DEVICE_KEY = "kodex.bound-device";

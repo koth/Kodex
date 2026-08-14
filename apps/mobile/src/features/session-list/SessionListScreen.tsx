@@ -35,7 +35,9 @@ export function SessionListScreen({ onOpenSession }: { onOpenSession: (sessionId
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [connState]);
 
+  const connected = connState === "connected";
   const createNew = async () => {
+    if (!connected) return;
     setCreating(true);
     setError(null);
     try {
@@ -63,8 +65,8 @@ export function SessionListScreen({ onOpenSession }: { onOpenSession: (sessionId
     <View style={styles.screen}>
       <View style={[styles.rowBetween, { padding: spacing.md }]}>
         <Text style={styles.title}>Sessions</Text>
-        <Pressable style={[styles.button, { paddingVertical: spacing.sm }]} onPress={createNew} disabled={creating}>
-          {creating ? <ActivityIndicator color="#fff" /> : <Text style={styles.buttonText}>New</Text>}
+        <Pressable style={[styles.button, { paddingVertical: spacing.sm, opacity: connected ? 1 : 0.5 }]} onPress={createNew} disabled={creating || !connected}>
+          {creating || !connected ? <ActivityIndicator color="#fff" /> : <Text style={styles.buttonText}>New</Text>}
         </Pressable>
       </View>
       <FlatList

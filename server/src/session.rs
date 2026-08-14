@@ -5,6 +5,7 @@ use relay_protocol::{Envelope, Message};
 use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite;
 
+use crate::connections::ConnectionId;
 use crate::errors::{RelayError, Result};
 use crate::state::AppState;
 
@@ -15,14 +16,20 @@ use crate::state::AppState;
 pub struct Session {
     state: AppState,
     tx: mpsc::Sender<String>,
+    connection_id: ConnectionId,
     device_id: Option<String>,
 }
 
 impl Session {
-    pub fn new(state: AppState, tx: mpsc::Sender<String>) -> Self {
+    pub fn new(
+        state: AppState,
+        tx: mpsc::Sender<String>,
+        connection_id: ConnectionId,
+    ) -> Self {
         Self {
             state,
             tx,
+            connection_id,
             device_id: None,
         }
     }
@@ -58,7 +65,9 @@ impl Session {
             }
         }
         if let Some(did) = &self.device_id {
-            self.state.connections.remove(did);
+            self.state
+                .connections
+                .remove_if(did, self.connection_id);
             tracing::info!(
                 device_id = %did,
                 "device disconnected; connection state cleared (pairing/device records persist)"
@@ -82,7 +91,9 @@ impl Session {
                 }
                 let did = auth.device_id.clone();
                 crate::auth::handle_device_auth(&self.state, auth, &self.tx).await?;
-                self.state.connections.insert(&did, self.tx.clone());
+                self.state
+                    .connections
+                    .insert(&did, self.connection_id, self.tx.clone());
                 self.device_id = Some(did);
             }
             Message::BindDeviceRequest(req) => {

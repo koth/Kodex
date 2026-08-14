@@ -162,7 +162,7 @@ mod tests {
         seed_bound_pairing(&state, "pc", "phone", "token").await;
 
         let (pc_tx, mut pc_rx) = mpsc::channel::<String>(8);
-        state.connections.insert("pc", pc_tx.clone());
+        state.connections.insert("pc", 1, pc_tx.clone());
 
         let (phone_tx, mut phone_rx) = mpsc::channel::<String>(8);
         handle_pairing_resume(

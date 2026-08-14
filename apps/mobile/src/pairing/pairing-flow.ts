@@ -14,6 +14,18 @@ import { deriveSessionKey, type SessionKey } from "../crypto/session-key";
 import { pcStaticPublicKey } from "./qr-parse";
 import type { BoundDevice } from "../account/binding";
 
+const PAIRING_HANDSHAKE_TIMEOUT_MS = 30_000;
+
+async function recvEnvelopeWithTimeout(
+  conn: RelayConnection,
+  timeoutMs: number = PAIRING_HANDSHAKE_TIMEOUT_MS,
+): Promise<ReturnType<RelayConnection["recvEnvelope"]>> {
+  const timeout = new Promise<null>((_, reject) => {
+    setTimeout(() => reject(new Error("配对超时：二维码可能已过期，请刷新 PC 端二维码后重试")), timeoutMs);
+  });
+  return Promise.race([conn.recvEnvelope(), timeout]);
+}
+
 export interface PairingResult {
   sessionKey: SessionKey;
   pcDeviceId: string;
@@ -52,7 +64,7 @@ export async function runPairingHandshake(
   });
   await conn.sendEnvelope(initiateEnv);
 
-  const confirmEnv = await conn.recvEnvelope();
+  const confirmEnv = await recvEnvelopeWithTimeout(conn);
   if (confirmEnv === null) {
   throw new Error("relay closed during pairing handshake");
   }
@@ -98,7 +110,7 @@ export async function runPairingResume(
   const env = fromMessage(null, { type: "pairing_resume", payload: resume });
   await conn.sendEnvelope(env);
 
-  const confirmEnv = await conn.recvEnvelope();
+  const confirmEnv = await recvEnvelopeWithTimeout(conn);
   if (confirmEnv === null) {
     throw new Error("relay closed during pairing resume");
   }

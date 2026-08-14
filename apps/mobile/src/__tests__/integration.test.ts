@@ -243,6 +243,7 @@ describe("integration: phone <-> fake PC over relay", () => {
     const { controller, pc, pcRun } = await bootstrap();
 
     expect(controller.connectionState).toBe("connected");
+    await controller.getState();
     expect(controller.snapshot?.session.id).toBe("init");
 
     const sessionId = await controller.createSession();

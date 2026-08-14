@@ -1,6 +1,8 @@
 import { NavigationContainer } from "@react-navigation/native";
 import { createNativeStackNavigator } from "@react-navigation/native-stack";
 import { StatusBar } from "expo-status-bar";
+import { useEffect, useState } from "react";
+import { View, Text, ActivityIndicator } from "react-native";
 import { SafeAreaProvider, SafeAreaView } from "react-native-safe-area-context";
 import { PairingScreen } from "../features/pairing/PairingScreen";
 import { SessionListScreen } from "../features/session-list/SessionListScreen";
@@ -55,10 +57,26 @@ function MainStack() {
 // bootstrap (identity load) runs from the AppServicesProvider on mount.
 function Root() {
   const connState = useConnectionState();
-  const connected = connState === "connected";
+  const [everConnected, setEverConnected] = useState(false);
+
+  useEffect(() => {
+    if (connState === "connected") setEverConnected(true);
+  }, [connState]);
+
+  const showPairing = connState === "disconnected" && !everConnected;
+  const showBooting = !showPairing && connState !== "connected" && !everConnected;
   return (
     <SafeAreaView style={{ flex: 1, backgroundColor: colors.bg }}>
-      {connected ? <MainStack /> : <PairingScreen />}
+      {showPairing ? (
+        <PairingScreen />
+      ) : showBooting ? (
+        <View style={{ flex: 1, alignItems: "center", justifyContent: "center" }}>
+          <ActivityIndicator color={colors.accent} />
+          <Text style={{ color: colors.textDim, marginTop: 12 }}>Connecting…</Text>
+        </View>
+      ) : (
+        <MainStack />
+      )}
     </SafeAreaView>
   );
 }

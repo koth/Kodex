@@ -73,6 +73,7 @@ export class RelayConnection {
     devicePubkey: string,
     signature: string,
     timestampMs: number,
+    timeoutMs = 15_000,
   ): Promise<void> {
     const auth: DeviceAuth = {
       device_id: deviceId,
@@ -87,7 +88,7 @@ export class RelayConnection {
       payload: auth,
     };
     await this.sendEnvelope(env);
-    const ack = await this.recvEnvelope();
+    const ack = await this.recvEnvelopeWithTimeout(timeoutMs);
     if (ack === null) {
       throw new Error("relay closed during auth handshake");
     }
@@ -95,6 +96,24 @@ export class RelayConnection {
     if (msg.type !== "device_auth" && msg.type !== "subscription_status") {
       throw new Error(`unexpected auth response: ${msg.type}`);
     }
+  }
+
+  private async recvEnvelopeWithTimeout(timeoutMs: number): Promise<Envelope | null> {
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(
+        () => reject(new Error("认证超时：relay 未响应，请检查 PC/relay 是否在线")),
+        timeoutMs,
+      );
+      this.recvEnvelope()
+        .then((value) => {
+          clearTimeout(timer);
+          resolve(value);
+        })
+        .catch((error) => {
+          clearTimeout(timer);
+          reject(error);
+        });
+    });
   }
 
   async close(): Promise<void> {

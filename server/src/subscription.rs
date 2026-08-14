@@ -95,8 +95,8 @@ mod tests {
             .unwrap();
 
         let (tx, mut rx) = mpsc::channel::<String>(8);
-        state.connections.insert("pc", tx.clone());
-        state.connections.insert("ph", tx);
+        state.connections.insert("pc", 1, tx.clone());
+        state.connections.insert("ph", 2, tx);
 
         sweep_expired_subscriptions(&state).await.unwrap();
 

@@ -1,4 +1,4 @@
-import { memo } from "react";
+import { memo, useCallback, useRef } from "react";
 import { View, Text, FlatList } from "react-native";
 import type { UiSnapshot } from "../../types";
 import { MarkdownBody } from "./MarkdownBody";
@@ -14,6 +14,7 @@ interface Props {
 // same shape the desktop ConversationTimeline renders. Message ids and tool
 // ids are resolved against the snapshot's messages/tools arrays.
 function ConversationTimelineImpl({ snapshot, onStopTool }: Props) {
+  const listRef = useRef<FlatList<{ key: string; node: React.ReactNode }>>(null);
   const messageById = new Map(snapshot.messages.map((message) => [message.id, message]));
   const toolById = new Map(snapshot.tools.map((tool) => [tool.call_id, tool]));
 
@@ -31,14 +32,24 @@ function ConversationTimelineImpl({ snapshot, onStopTool }: Props) {
     return { key: `${index}`, node };
   });
 
+  const scrollToEnd = useCallback(() => {
+    requestAnimationFrame(() => {
+      listRef.current?.scrollToEnd({ animated: true });
+    });
+  }, []);
+
   return (
     <FlatList
+      ref={listRef}
       style={{ flex: 1 }}
       contentContainerStyle={{ padding: spacing.sm, paddingBottom: spacing.xl }}
       data={rows}
       keyExtractor={(row) => row.key}
       renderItem={({ item }) => <View>{item.node}</View>}
       ItemSeparatorComponent={() => <View style={{ height: spacing.xs }} />}
+      onContentSizeChange={scrollToEnd}
+      onLayout={scrollToEnd}
+      maintainVisibleContentPosition={{ minIndexForVisible: 0 }}
       ListEmptyComponent={
         <View style={styles.center}>
           <Text style={styles.textDim}>No messages yet.</Text>

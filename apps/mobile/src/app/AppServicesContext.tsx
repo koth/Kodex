@@ -7,6 +7,7 @@ import {
 } from "react";
 import { AppController } from "./services";
 import { SecureSecretStore } from "./secure-store";
+import { WsTransport } from "../relay/transport";
 import type { PendingApproval } from "../session/permission";
 import type { ConnectionState } from "../relay/state-machine";
 import type { SubscriptionState } from "../account/subscription";
@@ -20,11 +21,21 @@ const AppServicesContext = createContext<AppController | null>(null);
 
 export function AppServicesProvider({ children }: { children: ReactNode }) {
   const [controller] = useState<AppController>(
-    () => new AppController(new SecureSecretStore()),
+    () =>
+      new AppController(
+        new SecureSecretStore(),
+        async (endpoint) => {
+          const transport = new WsTransport(endpoint);
+          await transport.ready;
+          return transport;
+        },
+      ),
   );
 
   useEffect(() => {
-    void controller.ensureIdentity();
+    void (async () => {
+      await controller.boot();
+    })();
     return () => {
       void controller.disconnect();
     };

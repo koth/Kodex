@@ -21,9 +21,11 @@ import {
 import type { UiSnapshot, PermissionInputResponse } from "../types";
 import {
   loadBoundDevice,
+  persistBoundDevice,
   clearBoundDevice,
   canReconnectWithoutRescan,
 } from "../account/binding";
+import type { BoundDevice } from "../account/binding";
 import {
   subscriptionStateFromStatus,
   demoteOnExpiry,
@@ -37,6 +39,8 @@ import {
 // factory + `SecureSecretStore`; the integration harness builds one with an
 // in-memory `ChannelTransport`. Fail-open: connection errors are surfaced as
 // state transitions, never thrown to the UI.
+type ReconnectTransportFactory = (endpoint: string) => Promise<RelayTransport>;
+
 export class AppController {
   readonly sessionStore = new SessionStore();
   readonly connState = new ConnectionStateMachine();
@@ -49,9 +53,14 @@ export class AppController {
   private stopLoop = false;
   private subscription: SubscriptionState = { ...NO_SUBSCRIPTION };
   private onSubscriptionChange: ((state: SubscriptionState) => void) | null = null;
+  private readonly reconnectTransportFactory: ReconnectTransportFactory | null;
 
-  constructor(secretStore: SecretStore) {
+  constructor(
+    secretStore: SecretStore,
+    reconnectTransportFactory?: ReconnectTransportFactory,
+  ) {
     this.secretStore = secretStore;
+    this.reconnectTransportFactory = reconnectTransportFactory ?? null;
     // Surface/dismiss pending permissions from the snapshot: the phone derives
     // the permission_request_id (== tool call_id) from the tool, since the
     // EventFrame::PermissionRequest carries only the PermissionInputRequest.
@@ -112,6 +121,18 @@ export class AppController {
 
     this.connState.transition("paired/e2e");
     const result = await runPairingHandshake(this.conn, identity, qr);
+    const bound: BoundDevice = {
+      device_id: deviceId(identity),
+      // The free/bound account path retains a resumable pairing token after
+      // the first scan. `auth_token` is empty until the account bind flow can
+      // fill it; resume only needs the pairing token + peer static key.
+      auth_token: "",
+      pairing_token: result.pairingToken,
+      peer_device_id: result.pcDeviceId,
+      peer_static_pubkey_b64: result.pcStaticPubkeyB64,
+      relay_endpoint: qr.relay_endpoint,
+    };
+    await persistBoundDevice(this.secretStore, bound);
     // Diagnostic: log session key prefix + peer id so it can be matched
     // against the PC's derived key. (Hermes console -> logcat ReactNativeJS.)
     const keyHex = Array.from(result.sessionKey.bytes.slice(0, 8))
@@ -125,16 +146,7 @@ export class AppController {
     this.connState.transition("connected");
 
     this.stopLoop = false;
-    this.loopPromise = this.runLoop().catch(() => {
-      // fail-open: a loop error demotes to disconnected for reconnect.
-    });
-
-    try {
-      const res = await this.control.getState();
-      this.sessionStore.setSnapshot(res.snapshot);
-    } catch {
-      // best-effort; pushed events will still populate the snapshot
-    }
+    this.loopPromise = this.runLoop().catch(() => {});
   }
 
   private async runLoop(): Promise<void> {
@@ -149,7 +161,20 @@ export class AppController {
       onOther,
       () => this.stopLoop,
     );
-    this.connState.transition("disconnected");
+    void this.handleConnectionLoss();
+  }
+
+  /** A receive loop ended. Reconnect when a persisted pairing exists, or
+   * surface disconnected otherwise. */
+  private async handleConnectionLoss(): Promise<void> {
+    if (this.stopLoop) {
+      this.connState.transition("disconnected");
+      return;
+    }
+    const resumed = await this.tryAutoResume();
+    if (!resumed && !this.stopLoop) {
+      this.connState.transition("disconnected");
+    }
   }
 
   /** Route non-control/non-event envelopes (subscription/bind messages). */
@@ -181,11 +206,10 @@ export class AppController {
    * key; this runs DeviceAuth + a fresh E2E resume handshake, installs the
    * derived key, and restarts the receive loop.
    */
-  async resumeFromBoundTransport(transport: RelayTransport): Promise<void> {
-    const bound = await loadBoundDevice(this.secretStore);
-    if (!bound || !this.subscription.active) {
-      throw new Error("no active bound device to resume");
-    }
+  private async establishBoundConnection(
+    transport: RelayTransport,
+    bound: BoundDevice,
+  ): Promise<void> {
     const identity = await this.ensureIdentity();
     this.connState.transition("connecting");
     this.conn = new RelayConnection(transport);
@@ -201,18 +225,57 @@ export class AppController {
     this.control = new ControlClient(this.conn);
     this.permissions.setControlClient(this.control);
     this.connState.transition("connected");
+  }
+
+  /**
+   * Reconnect using a persisted pairing token + peer static key, dialing a
+   * fresh transport when only the endpoint is known. Used both for app
+   * startup and for live-drop recovery.
+   */
+  async resumeFromBoundTransport(transport?: RelayTransport): Promise<void> {
+    const bound = await loadBoundDevice(this.secretStore);
+    if (!bound) {
+      throw new Error("no persisted pairing to resume");
+    }
+    const endpoint = bound.relay_endpoint;
+    if (!transport && !endpoint) {
+      throw new Error("persisted pairing is missing a relay endpoint");
+    }
+
+    if (transport) {
+      await this.establishBoundConnection(transport, bound);
+    } else {
+      if (!this.reconnectTransportFactory) {
+        throw new Error("no transport factory configured for resume");
+      }
+      const ws = await this.reconnectTransportFactory(endpoint!);
+      await this.establishBoundConnection(ws, bound);
+    }
 
     this.stopLoop = false;
-    this.loopPromise = this.runLoop().catch(() => {
-      // fail-open: a loop error demotes to disconnected for reconnect.
-    });
+    this.loopPromise = this.runLoop().catch(() => {});
+  }
 
+  /** Attempt the persisted pairing resume without input (startup recovery). */
+  async tryAutoResume(): Promise<boolean> {
     try {
-      const res = await this.control.getState();
-      this.sessionStore.setSnapshot(res.snapshot);
+      this.stopLoop = false;
+      await this.resumeFromBoundTransport();
+      return true;
     } catch {
-      // best-effort; pushed events will still populate the snapshot
+      this.connState.transition("disconnected");
+      return false;
     }
+  }
+
+  /** App startup: mark the connection as bootstrapping, then attempt a
+   * persisted resume. Returns true if a connection was established. */
+  async boot(): Promise<boolean> {
+    if (this.connState.state !== "connected") {
+      this.connState.transition("connecting");
+    }
+    await this.ensureIdentity();
+    return this.tryAutoResume();
   }
 
   async unbindAndClear(): Promise<void> {
@@ -275,6 +338,13 @@ export class AppController {
 
   async switchSession(sessionId: string, workspaceRoot?: string | null) {
     return this.controlClient().switchSession(sessionId, workspaceRoot ?? null);
+  }
+
+  /** Fetch and install the active session's full snapshot. Call after
+   * switching, not on every pairing/list refresh. */
+  async getState(): Promise<void> {
+    const response = await this.controlClient().getState();
+    this.sessionStore.setSnapshot(response.snapshot);
   }
 
   async sendPrompt(text: string) {
