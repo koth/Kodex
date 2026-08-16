@@ -14,7 +14,11 @@ type Phase = "idle" | "dialing" | "authenticating" | "pairing" | "connected" | "
 // dial the relay over TLS WebSocket, run DeviceAuth + the E2E handshake, and
 // resync state. Manual entry accepts the raw QR JSON as a fallback. Free-tier
 // pairing needs no account; a successful pair lands on the session list.
-export function PairingScreen() {
+export function PairingScreen({
+  onOpenDiagnostics,
+}: {
+  onOpenDiagnostics?: () => void;
+}) {
   const controller = useAppController();
   const connState = useConnectionState();
   const [permission, requestPermission] = useCameraPermissions();
@@ -147,6 +151,11 @@ export function PairingScreen() {
             {controller.deviceIdValue ? `device: ${controller.deviceIdValue.slice(0, 12)}…` : "generating device id…"}
           </Text>
         )}
+        {onOpenDiagnostics ? (
+          <Pressable style={{ marginTop: spacing.md, padding: spacing.sm }} onPress={onOpenDiagnostics}>
+            <Text style={[styles.text, { color: colors.accent }]}>View diagnostics log</Text>
+          </Pressable>
+        ) : null}
       </View>
     </ScrollView>
   );

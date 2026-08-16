@@ -6,7 +6,7 @@ import { View, Text, Pressable, ScrollView, Share } from "react-native";
 import { diagnostics } from "../../util/diagnostics";
 import { styles, colors, spacing } from "../theme";
 
-export function DiagnosticsScreen() {
+export function DiagnosticsScreen({ onClose }: { onClose?: () => void }) {
   const [log, setLog] = useState("loading…");
 
   const refresh = useCallback(async () => {
@@ -37,6 +37,11 @@ export function DiagnosticsScreen() {
           padding: spacing.md,
         }}
       >
+        {onClose ? (
+          <Pressable style={styles.buttonGhost} onPress={onClose}>
+            <Text style={styles.text}>Close</Text>
+          </Pressable>
+        ) : null}
         <Pressable style={styles.buttonGhost} onPress={() => void refresh()}>
           <Text style={styles.text}>Refresh</Text>
         </Pressable>

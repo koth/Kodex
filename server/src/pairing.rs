@@ -58,11 +58,13 @@ pub async fn handle_pairing_initiate(
     phone_device_id: &str,
     tx: &mpsc::Sender<String>,
 ) -> Result<()> {
-    // PC registers the pairing code immediately after minting the QR, but the
-    // phone can scan and reach the relay before `PairingRegister` is written.
-    // Allow that race to settle instead of failing on the first lookup.
+    // PC registers the pairing code after minting the QR, but it must first
+    // reconnect + authenticate to the relay, which can take seconds. The
+    // phone can scan and reach the relay long before `PairingRegister` is
+    // written. Wait generously for that race to settle instead of failing
+    // on the first lookup — a pairing code costs nothing to retry.
     let mut pc_device_id = None;
-    for _ in 0..3 {
+    for _ in 0..50 {
         pc_device_id = state
             .db
             .take_pairing_code(pi.pairing_code.clone())
@@ -70,7 +72,7 @@ pub async fn handle_pairing_initiate(
         if pc_device_id.is_some() {
             break;
         }
-        tokio::time::sleep(Duration::from_millis(150)).await;
+        tokio::time::sleep(Duration::from_millis(100)).await;
     }
     let Some(pc_device_id) = pc_device_id else {
         // Reply explicitly so the phone surfaces "invalid/expired code" and

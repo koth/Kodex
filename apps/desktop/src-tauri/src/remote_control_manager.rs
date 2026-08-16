@@ -36,6 +36,9 @@ struct Inner {
     relay_endpoint: String,
     account_session: Option<AccountSession>,
     insecure_tls: bool,
+    /// Set when a freshly minted pairing code has been registered with the
+    /// relay; the QR UI waits for this before showing the code as scannable.
+    pairing_registered: Option<Arc<Notify>>,
 }
 
 impl RemoteControlManager {
@@ -78,6 +81,7 @@ impl RemoteControlManager {
                 relay_endpoint,
                 insecure_tls,
                 account_session: None,
+                pairing_registered: None,
             }),
             app_paths,
             login,
@@ -175,11 +179,37 @@ impl RemoteControlManager {
             .map_err(|e| format!("encode qr payload: {e}"))?;
         inner.pairing_code = Some(code);
         inner.pairing_qr = Some(json.clone());
+        let registered = Arc::new(Notify::new());
+        inner.pairing_registered = Some(registered.clone());
         // Wake the driver loop so it re-registers this code with the relay
         // on the current connection (reconnecting if needed).
         drop(inner);
         self.pairing_notify.notify_one();
         Ok(Some(json))
+    }
+
+    /// Notify handle that fires once the minted pairing code has been
+    /// registered with the relay. `None` when no pairing is in flight.
+    pub fn pairing_registered_notify(&self) -> Option<Arc<Notify>> {
+        self.inner
+            .lock()
+            .expect("rc manager mutex poisoned")
+            .pairing_registered
+            .clone()
+    }
+
+    /// Mark the in-flight pairing code as registered with the relay (driver
+    /// calls this after the relay acks `PairingRegister`).
+    pub fn mark_pairing_registered(&self) {
+        let notify = self
+            .inner
+            .lock()
+            .expect("rc manager mutex poisoned")
+            .pairing_registered
+            .clone();
+        if let Some(notify) = notify {
+            notify.notify_waiters();
+        }
     }
 
     pub fn set_connected(&self, connected: bool) {

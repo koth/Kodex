@@ -148,6 +148,7 @@ impl<T: RelayTransport, H: ControlHandler, E: EventSource, P: PairingHandler> Re
                     }
                     _ = heartbeat_tick.tick() => {
                         if let Some(heartbeat) = &heartbeat {
+                            self.log_line("heartbeat sent");
                             self.conn.send_heartbeat(heartbeat).await?;
                         }
                     }
@@ -178,6 +179,7 @@ impl<T: RelayTransport, H: ControlHandler, E: EventSource, P: PairingHandler> Re
                     }
                     _ = heartbeat_tick.tick() => {
                         if let Some(heartbeat) = &heartbeat {
+                            self.log_line("heartbeat sent");
                             self.conn.send_heartbeat(heartbeat).await?;
                         }
                     }

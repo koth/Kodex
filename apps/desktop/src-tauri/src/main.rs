@@ -388,6 +388,14 @@ fn start_remote_control_driver(app: tauri::AppHandle) {
                     if conn.send_envelope(&env).await.is_ok() {
                         // Consume the relay's SubscriptionStatus ack.
                         let _ = conn.recv_envelope().await;
+                        app_for_loop
+                            .state::<AppState>()
+                            .remote_control()
+                            .mark_pairing_registered();
+                        app_for_loop
+                            .state::<AppState>()
+                            .remote_control()
+                            .log_driver_event("pairing code registered with relay");
                     }
                 }
             }

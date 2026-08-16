@@ -128,12 +128,20 @@ export class AppController {
     this.connState.transition("connecting");
     this.conn = new RelayConnection(transport);
 
-    this.connState.transition("authenticating");
-    const auth = buildDeviceAuthArgs(identity);
-    await this.conn.authenticate(auth.deviceId, auth.devicePubkey, auth.signature, auth.timestampMs);
+    let result;
+    try {
+      this.connState.transition("authenticating");
+      const auth = buildDeviceAuthArgs(identity);
+      await this.conn.authenticate(auth.deviceId, auth.devicePubkey, auth.signature, auth.timestampMs);
 
-    this.connState.transition("paired/e2e");
-    const result = await runPairingHandshake(this.conn, identity, qr);
+      this.connState.transition("paired/e2e");
+      result = await runPairingHandshake(this.conn, identity, qr);
+    } catch (e) {
+      // Surface the failure: roll the state machine back so the UI leaves
+      // the connecting spinner and shows the error on the pairing screen.
+      this.connState.transition("disconnected");
+      throw e;
+    }
     const bound: BoundDevice = {
       device_id: deviceId(identity),
       // The free/bound account path retains a resumable pairing token after
@@ -322,6 +330,18 @@ export class AppController {
       throw new Error("persisted pairing is missing a relay endpoint");
     }
 
+    // Restore the persisted E2E session key so a fresh process can attempt a
+    // cached-key reconnect before falling back to the resume handshake. The
+    // PC kept its copy in memory, so both sides still match.
+    if (!this.lastSessionKey || !this.lastPeerDeviceId) {
+      const persisted = await loadSession(this.secretStore);
+      if (persisted) {
+        this.lastSessionKey = persisted.key;
+        this.lastPeerDeviceId = persisted.peer_device_id;
+        diagnostics.log("services", "restored persisted session key for cached reconnect");
+      }
+    }
+
     if (transport) {
       if (this.lastSessionKey && this.lastPeerDeviceId) {
         await this.establishCachedConnection(
@@ -401,8 +421,16 @@ export class AppController {
    * persisted resume. Returns true if a connection was established. */
   async boot(): Promise<boolean> {
     await this.ensureIdentity();
-    this.connState.transition("disconnected");
-    return false;
+    const bound = await loadBoundDevice(this.secretStore);
+    if (!bound) {
+      this.connState.transition("disconnected");
+      return false;
+    }
+    // A persisted pairing exists: try resuming without a fresh scan. The
+    // connecting state keeps the UI on the boot spinner until resume either
+    // succeeds (→ connected) or exhausts retries (→ disconnected).
+    this.connState.transition("connecting");
+    return this.tryAutoResume();
   }
 
   async unbindAndClear(): Promise<void> {

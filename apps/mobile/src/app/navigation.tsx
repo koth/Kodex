@@ -2,7 +2,7 @@ import { NavigationContainer } from "@react-navigation/native";
 import { createNativeStackNavigator } from "@react-navigation/native-stack";
 import { StatusBar } from "expo-status-bar";
 import { useEffect, useState } from "react";
-import { View, Text, ActivityIndicator } from "react-native";
+import { View, Text, ActivityIndicator, Pressable } from "react-native";
 import { SafeAreaProvider, SafeAreaView } from "react-native-safe-area-context";
 import { PairingScreen } from "../features/pairing/PairingScreen";
 import { SessionListScreen } from "../features/session-list/SessionListScreen";
@@ -71,6 +71,7 @@ function MainStack() {
 function Root() {
   const connState = useConnectionState();
   const [everConnected, setEverConnected] = useState(false);
+  const [showDiagnostics, setShowDiagnostics] = useState(false);
 
   useEffect(() => {
     if (connState === "connected") setEverConnected(true);
@@ -81,15 +82,26 @@ function Root() {
   return (
     <SafeAreaView style={{ flex: 1, backgroundColor: colors.bg }}>
       {showPairing ? (
-        <PairingScreen />
+        <PairingScreen onOpenDiagnostics={() => setShowDiagnostics(true)} />
       ) : showBooting ? (
         <View style={{ flex: 1, alignItems: "center", justifyContent: "center" }}>
           <ActivityIndicator color={colors.accent} />
           <Text style={{ color: colors.textDim, marginTop: 12 }}>Connecting…</Text>
+          <Pressable
+            style={{ marginTop: 24, padding: 12 }}
+            onPress={() => setShowDiagnostics(true)}
+          >
+            <Text style={{ color: colors.accent }}>View diagnostics log</Text>
+          </Pressable>
         </View>
       ) : (
         <MainStack />
       )}
+      {showDiagnostics ? (
+        <View style={{ position: "absolute", top: 0, left: 0, right: 0, bottom: 0 }}>
+          <DiagnosticsScreen onClose={() => setShowDiagnostics(false)} />
+        </View>
+      ) : null}
     </SafeAreaView>
   );
 }
