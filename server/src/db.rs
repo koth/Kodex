@@ -217,6 +217,67 @@ self.blocking(move |c| {
         .await
     }
 
+    /// Latest pairing for a PC, by creation time. Used to resume when the
+    /// phone's device identity rotated (secure-store miss / reinstall): the
+    /// phone proves it holds the PC static public key by scanning, so the
+    /// relay rebinds the newest pairing to the phone's fresh device id.
+    pub async fn latest_pairing_for_pc(
+        &self,
+        pc_device_id: String,
+    ) -> Result<Option<(String, String)>> {
+        self.blocking(move |c| {
+            let row: Option<(String, String)> = c
+                .query_row(
+                    "SELECT pairing_id, phone_device_id FROM pairings \
+                     WHERE pc_device_id = ?1 ORDER BY created_at DESC LIMIT 1",
+                    params![pc_device_id],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .optional()?;
+            Ok(row)
+        })
+        .await
+    }
+
+    /// Rebind a pairing to a new phone device id (identity rotation). The
+    /// pairing token and PC side stay stable; the phone's fresh ephemeral
+    /// resume then derives the E2E key with the PC static key it presented
+    /// in the scanned QR.
+    pub async fn update_pairing_phone(
+        &self,
+        pairing_id: String,
+        phone_device_id: String,
+    ) -> Result<()> {
+        self.blocking(move |c| {
+            c.execute(
+                "UPDATE pairings SET phone_device_id = ?2 WHERE pairing_id = ?1",
+                params![pairing_id, phone_device_id],
+            )?;
+            Ok(())
+        })
+        .await
+    }
+
+    /// Rebind every pairing for a PC to a new phone device id (identity
+    /// rotation). Keeps older pairing tokens resumable after a re-scan: the
+    /// phone's persisted `BoundDevice` references an older token whose PC
+    /// side matches, and the phone proves control of the PC static key by
+    /// having scanned the fresh QR.
+    pub async fn rebind_pc_pairings_to_phone(
+        &self,
+        pc_device_id: String,
+        phone_device_id: String,
+    ) -> Result<usize> {
+        self.blocking(move |c| {
+            let n = c.execute(
+                "UPDATE pairings SET phone_device_id = ?2 WHERE pc_device_id = ?1",
+                params![pc_device_id, phone_device_id],
+            )?;
+            Ok(n)
+        })
+        .await
+    }
+
     /// `(pairing_id, pc_device_id, phone_device_id)` for a device's pairing, if any.
     pub async fn pairing_id_for(
         &self,

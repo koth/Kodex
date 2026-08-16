@@ -4,6 +4,7 @@ import { PROTO_VERSION, DeviceAuth } from "../types/relay-protocol";
 import { encrypt, decrypt } from "../crypto/aead";
 import type { SessionKey } from "../crypto/session-key";
 import { serializeEnvelope, parseEnvelope } from "./framing";
+import { diagnostics } from "../util/diagnostics";
 
 // A relay connection with optional E2E encryption. When no session key is
 // installed (pre-pairing auth phase) it sends/receives plain `Envelope` JSON;
@@ -46,8 +47,15 @@ export class RelayConnection {
             encrypt(this.sessionKey, this.peerDeviceId, envelope),
           )
         : serializeEnvelope(envelope);
-    console.log(`[conn] send ${envelope.type} encrypted=${!!this.sessionKey}`);
+    diagnostics.log("conn", `send ${envelope.type} encrypted=${!!this.sessionKey}`);
     await this.transport.sendText(frame);
+  }
+
+  /** Send an envelope as plaintext regardless of the installed session key.
+   * Used for heartbeats, which the relay must consume itself (an encrypted
+   * frame would be routed to the peer and never counted for liveness). */
+  async sendPlaintext(envelope: Envelope): Promise<void> {
+    await this.transport.sendText(serializeEnvelope(envelope));
   }
 
   /** Receive the next envelope: decrypt an EncryptedEnvelope when a key is
@@ -59,17 +67,24 @@ export class RelayConnection {
       return null;
     }
     if (this.sessionKey) {
+      // Mixed framing: relay-originated frames (SubscriptionStatus acks,
+      // pairing errors) are always plaintext — the relay holds no E2E key.
+      // Route on shape instead of assuming everything is encrypted.
+      if (!frame.includes('"to_device_id"')) {
+        diagnostics.log("conn", "recv plain (relay-originated, key installed)");
+        return parseEnvelope(frame);
+      }
       const enc = JSON.parse(frame) as EncryptedEnvelope;
       try {
         const env = decrypt(this.sessionKey, enc);
-        console.log(`[conn] recv ${env.type} decrypted=ok`);
+        diagnostics.log("conn", `recv ${env.type} decrypted=ok`);
         return env;
       } catch (e) {
-        console.log(`[conn] recv decrypt FAILED: ${e}`);
+        diagnostics.log("conn", `recv decrypt FAILED: ${e}`);
         throw e;
       }
     }
-    console.log("[conn] recv plain");
+    diagnostics.log("conn", "recv plain");
     return parseEnvelope(frame);
   }
 

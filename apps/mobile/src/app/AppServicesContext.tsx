@@ -7,6 +7,8 @@ import {
 } from "react";
 import { AppController } from "./services";
 import { SecureSecretStore } from "./secure-store";
+import { FileLogSink } from "./diagnostics-sink";
+import { diagnostics } from "../util/diagnostics";
 import { WsTransport } from "../relay/transport";
 import type { PendingApproval } from "../session/permission";
 import type { ConnectionState } from "../relay/state-machine";
@@ -21,15 +23,17 @@ const AppServicesContext = createContext<AppController | null>(null);
 
 export function AppServicesProvider({ children }: { children: ReactNode }) {
   const [controller] = useState<AppController>(
-    () =>
-      new AppController(
+    () => {
+      diagnostics.setSink(new FileLogSink());
+      return new AppController(
         new SecureSecretStore(),
         async (endpoint) => {
           const transport = new WsTransport(endpoint);
           await transport.ready;
           return transport;
         },
-      ),
+      );
+    },
   );
 
   useEffect(() => {

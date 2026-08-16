@@ -8,6 +8,7 @@ import { PairingScreen } from "../features/pairing/PairingScreen";
 import { SessionListScreen } from "../features/session-list/SessionListScreen";
 import { ConversationScreen } from "../features/conversation/ConversationScreen";
 import { SettingsScreen } from "../features/settings/SettingsScreen";
+import { DiagnosticsScreen } from "../features/settings/DiagnosticsScreen";
 import { AppServicesProvider, useConnectionState } from "./AppServicesContext";
 import { colors } from "../features/theme";
 
@@ -15,6 +16,7 @@ export type RootStackParamList = {
   Sessions: undefined;
   Conversation: { sessionId: string; title: string };
   Settings: undefined;
+  Diagnostics: undefined;
 };
 
 const Stack = createNativeStackNavigator<RootStackParamList>();
@@ -51,8 +53,14 @@ function MainStack() {
       </Stack.Screen>
       <Stack.Screen name="Settings" options={{ title: "Settings" }}>
         {({ navigation }) => (
-          <SettingsScreen onRescan={() => navigation.navigate("Sessions")} />
+          <SettingsScreen
+            onRescan={() => navigation.navigate("Sessions")}
+            onOpenDiagnostics={() => navigation.navigate("Diagnostics")}
+          />
         )}
+      </Stack.Screen>
+      <Stack.Screen name="Diagnostics" options={{ title: "Diagnostics" }}>
+        {() => <DiagnosticsScreen />}
       </Stack.Screen>
     </Stack.Navigator>
   );

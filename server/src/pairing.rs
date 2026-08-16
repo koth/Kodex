@@ -88,6 +88,18 @@ pub async fn handle_pairing_initiate(
             pi.pc_device_pubkey.clone(),
         )
         .await?;
+    // Identity rotation: the phone's secure store may lose the identity key
+    // (app reinstall, Keystore reset), producing a fresh device id on every
+    // cold start. The phone proves control of the PC static key by scanning
+    // a fresh QR, so rebind all of this PC's pairings to the new phone id —
+    // persisted pairing tokens from previous identities stay resumable.
+    if let Err(e) = state
+        .db
+        .rebind_pc_pairings_to_phone(pc_device_id.clone(), phone_device_id.to_string())
+        .await
+    {
+        tracing::warn!(error = %e, "failed to rebind prior pairings to new phone identity");
+    }
     state
         .db
         .mark_pairing_code_used(pi.pairing_code.clone())
@@ -373,6 +385,63 @@ mod tests {
             Message::PairingConfirm(confirm) => assert!(confirm.error.is_some()),
             other => panic!("expected error PairingConfirm, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn initiate_rebinds_prior_pairings_to_rotated_phone_identity() {
+        let state = app_state();
+        state.db.register_device("pc".into(), "pc-ed".into()).await.unwrap();
+        state
+            .db
+            .register_device("phone-old".into(), "ph-ed".into())
+            .await
+            .unwrap();
+        state
+            .db
+            .create_pairing("old-token".into(), "pc".into(), "phone-old".into(), "pc-x".into())
+            .await
+            .unwrap();
+        state
+            .db
+            .register_pairing_code("FRESHCODE".into(), "pc".into(), 120)
+            .await
+            .unwrap();
+        state
+            .db
+            .register_device("phone-new".into(), "ph-ed2".into())
+            .await
+            .unwrap();
+
+        let (pc_tx, mut pc_rx) = mpsc::channel::<String>(8);
+        state.connections.insert("pc", 1, pc_tx);
+        let (phone_tx, mut phone_rx) = mpsc::channel::<String>(8);
+        handle_pairing_initiate(
+            &state,
+            PairingInitiate {
+                pairing_code: "FRESHCODE".into(),
+                pc_device_pubkey: "pc-x".into(),
+                relay_endpoint: "ws://relay".into(),
+                phone_ephemeral_pubkey: Some("eph".into()),
+            },
+            "phone-new",
+            &phone_tx,
+        )
+        .await
+        .unwrap();
+
+        // The old pairing token now resolves to the rotated phone identity,
+        // so a resume with the persisted old BoundDevice still matches.
+        let (_, paired_phone, _, _) = state
+            .db
+            .pairing_by_token("old-token".into())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(paired_phone, "phone-new");
+
+        // Both peers got their confirms.
+        let _ = pc_rx.recv().await.unwrap();
+        let _ = phone_rx.recv().await.unwrap();
     }
 }
 

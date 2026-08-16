@@ -6,6 +6,7 @@ import {
   getPublicKey,
   SECRET_KEY_LEN,
 } from "./ecdh";
+import { diagnostics } from "../util/diagnostics";
 
 // Device identity, byte-aligned with relay_client::identity::DeviceIdentity.
 // Two independent keypairs:
@@ -128,15 +129,17 @@ export async function loadOrCreateIdentity(
 ): Promise<DeviceIdentity> {
   const existing = await store.get(DEVICE_SECRET_KEY);
   if (existing) {
-  const identity = deviceIdentityFromSecret(existing);
-  // Re-persist if we migrated a legacy 32-byte entry so future loads
-  // read 64 bytes directly.
-  if (existing.length !== DEVICE_SECRET_LEN) {
-  await store.set(DEVICE_SECRET_KEY, deviceSecretBytes(identity));
-  }
-  return identity;
+    const identity = deviceIdentityFromSecret(existing);
+    // Re-persist if we migrated a legacy 32-byte entry so future loads
+    // read 64 bytes directly.
+    if (existing.length !== DEVICE_SECRET_LEN) {
+      await store.set(DEVICE_SECRET_KEY, deviceSecretBytes(identity));
+    }
+    diagnostics.log("identity", `loaded persisted device id=${deviceId(identity)}`);
+    return identity;
   }
   const identity = generateDeviceIdentity();
   await store.set(DEVICE_SECRET_KEY, deviceSecretBytes(identity));
+  diagnostics.log("identity", `generated fresh device id=${deviceId(identity)} (secure store miss)`);
   return identity;
 }

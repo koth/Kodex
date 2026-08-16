@@ -105,6 +105,33 @@ describe("pairing handshake", () => {
   const enc = encrypt(result.sessionKey, "phone-dev", env);
   expect(decrypt(pcSessionKey, enc)).toEqual(env);
   });
+
+  it("throws with the relay's reason when the confirm carries an error", async () => {
+  const [phoneT, pcT] = linkedPair();
+  const phoneConn = new RelayConnection(phoneT, 30_000);
+  const pcConn = new RelayConnection(pcT, 30_000);
+  const qr = makeQr();
+  const phoneIdentity = deviceIdentityFromSecret(
+  Uint8Array.from({ length: 32 }, (_, i) => i),
+  );
+
+  const phonePromise = runPairingHandshake(phoneConn, phoneIdentity, qr);
+  await pcConn.recvEnvelope(); // PairingInitiate
+  await pcConn.sendEnvelope(
+  fromMessage(null, {
+  type: "pairing_confirm",
+  payload: {
+  error: "invalid or expired pairing code",
+  pairing_token: "",
+  session_key_material: "",
+  pc_device_id: "",
+  phone_device_id: "",
+  },
+  }),
+  );
+
+  await expect(phonePromise).rejects.toThrow("invalid or expired pairing code");
+  });
 });
 
 describe("pairing resume", () => {

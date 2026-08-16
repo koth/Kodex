@@ -19,6 +19,47 @@ describe("connection state machine", () => {
   });
 });
 
+describe("plaintext heartbeat", () => {
+  it("sendPlaintext bypasses E2E so the relay sees the liveness frame", async () => {
+  const [phoneT, pcT] = linkedPair();
+  const phone = new RelayConnection(phoneT, 30_000);
+  const key = deriveSessionKey(new Uint8Array(32).fill(9));
+  phone.installSessionKey(key, "pc-device-id");
+
+  await phone.sendPlaintext(fromMessage(null, { type: "heartbeat", payload: null }));
+  const raw = await pcT.recvText();
+  expect(raw).toContain('"heartbeat"');
+  expect(raw).not.toContain("to_device_id");
+  });
+
+  it("recvEnvelope parses plaintext relay frames while a session key is installed", async () => {
+  // Relay-originated frames (pairing errors, subscription acks) are always
+  // plaintext; the keyed connection must not reject them as ciphertext.
+  const [phoneT, pcT] = linkedPair();
+  const phone = new RelayConnection(phoneT, 30_000);
+  const pc = new RelayConnection(pcT, 30_000);
+  const key = deriveSessionKey(new Uint8Array(32).fill(9));
+  phone.installSessionKey(key, "pc-device-id");
+
+  const errorConfirm = fromMessage(null, {
+  type: "pairing_confirm",
+  payload: {
+  error: "invalid or expired pairing code",
+  pairing_token: "",
+  session_key_material: "",
+  pc_device_id: "",
+  phone_device_id: "",
+  },
+  });
+  await pc.sendPlaintext(errorConfirm);
+  const got = await phone.recvEnvelope();
+  expect(got?.type).toBe("pairing_confirm");
+  expect((got?.payload as { error?: string }).error).toBe(
+  "invalid or expired pairing code",
+  );
+  });
+});
+
 describe("backoff", () => {
   it("escalates and caps at the max", () => {
   const seq = Array.from({ length: 12 }, (_, i) => nextBackoffDelay(i, 2_000, 60_000, () => 0));

@@ -12,6 +12,14 @@ use anyhow::Result;
 use relay_protocol::{ControlRequest, ControlResponse, Envelope, Message, PairingConfirm};
 use std::sync::{Arc, Mutex};
 
+/// Optional diagnostic sink (release GUI builds have no usable stderr, so
+/// the desktop shell writes these lines to a log file).
+pub type DriverLogger = Arc<dyn Fn(&str) + Send + Sync>;
+
+fn noop_logger() -> DriverLogger {
+    Arc::new(|_| {})
+}
+
 use crate::connection::RelayConnection;
 use crate::crypto::SessionKey;
 use crate::RelayTransport;
@@ -54,6 +62,7 @@ pub struct RelayDriver<T: RelayTransport, H: ControlHandler, E: EventSource, P: 
     events: E,
     pairing: P,
     session_sink: Arc<Mutex<Option<(SessionKey, String)>>>,
+    log: DriverLogger,
 }
 
 impl<T: RelayTransport, H: ControlHandler, E: EventSource, P: PairingHandler> RelayDriver<T, H, E, P> {
@@ -83,15 +92,36 @@ impl<T: RelayTransport, H: ControlHandler, E: EventSource, P: PairingHandler> Re
             events,
             pairing,
             session_sink,
+            log: noop_logger(),
         }
+    }
+
+    /// Attach a diagnostic logger. Called lines are short and single-line.
+    pub fn with_logger(mut self, log: DriverLogger) -> Self {
+        self.log = log;
+        self
+    }
+
+    fn log_line(&self, line: &str) {
+        (self.log)(line);
     }
 
     /// Run the inbound + outbound loops until the connection closes or
     /// errors. Returns Ok on clean close, Err on a connection failure
     /// (caller may reconnect).
     pub async fn run(mut self) -> Result<()> {
+        self.log_line("driver run started");
         let mut outbound_done = false;
-        let heartbeat = Envelope::from_message(None, &Message::Heartbeat).ok();
+        // Heartbeats are always sent as plaintext Envelope JSON, never
+        // encrypted into an EncryptedEnvelope. The relay treats any frame
+        // carrying `to_device_id` as routable ciphertext and forwards it
+        // blindly to the target — an encrypted heartbeat addressed to the
+        // (mostly silent) phone would be dropped and the relay's
+        // heartbeat_timeout would reap the PC connection after pairing.
+        let heartbeat = Envelope::from_message(None, &Message::Heartbeat)
+            .ok()
+            .map(|env| serde_json::to_string(&env).ok())
+            .flatten();
         let heartbeat_interval = std::time::Duration::from_millis(
             (self.conn.heartbeat().as_millis() / 2).max(1000) as u64,
         );
@@ -101,9 +131,16 @@ impl<T: RelayTransport, H: ControlHandler, E: EventSource, P: PairingHandler> Re
             if outbound_done {
                 tokio::select! {
                     inbound = self.conn.recv_envelope() => {
-                        match inbound? {
-                            None => return Ok(()),
-                            Some(envelope) => {
+                        match inbound {
+                            Ok(None) => {
+                                self.log_line("recv: connection closed by peer");
+                                return Ok(());
+                            }
+                            Err(e) => {
+                                self.log_line(&format!("recv error: {e:#}"));
+                                return Err(e);
+                            }
+                            Ok(Some(envelope)) => {
                                 self.handle_inbound(envelope, Some(&mut heartbeat_tick))
                                     .await?
                             }
@@ -111,16 +148,23 @@ impl<T: RelayTransport, H: ControlHandler, E: EventSource, P: PairingHandler> Re
                     }
                     _ = heartbeat_tick.tick() => {
                         if let Some(heartbeat) = &heartbeat {
-                            self.conn.send_envelope(heartbeat).await?;
+                            self.conn.send_heartbeat(heartbeat).await?;
                         }
                     }
                 }
             } else {
                 tokio::select! {
                     inbound = self.conn.recv_envelope() => {
-                        match inbound? {
-                            None => return Ok(()),
-                            Some(envelope) => {
+                        match inbound {
+                            Ok(None) => {
+                                self.log_line("recv: connection closed by peer");
+                                return Ok(());
+                            }
+                            Err(e) => {
+                                self.log_line(&format!("recv error: {e:#}"));
+                                return Err(e);
+                            }
+                            Ok(Some(envelope)) => {
                                 self.handle_inbound(envelope, Some(&mut heartbeat_tick))
                                     .await?
                             }
@@ -134,7 +178,7 @@ impl<T: RelayTransport, H: ControlHandler, E: EventSource, P: PairingHandler> Re
                     }
                     _ = heartbeat_tick.tick() => {
                         if let Some(heartbeat) = &heartbeat {
-                            self.conn.send_envelope(heartbeat).await?;
+                            self.conn.send_heartbeat(heartbeat).await?;
                         }
                     }
                 }
@@ -159,7 +203,9 @@ impl<T: RelayTransport, H: ControlHandler, E: EventSource, P: PairingHandler> Re
         envelope: Envelope,
         mut heartbeat_tick: Option<&mut tokio::time::Interval>,
     ) -> Result<()> {
-        let heartbeat = Envelope::from_message(None, &Message::Heartbeat).ok();
+        let heartbeat = Envelope::from_message(None, &Message::Heartbeat)
+            .ok()
+            .and_then(|env| serde_json::to_string(&env).ok());
         let _request_id = envelope.id;
         let message = match envelope.into_message() {
             Ok(message) => message,
@@ -169,6 +215,11 @@ impl<T: RelayTransport, H: ControlHandler, E: EventSource, P: PairingHandler> Re
             Message::ControlRequest(request) => {
                 let has_key = self.conn.has_session_key();
                 eprintln!("[remote-control] received ControlRequest op={:?} has_key={}", std::mem::discriminant(&request), has_key);
+                self.log_line(&format!(
+                    "received ControlRequest op={:?} has_key={}",
+                    std::mem::discriminant(&request),
+                    has_key
+                ));
                 // Detach the handler: desktop handlers take a blocking
                 // registry mutex and can stall on slow paths (session-store
                 // IO, ACP reconnect). Holding the driver loop hostage means
@@ -212,7 +263,7 @@ impl<T: RelayTransport, H: ControlHandler, E: EventSource, P: PairingHandler> Re
                         }
                         _ = tick.tick() => {
                             if let Some(heartbeat) = &heartbeat {
-                                self.conn.send_envelope(heartbeat).await?;
+                                self.conn.send_heartbeat(heartbeat).await?;
                             }
                         }
                     }
@@ -220,16 +271,23 @@ impl<T: RelayTransport, H: ControlHandler, E: EventSource, P: PairingHandler> Re
                 let reply =
                     Envelope::from_message(Some(request_id), &Message::ControlResponse(response))?;
                 eprintln!("[remote-control] sending ControlResponse");
+                self.log_line("sending ControlResponse");
                 self.conn.send_envelope(&reply).await
             }
             Message::PairingConfirm(confirm) => {
                 eprintln!("[remote-control] received PairingConfirm: phone={}, pc={}, material_len={}", confirm.phone_device_id, confirm.pc_device_id, confirm.session_key_material.len());
+                self.log_line(&format!(
+                    "received PairingConfirm error={:?} pc={}",
+                    confirm.error,
+                    confirm.pc_device_id
+                ));
                 // Failure reply (e.g. from a PairingResume the relay could
                 // not complete): nothing to derive, drop any stale session
                 // key so the next reconnect re-pairs instead of installing
                 // a mismatched key and failing to decrypt every frame.
                 if let Some(error) = &confirm.error {
                     eprintln!("[remote-control] pairing error from relay: {error}");
+                    self.log_line(&format!("pairing error from relay: {error}"));
                     self.conn.clear_session_key();
                     if let Ok(mut guard) = self.session_sink.lock() {
                         *guard = None;
@@ -247,6 +305,7 @@ impl<T: RelayTransport, H: ControlHandler, E: EventSource, P: PairingHandler> Re
                     }
                 };
                 eprintln!("[remote-control] installed session key, peer={}", peer_device_id);
+                self.log_line(&format!("installed session key, peer={peer_device_id}"));
                 self.conn.install_session_key(key, peer_device_id);
                 if let Ok(mut guard) = self.session_sink.lock() {
                     *guard = self
@@ -618,4 +677,42 @@ mod tests {
         );
         task.abort();
     }
+
+    #[tokio::test]
+    async fn heartbeat_stays_plaintext_after_session_key_installed() {
+        // Regression: after pairing, the relay must still see plaintext
+        // heartbeats. An encrypted heartbeat carries `to_device_id` and the
+        // relay routes it to the (silent) phone instead of counting it,
+        // eventually reaping the PC connection on heartbeat_timeout.
+        let (mut pc_conn, mut phone) = linked_pair();
+        let key = crate::SessionKey::derive(b"pairing-secret", b"kodex-relay-salt");
+        pc_conn.install_session_key(key.clone(), "phone".to_string());
+        phone.install_session_key(key, "pc".to_string());
+
+        let handler = EchoHandler {
+            seen: Vec::new(),
+        };
+        let events = FixedEvents {
+            frames: Vec::new(),
+        };
+        let driver = RelayDriver::new(pc_conn, handler, events, NoopPairing);
+        let task = tokio::spawn(async move { driver.run().await });
+
+        use crate::RelayTransport as _;
+        let frame = tokio::time::timeout(Duration::from_secs(5), phone.transport_mut().recv_text())
+            .await
+            .expect("heartbeat frame arrives")
+            .expect("heartbeat recv ok")
+            .expect("heartbeat text");
+        assert!(
+            frame.contains("\"heartbeat\""),
+            "heartbeat is plaintext Envelope JSON, got: {frame}"
+        );
+        assert!(
+            !frame.contains("\"to_device_id\""),
+            "heartbeat must not be an EncryptedEnvelope, got: {frame}"
+        );
+        task.abort();
+    }
+
 }

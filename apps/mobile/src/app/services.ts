@@ -27,6 +27,7 @@ import {
   canReconnectWithoutRescan,
 } from "../account/binding";
 import type { BoundDevice } from "../account/binding";
+import { diagnostics } from "../util/diagnostics";
 import {
   loadSession,
   persistSession,
@@ -150,7 +151,10 @@ export class AppController {
     const keyHex = Array.from(result.sessionKey.bytes.slice(0, 8))
       .map((b) => b.toString(16).padStart(2, "0"))
       .join("");
-    console.log(`[pairing] sessionKey prefix=${keyHex} pcDeviceId=${result.pcDeviceId} phoneDeviceId=${result.phoneDeviceId}`);
+    diagnostics.log(
+      "pairing",
+      `sessionKey prefix=${keyHex} pcDeviceId=${result.pcDeviceId} phoneDeviceId=${result.phoneDeviceId}`,
+    );
     this.conn.installSessionKey(result.sessionKey, result.pcDeviceId);
     this.lastSessionKey = result.sessionKey;
     this.lastPeerDeviceId = result.pcDeviceId;
@@ -207,8 +211,12 @@ export class AppController {
     this.stopHeartbeat();
     this.heartbeatTimer = setInterval(() => {
       if (!this.conn || this.stopLoop) return;
+      // Plaintext heartbeat: the relay must see the frame to keep the
+      // connection alive. An encrypted envelope carries `to_device_id` and
+      // is routed to the peer instead of being consumed by the relay, so
+      // the relay's heartbeat_timeout would reap this connection.
       this.conn
-        .sendEnvelope(fromMessage(null, { type: "heartbeat", payload: null }))
+        .sendPlaintext(fromMessage(null, { type: "heartbeat", payload: null }))
         .catch(() => {});
     }, 20_000);
   }
@@ -360,14 +368,17 @@ export class AppController {
   private async doAutoResume(): Promise<boolean> {
     while (!this.stopLoop) {
       try {
+        diagnostics.log("services", `resume attempt ${this.reconnectAttempt + 1}`);
         await this.resumeFromBoundTransport();
         if (this.control) {
           await this.control.getState();
         }
         this.connState.transition("connected");
         this.reconnectAttempt = 0;
+        diagnostics.log("services", "resume succeeded");
         return true;
-      } catch {
+      } catch (e) {
+        diagnostics.log("services", `resume failed: ${e instanceof Error ? e.message : String(e)}`);
         if (this.lastSessionKey && this.lastPeerDeviceId) {
           this.lastSessionKey = null;
           this.lastPeerDeviceId = null;

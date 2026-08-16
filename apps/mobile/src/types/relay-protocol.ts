@@ -95,6 +95,9 @@ export interface PairingInitiate {
   phone_ephemeral_pubkey?: string | null;
 }
 export interface PairingConfirm {
+  /** Present when the relay rejected the pairing/resume (e.g. invalid or
+   * expired code, PC offline). Success path omits this field. */
+  error?: string;
   pairing_token: string;
   session_key_material: string;
   pc_device_id: string;

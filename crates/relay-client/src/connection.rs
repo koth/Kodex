@@ -103,6 +103,12 @@ impl<T: RelayTransport> RelayConnection<T> {
         self.session_key.is_some()
     }
 
+    /// Mutable access to the underlying transport (tests / heartbeat
+    /// plaintext framing).
+    pub fn transport_mut(&mut self) -> &mut T {
+        &mut self.transport
+    }
+
     /// Drop the installed E2E session key (e.g. after a pairing error or
     /// when a re-pair is starting). Subsequent sends revert to plaintext
     /// `Envelope` framing until a new key is installed.
@@ -136,6 +142,13 @@ impl<T: RelayTransport> RelayConnection<T> {
 
     /// Receive the next envelope: decrypt an `EncryptedEnvelope` when a
     /// session key is installed, otherwise parse a plain `Envelope`.
+    ///
+    /// Mixed framing tolerance: relay-originated frames (e.g. the
+    /// `SubscriptionStatus` acks, pairing errors) are always plaintext, even
+    /// after a session key is installed, because the relay does not hold the
+    /// E2E key. When decryption fails with a shape error (the frame is not
+    /// an `EncryptedEnvelope` at all) we fall back to plaintext parsing
+    /// instead of tearing down the connection.
     pub async fn recv_envelope(&mut self) -> Result<Option<Envelope>> {
         loop {
             let Some(frame) = self.transport.recv_text().await? else {
@@ -143,9 +156,34 @@ impl<T: RelayTransport> RelayConnection<T> {
             };
             let envelope = match &self.session_key {
                 Some(key) => {
-                    let enc: EncryptedEnvelope = serde_json::from_str(&frame)
-                        .context("decode encrypted envelope")?;
-                    decrypt(key, &enc)?
+                    // Plaintext frames never carry `to_device_id` at top
+                    // level; encrypted envelopes always do. Route on shape.
+                    if !frame.contains("\"to_device_id\"") {
+                        match serde_json::from_str(&frame) {
+                            Ok(env) => env,
+                            Err(e) => {
+                                eprintln!("[remote-control] recv_envelope: dropping undecodable plaintext frame: {e}");
+                                continue;
+                            }
+                        }
+                    } else {
+                        let enc: EncryptedEnvelope = serde_json::from_str(&frame)
+                            .context("decode encrypted envelope")?;
+                        match decrypt(key, &enc) {
+                            Ok(env) => env,
+                            Err(e) => {
+                                // Decrypt failure = the peer re-paired with a
+                                // fresh key and this connection's key is
+                                // stale. Drop the key so the next envelope
+                                // is treated as plaintext and the caller's
+                                // reconnect can re-pair cleanly.
+                                eprintln!("[remote-control] recv_envelope: decrypt failed ({e}); dropping stale session key");
+                                self.session_key = None;
+                                self.peer_device_id = None;
+                                return Err(anyhow::anyhow!("decrypt failed: {e}"));
+                            }
+                        }
+                    }
                 }
                 None => {
                     if frame.contains("\"to_device_id\"") {
@@ -157,6 +195,14 @@ impl<T: RelayTransport> RelayConnection<T> {
             };
             return Ok(Some(envelope));
         }
+    }
+
+    /// Send a pre-serialized plaintext frame (heartbeat). Bypasses E2E
+    /// encryption intentionally: the relay must see the frame to keep the
+    /// connection alive, and encrypted envelopes are routed to the peer
+    /// rather than consumed by the relay.
+    pub async fn send_heartbeat(&mut self, frame: &str) -> Result<()> {
+        self.transport.send_text(frame.to_string()).await
     }
 
     /// Pre-pairing auth: send a `DeviceAuth` envelope (plain) and await an
@@ -453,6 +499,31 @@ mod tests {
             .expect("recv ok")
             .expect("envelope recovered");
         assert_eq!(received, envelope);
+        conn.close().await;
+    }
+
+    #[tokio::test]
+    async fn plaintext_frame_accepted_after_session_key_installed() {
+        // The resume flow: PC holds an E2E key from the earlier pairing, the
+        // phone resumes, and the relay forwards a *plaintext* PairingConfirm
+        // with fresh material. The keyed connection must parse it instead of
+        // failing with `decode encrypted envelope: missing field
+        // to_device_id` and tearing the driver down.
+        let url = spawn_passthrough_relay().await.unwrap();
+        let mut conn = dial_plain(&url, Duration::from_secs(30), false).await.unwrap();
+        // First frame goes out plaintext (no key yet), echoes back plaintext.
+        let heartbeat = Envelope::from_message(None, &Message::Heartbeat).unwrap();
+        conn.send_envelope(&heartbeat).await.unwrap();
+        // Now install a key: outbound frames would encrypt, but the echoed
+        // plaintext heartbeat must still parse.
+        let key = SessionKey::derive(b"old-secret", b"kodex-relay-salt");
+        conn.install_session_key(key, "dev-phone".to_string());
+        let echoed = conn
+            .recv_envelope()
+            .await
+            .expect("plaintext frame parses with a key installed")
+            .expect("echoed frame");
+        assert_eq!(echoed, heartbeat);
         conn.close().await;
     }
 }

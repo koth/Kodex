@@ -13,6 +13,7 @@ import { decodeBase64UrlNoPad, encodeBase64UrlNoPad } from "../util/base64url";
 import { deriveSessionKey, type SessionKey } from "../crypto/session-key";
 import { pcStaticPublicKey } from "./qr-parse";
 import type { BoundDevice } from "../account/binding";
+import { diagnostics } from "../util/diagnostics";
 
 const PAIRING_HANDSHAKE_TIMEOUT_MS = 30_000;
 
@@ -63,6 +64,7 @@ export async function runPairingHandshake(
   },
   });
   await conn.sendEnvelope(initiateEnv);
+  diagnostics.log("pairing", `initiate sent code=${qr.pairing_code}`);
 
   const confirmEnv = await recvEnvelopeWithTimeout(conn);
   if (confirmEnv === null) {
@@ -72,6 +74,11 @@ export async function runPairingHandshake(
   throw new Error(`unexpected pairing response: ${confirmEnv.type}`);
   }
   const confirm = confirmEnv.payload as PairingConfirm;
+  if (confirm.error) {
+    diagnostics.log("pairing", `initiate rejected: ${confirm.error}`);
+    throw new Error(`配对失败：${confirm.error}`);
+  }
+  diagnostics.log("pairing", `confirmed pc=${confirm.pc_device_id} phone=${confirm.phone_device_id}`);
 
   const shared = ecdhSharedSecret(ephemeralSecret, pcStaticPublic);
   const sessionKey = deriveSessionKey(shared);
@@ -109,6 +116,7 @@ export async function runPairingResume(
   };
   const env = fromMessage(null, { type: "pairing_resume", payload: resume });
   await conn.sendEnvelope(env);
+  diagnostics.log("pairing", `resume sent token=${bound.pairing_token.slice(0, 8)}…`);
 
   const confirmEnv = await recvEnvelopeWithTimeout(conn);
   if (confirmEnv === null) {
@@ -118,6 +126,11 @@ export async function runPairingResume(
     throw new Error(`unexpected pairing resume response: ${confirmEnv.type}`);
   }
   const confirm = confirmEnv.payload as PairingConfirm;
+  if (confirm.error) {
+    diagnostics.log("pairing", `resume rejected: ${confirm.error}`);
+    throw new Error(`恢复连接失败：${confirm.error}`);
+  }
+  diagnostics.log("pairing", `resume confirmed pc=${confirm.pc_device_id}`);
 
   const shared = ecdhSharedSecret(ephemeralSecret, pcStaticPub);
   return {

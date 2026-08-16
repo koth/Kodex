@@ -4,7 +4,13 @@ import { styles, colors, spacing } from "../theme";
 
 // Settings: connection state, device id, subscription status, unbind/re-pair,
 // and a kill switch (disconnect). All state comes from the controller.
-export function SettingsScreen({ onRescan }: { onRescan: () => void }) {
+export function SettingsScreen({
+  onRescan,
+  onOpenDiagnostics,
+}: {
+  onRescan: () => void;
+  onOpenDiagnostics?: () => void;
+}) {
   const controller = useAppController();
   const connState = useConnectionState();
   const subscription = useSubscriptionState();
@@ -63,6 +69,14 @@ export function SettingsScreen({ onRescan }: { onRescan: () => void }) {
         <Pressable style={[styles.buttonGhost, { marginTop: spacing.md }]} onPress={unbind}>
           <Text style={[styles.text, { color: colors.danger }]}>Unbind & re-pair</Text>
         </Pressable>
+        {onOpenDiagnostics ? (
+          <Pressable
+            style={[styles.buttonGhost, { marginTop: spacing.sm }]}
+            onPress={onOpenDiagnostics}
+          >
+            <Text style={styles.text}>Diagnostics log</Text>
+          </Pressable>
+        ) : null}
         <Pressable style={[styles.buttonDanger, { marginTop: spacing.sm }]} onPress={kill}>
           <Text style={styles.buttonText}>Disconnect (kill switch)</Text>
         </Pressable>

@@ -318,7 +318,11 @@ fn start_remote_control_driver(app: tauri::AppHandle) {
                     backoff = Duration::from_secs(2);
                     conn
                 }
-                Err(_) => {
+                Err(e) => {
+                    app_for_loop
+                        .state::<AppState>()
+                        .remote_control()
+                        .log_driver_event(&format!("relay dial failed: {e:#}; retry in {backoff:?}"));
                     tokio::time::sleep(backoff).await;
                     backoff = (backoff * 2).min(Duration::from_secs(60));
                     continue;
@@ -351,6 +355,10 @@ fn start_remote_control_driver(app: tauri::AppHandle) {
             };
             if !authenticated {
                 eprintln!("[remote-control] relay auth failed; reconnecting");
+                app_for_loop
+                    .state::<AppState>()
+                    .remote_control()
+                    .log_driver_event("relay auth failed; reconnecting");
                 let _ = conn.close().await;
                 app_for_loop
                     .state::<AppState>()
@@ -387,6 +395,10 @@ fn start_remote_control_driver(app: tauri::AppHandle) {
                 .state::<AppState>()
                 .remote_control()
                 .set_connected(true);
+            app_for_loop
+                .state::<AppState>()
+                .remote_control()
+                .log_driver_event("connected to relay; driver starting");
             // Run the control-request router + event pusher. Select against
             // `pairing_notify` so a freshly minted pairing code interrupts the
             // run, drops this connection, and reconnects to re-register the
@@ -397,19 +409,36 @@ fn start_remote_control_driver(app: tauri::AppHandle) {
                 crate::remote_control_bridge::AppUpdateEventSource::new(app_for_loop.clone());
             let pairing =
                 crate::remote_control_bridge::DesktopPairingHandler::new(app_for_loop.clone());
+            let manager_for_log = app_for_loop.state::<AppState>().remote_control();
             let driver = RelayDriver::new_with_session_sink(
                 conn,
                 handler,
                 events,
                 pairing,
                 session_sink.clone(),
-            );
+            )
+            .with_logger(Arc::new(move |line: &str| {
+                manager_for_log.log_driver_event(line);
+            }));
             let run_fut = driver.run();
             tokio::pin!(run_fut);
             tokio::select! {
-                _ = &mut run_fut => {}
+                result = &mut run_fut => {
+                    let detail = match &result {
+                        Ok(()) => "clean close".to_string(),
+                        Err(e) => format!("error: {e:#}"),
+                    };
+                    app_for_loop
+                        .state::<AppState>()
+                        .remote_control()
+                        .log_driver_event(&format!("driver run ended: {detail}"));
+                }
                 _ = pairing_notify.notified() => {
                     eprintln!("[remote-control] pairing code minted; reconnecting to register");
+                    app_for_loop
+                        .state::<AppState>()
+                        .remote_control()
+                        .log_driver_event("pairing code minted; reconnecting to register");
                 }
             }
             app_for_loop
