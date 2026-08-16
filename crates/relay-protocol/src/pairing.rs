@@ -17,6 +17,8 @@ pub struct PairingInitiate {
 /// (relay-client) via X25519 ECDH + HKDF and is never known to the relay.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PairingConfirm {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
     pub pairing_token: String,
     /// Relay-forwarded E2E key material, base64-encoded. Carries the phone
     /// ephemeral public key to the PC (and the PC static public key to the

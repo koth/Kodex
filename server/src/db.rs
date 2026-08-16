@@ -114,6 +114,16 @@ self.blocking(move |c| {
     ) -> Result<()> {
         let expires_at = now_ms() + (ttl_secs as i64) * 1000;
 self.blocking(move |c| {
+            // A PC may only have one live pairing code. Stale codes from an
+            // earlier pairing (or an expired mint) would otherwise collide
+            // with this INSERT on the `pairing_code` PRIMARY KEY — pairing
+            // codes are random, so a collision with a *different* PC's code
+            // is negligible, but a re-registration by the same PC within
+            // the old code's TTL must always succeed.
+            c.execute(
+                "DELETE FROM pairing_codes WHERE pc_device_id = ?1",
+                params![pc_device_id],
+            )?;
             c.execute(
                 "INSERT INTO pairing_codes \
                  (pairing_code, pc_device_id, created_at, expires_at, used) \

@@ -13,7 +13,12 @@ pub async fn send_message(
 ) -> Result<()> {
     let env = Envelope::from_message(id, msg)?;
     let text = serde_json::to_string(&env)?;
-    let _ = tx.send(text).await;
+    // A closed channel means the peer connection is dead; surface that so
+    // callers can evict stale connection entries instead of silently
+    // believing the frame was delivered.
+    tx.send(text)
+        .await
+        .map_err(|e| crate::errors::RelayError::Other(format!("peer connection closed: {e}")))?;
     Ok(())
 }
 
