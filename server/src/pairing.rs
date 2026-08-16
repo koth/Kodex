@@ -450,21 +450,32 @@ mod tests {
 /// relay validates the persisted pairing token, then forwards the fresh
 /// material to the paired PC as a `PairingConfirm`.
 /// Both peers derive the same new E2E session key from their own secret.
-    pub async fn handle_pairing_resume(
+pub async fn handle_pairing_resume(
     state: &AppState,
     req: PairingResume,
     phone_device_id: &str,
     tx: &mpsc::Sender<String>,
 ) -> Result<()> {
+    tracing::info!(
+        phone_device_id = %phone_device_id,
+        pairing_token = %req.pairing_token,
+        "pairing resume requested"
+    );
     let Some((pc_device_id, paired_phone, _account_id, pc_x25519_pubkey)) = state
         .db
         .pairing_by_token(req.pairing_token.clone())
         .await?
     else {
+        tracing::warn!(pairing_token = %req.pairing_token, "resume: pairing token unknown");
         send_pairing_error(tx, "pairing token unknown; scan a new code").await;
         return Err(RelayError::InvalidPairingCode);
     };
     if paired_phone != phone_device_id {
+        tracing::warn!(
+            phone_device_id = %phone_device_id,
+            paired_phone = %paired_phone,
+            "resume: phone identity mismatch"
+        );
         send_pairing_error(tx, "pairing token does not belong to this device").await;
         return Err(RelayError::NotPaired);
     }
@@ -479,6 +490,7 @@ mod tests {
     });
 
     let Some(pc_tx) = state.connections.get(&pc_device_id) else {
+        tracing::warn!(pc_device_id = %pc_device_id, "resume: paired PC offline");
         send_pairing_error(tx, "paired PC is offline; scan a new code").await;
         return Err(RelayError::Other("paired PC is offline".into()));
     };

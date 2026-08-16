@@ -84,6 +84,11 @@ impl Session {
         }
         let env: Envelope = serde_json::from_value(value)?;
         let msg = env.into_message()?;
+        tracing::info!(
+            device_id = ?self.device_id,
+            message_type = ?std::mem::discriminant(&msg),
+            "inbound message"
+        );
         match msg {
             Message::DeviceAuth(auth) => {
                 if self.device_id.is_some() {
