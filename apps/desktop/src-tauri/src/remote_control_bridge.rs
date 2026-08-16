@@ -44,6 +44,14 @@ impl PairingHandler for DesktopPairingHandler {
             &confirm.session_key_material,
             RELAY_E2E_SALT,
         )?;
+        // Diagnostic: log the derived key prefix so it can be matched
+        // against the phone's `resume sessionKey prefix` log line.
+        let prefix: String = key
+            .bytes_prefix()
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        manager.log_driver_event(&format!("derived pairing session key prefix={prefix}"));
         // The phone's device id is the peer for E2E AAD.
         Ok((key, confirm.phone_device_id))
     }

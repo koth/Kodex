@@ -80,6 +80,9 @@ pub struct RelayConnection<T: RelayTransport> {
     heartbeat: Duration,
     session_key: Option<SessionKey>,
     peer_device_id: Option<String>,
+    /// Optional diagnostic sink for E2E failures (the desktop shell writes
+    /// these to its driver log).
+    error_log: Option<std::sync::Arc<dyn Fn(&str) + Send + Sync>>,
 }
 
 impl<T: RelayTransport> RelayConnection<T> {
@@ -89,7 +92,13 @@ impl<T: RelayTransport> RelayConnection<T> {
             heartbeat,
             session_key: None,
             peer_device_id: None,
+            error_log: None,
         }
+    }
+
+    /// Attach a diagnostic sink called on E2E decrypt failures.
+    pub fn set_error_log(&mut self, log: std::sync::Arc<dyn Fn(&str) + Send + Sync>) {
+        self.error_log = Some(log);
     }
 
     /// Install the E2E session key (post-pairing). Subsequent
@@ -178,6 +187,14 @@ impl<T: RelayTransport> RelayConnection<T> {
                                 // is treated as plaintext and the caller's
                                 // reconnect can re-pair cleanly.
                                 eprintln!("[remote-control] recv_envelope: decrypt failed ({e}); dropping stale session key");
+                                if let Some(logger) = &self.error_log {
+                                    logger(&format!(
+                                        "decrypt failed to={} nonce_len={} ct_len={}: {e}",
+                                        enc.to_device_id,
+                                        enc.nonce.len(),
+                                        enc.ciphertext.len(),
+                                    ));
+                                }
                                 self.session_key = None;
                                 self.peer_device_id = None;
                                 return Err(anyhow::anyhow!("decrypt failed: {e}"));

@@ -37,6 +37,11 @@ impl SessionKey {
     fn as_key(&self) -> &Key {
         Key::from_slice(&self.0)
     }
+
+    /// First 8 bytes, for cross-endpoint diagnostic comparison only.
+    pub fn bytes_prefix(&self) -> [u8; 8] {
+        self.0[..8].try_into().expect("32-byte key")
+    }
 }
 
 const NONCE_LEN: usize = 12;

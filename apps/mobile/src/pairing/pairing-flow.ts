@@ -133,8 +133,13 @@ export async function runPairingResume(
   diagnostics.log("pairing", `resume confirmed pc=${confirm.pc_device_id}`);
 
   const shared = ecdhSharedSecret(ephemeralSecret, pcStaticPub);
+  const sessionKey = deriveSessionKey(shared);
+  const keyHex = Array.from(sessionKey.bytes.slice(0, 8))
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join("");
+  diagnostics.log("pairing", `resume sessionKey prefix=${keyHex}`);
   return {
-    sessionKey: deriveSessionKey(shared),
+    sessionKey,
     pcDeviceId: confirm.pc_device_id,
   };
 }

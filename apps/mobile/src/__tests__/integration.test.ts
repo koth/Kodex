@@ -117,6 +117,27 @@ class FakePc {
     await this.conn.sendEnvelope(fromMessage(null, { type: "subscription_status", payload: ackStatus }));
 
     const initEnv = await this.conn.recvEnvelope();
+    // Accept either a fresh pairing or a resume (post-restart reconnect).
+    if (initEnv && initEnv.type === "pairing_resume") {
+      console.log("[fake-pc] got pairing_resume");
+      const resume = initEnv.payload as { pairing_token: string; phone_ephemeral_pubkey: string };
+      const phoneEphPub = decodeBase64UrlNoPad(resume.phone_ephemeral_pubkey);
+      const shared = ecdhSharedSecret(PC_SECRET, phoneEphPub);
+      const key = deriveSessionKey(shared);
+      await this.conn.sendEnvelope(
+        fromMessage(null, {
+          type: "pairing_confirm",
+          payload: {
+            pairing_token: resume.pairing_token,
+            session_key_material: encodeBase64UrlNoPad(getPublicKey(PC_SECRET)),
+            pc_device_id: "pc-dev",
+            phone_device_id: this.phoneDeviceId,
+          },
+        }),
+      );
+      this.conn.installSessionKey(key, this.phoneDeviceId);
+    } else {
+    console.log("[fake-pc] got", initEnv?.type);
     if (!initEnv || initEnv.type !== "pairing_initiate") throw new Error("expected pairing_initiate");
     const init = initEnv.payload as PairingInitiate;
     const phoneEphPub = decodeBase64UrlNoPad(init.phone_ephemeral_pubkey!);
@@ -134,6 +155,7 @@ class FakePc {
       }),
     );
     this.conn.installSessionKey(key, this.phoneDeviceId);
+    }
 
     while (!this.stop) {
       const env = await this.conn.recvEnvelope();
@@ -319,6 +341,53 @@ describe("integration: phone <-> fake PC over relay", () => {
     expect(controller.snapshot).toBe(retained);
 
     await controller.disconnect();
+  });
+
+  it("cold restart resumes without re-scanning (pairing resume handshake)", async () => {
+    // First boot: pair.
+    const store = new InMemorySecretStore();
+    const [phoneT1, pcT1] = linkedPair();
+    const controller1 = new AppController(store);
+    const pc1 = new FakePc(new RelayConnection(pcT1));
+    const pcRun1 = pc1.run();
+    await controller1.pairFromTransport(phoneT1, qrJson(), false);
+    expect(controller1.connectionState).toBe("connected");
+    await controller1.getState();
+    // Drain the persisted session key so the restart exercises the resume
+    // handshake (pairing_resume) rather than the cached-key fast path.
+    const { clearSession } = await import("../account/session");
+    await clearSession(store);
+    // Simulate app kill: tear down the transport + loop without clearing
+    // the persisted store (identity, BoundDevice, session key survive).
+    await controller1.disconnect();
+    pc1.stopLoop();
+    await pcRun1;
+
+    // Second boot with the same store: boot() must auto-resume via the
+    // pairing resume handshake, not require a fresh QR scan.
+    const [phoneT2, pcT2] = linkedPair();
+    const controller2 = new AppController(store, async () => phoneT2);
+    const pc2 = new FakePc(new RelayConnection(pcT2));
+    const pcRun2 = pc2.run();
+
+    let booted = false;
+    try {
+      booted = await controller2.boot();
+    } catch (e) {
+      throw new Error(`boot threw: ${e instanceof Error ? e.message : e}`);
+    }
+    if (!booted) {
+      const log = await (await import("../util/diagnostics")).diagnostics.readAll();
+      throw new Error(`boot returned false; diagnostics:\n${log}`);
+    }
+    expect(booted).toBe(true);
+    expect(controller2.connectionState).toBe("connected");
+    await waitFor(() => (controller2.snapshot?.session.id === "init" ? true : undefined));
+    expect(controller2.snapshot?.session.id).toBe("init");
+
+    await controller2.disconnect();
+    pc2.stopLoop();
+    await pcRun2;
   });
 });
 // end of file

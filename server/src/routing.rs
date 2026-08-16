@@ -30,12 +30,20 @@ pub async fn route_encrypted(
                     "encrypted frame delivery failed; evicting dead connection entry"
                 );
                 state.connections.remove(&env.to_device_id);
+            } else {
+                tracing::info!(
+                    from = %from_device_id,
+                    to = %env.to_device_id,
+                    bytes = text.len(),
+                    "encrypted frame routed"
+                );
             }
         }
         None => {
-            tracing::debug!(
+            tracing::warn!(
+                from = %from_device_id,
                 to_device_id = %env.to_device_id,
-                "target offline; dropping encrypted frame (MVP)"
+                "target offline; dropping encrypted frame"
             );
         }
     }

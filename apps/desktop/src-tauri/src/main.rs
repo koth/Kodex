@@ -328,6 +328,12 @@ fn start_remote_control_driver(app: tauri::AppHandle) {
                     continue;
                 }
             };
+            {
+                let manager_for_err = app_for_loop.state::<AppState>().remote_control();
+                conn.set_error_log(Arc::new(move |line: &str| {
+                    manager_for_err.log_driver_event(line);
+                }));
+            }
             // Authenticate with the device identity (Ed25519 signature), then
             // register the current pairing code so a scanning phone's
             // PairingInitiate can be routed to this PC. Both are fail-open:

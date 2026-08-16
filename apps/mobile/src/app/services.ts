@@ -391,7 +391,9 @@ export class AppController {
         diagnostics.log("services", `resume attempt ${this.reconnectAttempt + 1}`);
         await this.resumeFromBoundTransport();
         if (this.control) {
-          await this.control.getState();
+          diagnostics.log("services", "resume connected; requesting initial state");
+          await this.getState();
+          diagnostics.log("services", "initial state received");
         }
         this.connState.transition("connected");
         this.reconnectAttempt = 0;
