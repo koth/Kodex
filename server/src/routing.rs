@@ -21,7 +21,16 @@ pub async fn route_encrypted(
     }
     match state.connections.get(&env.to_device_id) {
         Some(tx) => {
-            let _ = tx.send(text.to_string()).await;
+            if tx.send(text.to_string()).await.is_err() {
+                // Dead connection entry (peer's WS dropped without cleanup):
+                // evict so the device reconnects into a fresh slot instead
+                // of frames being silently swallowed.
+                tracing::warn!(
+                    to_device_id = %env.to_device_id,
+                    "encrypted frame delivery failed; evicting dead connection entry"
+                );
+                state.connections.remove(&env.to_device_id);
+            }
         }
         None => {
             tracing::debug!(

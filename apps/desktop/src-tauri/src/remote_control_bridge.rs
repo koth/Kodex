@@ -53,6 +53,7 @@ impl PairingHandler for DesktopPairingHandler {
 /// Each inbound `ControlRequest` is dispatched to the matching
 /// `RemoteControl` method; the result is wrapped into the matching
 /// `ControlResponse` (or `Error` on failure).
+#[derive(Clone)]
 pub struct DesktopControlHandler {
     control: DesktopRemoteControl,
     app: AppHandle,

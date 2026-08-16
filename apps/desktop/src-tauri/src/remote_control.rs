@@ -12,7 +12,7 @@ use workspace_model::{
 
 use crate::state::AppState;
 
-#[allow(dead_code)]
+#[derive(Clone)]
 pub struct DesktopRemoteControl {
     app: AppHandle,
 }

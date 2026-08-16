@@ -103,6 +103,14 @@ impl<T: RelayTransport> RelayConnection<T> {
         self.session_key.is_some()
     }
 
+    /// Drop the installed E2E session key (e.g. after a pairing error or
+    /// when a re-pair is starting). Subsequent sends revert to plaintext
+    /// `Envelope` framing until a new key is installed.
+    pub fn clear_session_key(&mut self) {
+        self.session_key = None;
+        self.peer_device_id = None;
+    }
+
     /// Clone of the installed E2E session key, if any.
     pub fn session_key(&self) -> Option<SessionKey> {
         self.session_key.clone()

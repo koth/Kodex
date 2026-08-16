@@ -18,7 +18,7 @@ use crate::RelayTransport;
 
 /// Handles an inbound `ControlRequest`, returning the matching
 /// `ControlResponse` (or an `Error` response on failure).
-pub trait ControlHandler: Send {
+pub trait ControlHandler: Clone + Send + 'static {
     fn handle(
         &mut self,
         request: ControlRequest,
@@ -96,13 +96,17 @@ impl<T: RelayTransport, H: ControlHandler, E: EventSource, P: PairingHandler> Re
             (self.conn.heartbeat().as_millis() / 2).max(1000) as u64,
         );
         let mut heartbeat_tick = tokio::time::interval(heartbeat_interval);
+        heartbeat_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
             if outbound_done {
                 tokio::select! {
                     inbound = self.conn.recv_envelope() => {
                         match inbound? {
                             None => return Ok(()),
-                            Some(envelope) => self.handle_inbound(envelope).await?,
+                            Some(envelope) => {
+                                self.handle_inbound(envelope, Some(&mut heartbeat_tick))
+                                    .await?
+                            }
                         }
                     }
                     _ = heartbeat_tick.tick() => {
@@ -116,7 +120,10 @@ impl<T: RelayTransport, H: ControlHandler, E: EventSource, P: PairingHandler> Re
                     inbound = self.conn.recv_envelope() => {
                         match inbound? {
                             None => return Ok(()),
-                            Some(envelope) => self.handle_inbound(envelope).await?,
+                            Some(envelope) => {
+                                self.handle_inbound(envelope, Some(&mut heartbeat_tick))
+                                    .await?
+                            }
                         }
                     }
                     outbound = self.events.next_event() => {
@@ -135,8 +142,25 @@ impl<T: RelayTransport, H: ControlHandler, E: EventSource, P: PairingHandler> Re
         }
     }
 
-    async fn handle_inbound(&mut self, envelope: Envelope) -> Result<()> {
-        let request_id = envelope.id;
+    /// `heartbeat_tick` is only `Some` when this call owns the driver loop's
+    /// heartbeat duty (i.e. invoked from the select inside the
+    /// `ControlRequest` arm). Top-level calls pass `None`; the outer loop's
+    /// tick keeps heartbeating between messages.
+    fn handle_inbound<'a>(
+        &'a mut self,
+        envelope: Envelope,
+        heartbeat_tick: Option<&'a mut tokio::time::Interval>,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + 'a>> {
+        Box::pin(self.handle_inbound_inner(envelope, heartbeat_tick))
+    }
+
+    async fn handle_inbound_inner(
+        &mut self,
+        envelope: Envelope,
+        mut heartbeat_tick: Option<&mut tokio::time::Interval>,
+    ) -> Result<()> {
+        let heartbeat = Envelope::from_message(None, &Message::Heartbeat).ok();
+        let _request_id = envelope.id;
         let message = match envelope.into_message() {
             Ok(message) => message,
             Err(_) => return Ok(()),
@@ -145,13 +169,73 @@ impl<T: RelayTransport, H: ControlHandler, E: EventSource, P: PairingHandler> Re
             Message::ControlRequest(request) => {
                 let has_key = self.conn.has_session_key();
                 eprintln!("[remote-control] received ControlRequest op={:?} has_key={}", std::mem::discriminant(&request), has_key);
-                let response = self.handler.handle(request).await;
-                let reply = Envelope::from_message(request_id, &Message::ControlResponse(response))?;
+                // Detach the handler: desktop handlers take a blocking
+                // registry mutex and can stall on slow paths (session-store
+                // IO, ACP reconnect). Holding the driver loop hostage means
+                // heartbeats stop and every subsequent request times out,
+                // so run the handler on a blocking thread and keep pumping
+                // frames while it works.
+                let mut handler = self.handler.clone();
+                let request_id = request.request_id();
+                // Hand the request off to a blocking thread and keep
+                // pumping inbound frames + heartbeats until the reply is
+                // ready; awaiting inline would freeze the driver loop.
+                let mut handle = tokio::task::spawn_blocking(move || {
+                    futures::executor::block_on(handler.handle(request))
+                });
+                eprintln!("[remote-control] handler detached to blocking thread");
+                let response = loop {
+                    let tick = heartbeat_tick.as_deref_mut().expect(
+                        "ControlRequest arm requires the loop's heartbeat interval",
+                    );
+                    tokio::select! {
+                        joined = &mut handle => {
+                            break match joined {
+                                Ok(response) => response,
+                                Err(e) => ControlResponse::Error {
+                                    request_id,
+                                    message: format!("handler task failed: {e}"),
+                                },
+                            };
+                        }
+                        inbound = self.conn.recv_envelope() => {
+                            match inbound? {
+                                None => return Ok(()),
+                                Some(envelope) => {
+                                    self.handle_inbound(
+                                        envelope,
+                                        heartbeat_tick.as_deref_mut(),
+                                    )
+                                    .await?;
+                                }
+                            }
+                        }
+                        _ = tick.tick() => {
+                            if let Some(heartbeat) = &heartbeat {
+                                self.conn.send_envelope(heartbeat).await?;
+                            }
+                        }
+                    }
+                };
+                let reply =
+                    Envelope::from_message(Some(request_id), &Message::ControlResponse(response))?;
                 eprintln!("[remote-control] sending ControlResponse");
                 self.conn.send_envelope(&reply).await
             }
             Message::PairingConfirm(confirm) => {
                 eprintln!("[remote-control] received PairingConfirm: phone={}, pc={}, material_len={}", confirm.phone_device_id, confirm.pc_device_id, confirm.session_key_material.len());
+                // Failure reply (e.g. from a PairingResume the relay could
+                // not complete): nothing to derive, drop any stale session
+                // key so the next reconnect re-pairs instead of installing
+                // a mismatched key and failing to decrypt every frame.
+                if let Some(error) = &confirm.error {
+                    eprintln!("[remote-control] pairing error from relay: {error}");
+                    self.conn.clear_session_key();
+                    if let Ok(mut guard) = self.session_sink.lock() {
+                        *guard = None;
+                    }
+                    return Ok(());
+                }
                 // The relay forwards the phone's ephemeral public key in
                 // `session_key_material`. Derive the E2E session key and
                 // install it so subsequent control requests decrypt.
@@ -235,6 +319,7 @@ mod tests {
 
     /// Handler that records requests and replies with the matching response
     /// variant (Cancel/StopTool) or an Error for unsupported ops.
+    #[derive(Clone)]
     struct EchoHandler {
         seen: Vec<ControlRequest>,
     }
@@ -436,6 +521,101 @@ mod tests {
             }
             other => panic!("expected Cancel response over E2E, got {other:?}"),
         }
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn pairing_error_confirm_clears_stale_session_key() {
+        // A relay pairing-error reply (e.g. failed PairingResume) must drop
+        // the previously installed key; otherwise the reconnect loop
+        // reinstalls a stale key and every frame fails to decrypt.
+        let (mut pc_conn, _phone) = linked_pair();
+        let key = crate::SessionKey::derive(b"old-secret", b"kodex-relay-salt");
+        pc_conn.install_session_key(key, "phone".to_string());
+        assert!(pc_conn.has_session_key());
+        let handler = EchoHandler {
+            seen: Vec::new(),
+        };
+        let events = FixedEvents {
+            frames: Vec::new(),
+        };
+        let mut driver = RelayDriver::new(pc_conn, handler, events, NoopPairing);
+        let error_env = Envelope::from_message(
+            None,
+            &Message::PairingConfirm(relay_protocol::PairingConfirm {
+                error: Some("paired PC is offline; scan a new code".to_string()),
+                pairing_token: String::new(),
+                session_key_material: String::new(),
+                pc_device_id: String::new(),
+                phone_device_id: String::new(),
+            }),
+        )
+        .unwrap();
+        // Feed the confirm directly: the relay sends it as a plaintext frame
+        // before E2E is negotiated on the fresh connection; transport
+        // framing is covered by the connection tests.
+        driver.handle_inbound(error_env, None).await.unwrap();
+        assert!(!driver.conn.has_session_key(), "stale key cleared");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn heartbeats_continue_while_handler_blocks() {
+        // A slow desktop handler (registry mutex / session-store IO) must
+        // not freeze the driver loop: heartbeats keep flowing so the relay
+        // does not reap the connection mid-request.
+        #[derive(Clone)]
+        struct SleepyHandler;
+
+        impl ControlHandler for SleepyHandler {
+            async fn handle(&mut self, request: ControlRequest) -> ControlResponse {
+                std::thread::sleep(Duration::from_millis(700));
+                ControlResponse::Cancel {
+                    request_id: request.request_id(),
+                }
+            }
+        }
+
+        let (pc_conn, mut phone) = linked_pair();
+        let handler = SleepyHandler;
+        let events = FixedEvents {
+            frames: Vec::new(),
+        };
+        let driver = RelayDriver::new(pc_conn, handler, events, NoopPairing);
+        let task = tokio::spawn(async move { driver.run().await });
+
+        let request_id = Uuid::new_v4();
+        let request = ControlRequest::Cancel { request_id };
+        let req_env =
+            Envelope::from_message(Some(request_id), &Message::ControlRequest(request)).unwrap();
+        phone.send_envelope(&req_env).await.unwrap();
+
+        // The driver must keep heartbeating while the handler sleeps, then
+        // deliver the response once the handler finishes.
+        let mut heartbeats = 0;
+        let mut responded = false;
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            let env = tokio::time::timeout_at(deadline, phone.recv_envelope())
+                .await
+                .expect("frames keep flowing while the handler blocks")
+                .expect("frame")
+                .expect("envelope");
+            match env.into_message().unwrap() {
+                Message::Heartbeat => {
+                    heartbeats += 1;
+                }
+                Message::ControlResponse(_) => {
+                    responded = true;
+                    break;
+                }
+                other => panic!("unexpected frame: {other:?}"),
+            }
+        }
+        assert!(responded, "handler response delivered");
+        assert!(
+            heartbeats >= 1,
+            "at least one heartbeat flowed while the handler blocked (got {heartbeats})"
+        );
         task.abort();
     }
 }
