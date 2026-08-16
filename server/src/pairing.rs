@@ -3,6 +3,7 @@ use relay_protocol::{
 };
 use tokio::sync::mpsc;
 use uuid::Uuid;
+use std::time::Duration;
 
 use crate::errors::{RelayError, Result};
 use crate::state::AppState;
@@ -57,11 +58,21 @@ pub async fn handle_pairing_initiate(
     phone_device_id: &str,
     tx: &mpsc::Sender<String>,
 ) -> Result<()> {
-    let pc_device_id = state
-        .db
-        .take_pairing_code(pi.pairing_code.clone())
-        .await?
-        .ok_or(RelayError::InvalidPairingCode)?;
+    // PC registers the pairing code immediately after minting the QR, but the
+    // phone can scan and reach the relay before `PairingRegister` is written.
+    // Allow that race to settle instead of failing on the first lookup.
+    let mut pc_device_id = None;
+    for _ in 0..3 {
+        pc_device_id = state
+            .db
+            .take_pairing_code(pi.pairing_code.clone())
+            .await?;
+        if pc_device_id.is_some() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(150)).await;
+    }
+    let pc_device_id = pc_device_id.ok_or(RelayError::InvalidPairingCode)?;
     let pairing_token = Uuid::new_v4().to_string();
     state
         .db
