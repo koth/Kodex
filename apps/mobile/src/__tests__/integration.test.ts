@@ -307,15 +307,15 @@ describe("integration: phone <-> fake PC over relay", () => {
     await pcRun;
   });
 
-  it("relay drop retains the snapshot and demotes to disconnected", async () => {
+  it("relay drop retains the snapshot while reconnect keeps retrying", async () => {
     const { controller, phoneT } = await bootstrap();
     await controller.createSession();
     await waitFor(() => (controller.snapshot?.session.id === "s1" ? true : undefined));
 
     const retained = controller.snapshot;
     phoneT.forceClose();
-    await waitFor(() => (controller.connectionState === "disconnected" ? true : undefined));
-    expect(controller.connectionState).toBe("disconnected");
+    await waitFor(() => (controller.connectionState === "connecting" ? true : undefined));
+    expect(controller.connectionState).toBe("connecting");
     expect(controller.snapshot).toBe(retained);
 
     await controller.disconnect();

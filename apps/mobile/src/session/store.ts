@@ -16,6 +16,7 @@ type PermissionHandler = (request: PermissionInputRequest) => void;
 // than the held revision (stale/duplicate). Revisions are per-session.
 export class SessionStore {
   private snapshot: Snapshot | null = null;
+  private activeSessionId: string | null = null;
   private listeners = new Set<Listener>();
   private permissionHandler: PermissionHandler | null = null;
 
@@ -35,12 +36,23 @@ export class SessionStore {
 
   /** Replace the entire snapshot (SnapshotFull). */
   setSnapshot(snapshot: Snapshot): void {
+  this.activeSessionId = snapshot.session.id;
   this.snapshot = snapshot;
   this.emit();
   }
 
   /** Clear local state (e.g. on unbind/session switch reset). */
   clear(): void {
+  this.activeSessionId = null;
+  this.snapshot = null;
+  this.emit();
+  }
+
+  /** Reset local snapshot for an incoming session before its data arrives.
+   * Guards later full-snapshot events so a stale previous session cannot
+   * overwrite the newly-selected one. */
+  beginSession(sessionId: string): void {
+  this.activeSessionId = sessionId;
   this.snapshot = null;
   this.emit();
   }
@@ -49,7 +61,14 @@ export class SessionStore {
   applyEventFrame(frame: EventFrame): void {
   switch (frame.kind) {
   case "snapshot_full":
-  this.snapshot = frame.snapshot as Snapshot;
+  {
+    const incoming = frame.snapshot as Snapshot;
+    if (this.activeSessionId && incoming.session.id !== this.activeSessionId) {
+      break;
+    }
+    this.activeSessionId = incoming.session.id;
+    this.snapshot = incoming;
+  }
   break;
   case "snapshot_patch": {
   if (!this.snapshot) break;

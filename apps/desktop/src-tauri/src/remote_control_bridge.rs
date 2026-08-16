@@ -55,12 +55,14 @@ impl PairingHandler for DesktopPairingHandler {
 /// `ControlResponse` (or `Error` on failure).
 pub struct DesktopControlHandler {
     control: DesktopRemoteControl,
+    app: AppHandle,
 }
 
 impl DesktopControlHandler {
     pub fn new(app: AppHandle) -> Self {
         Self {
-            control: DesktopRemoteControl::new(app),
+            control: DesktopRemoteControl::new(app.clone()),
+            app,
         }
     }
 }
@@ -68,6 +70,27 @@ impl DesktopControlHandler {
 impl ControlHandler for DesktopControlHandler {
     async fn handle(&mut self, request: ControlRequest) -> ControlResponse {
         let request_id = request.request_id();
+        let is_list_sessions = matches!(&request, ControlRequest::ListSessions { .. });
+        let is_switch_session = matches!(&request, ControlRequest::SwitchSession { .. });
+        let is_get_state = matches!(&request, ControlRequest::GetState { .. });
+        if is_list_sessions {
+            self.app
+                .state::<AppState>()
+                .remote_control()
+                .log_driver_event(&format!("handling ListSessions request_id={}", request_id));
+        }
+        if is_switch_session {
+            self.app
+                .state::<AppState>()
+                .remote_control()
+                .log_driver_event(&format!("handling SwitchSession request_id={}", request_id));
+        }
+        if is_get_state {
+            self.app
+                .state::<AppState>()
+                .remote_control()
+                .log_driver_event(&format!("handling GetState request_id={}", request_id));
+        }
         let result = match request {
             ControlRequest::ListSessions { .. } => self
                 .control
@@ -135,6 +158,24 @@ impl ControlHandler for DesktopControlHandler {
                 .await
                 .map(|_| ControlResponse::StopTool { request_id }),
         };
+        if is_list_sessions {
+            self.app
+                .state::<AppState>()
+                .remote_control()
+                .log_driver_event(&format!("ListSessions finished request_id={}", request_id));
+        }
+        if is_switch_session {
+            self.app
+                .state::<AppState>()
+                .remote_control()
+                .log_driver_event(&format!("SwitchSession finished request_id={}", request_id));
+        }
+        if is_get_state {
+            self.app
+                .state::<AppState>()
+                .remote_control()
+                .log_driver_event(&format!("GetState finished request_id={}", request_id));
+        }
         match result {
             Ok(response) => response,
             Err(message) => ControlResponse::Error {

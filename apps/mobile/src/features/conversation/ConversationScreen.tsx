@@ -53,7 +53,7 @@ export function ConversationScreen({ sessionId, title, onBack }: Props) {
     (async () => {
       try {
         await controller.switchSession(sessionId);
-        await controller.getState();
+        await controller.getState(sessionId);
       } catch (e) {
         if (active) setSendError(e instanceof Error ? e.message : String(e));
       }
@@ -70,6 +70,8 @@ export function ConversationScreen({ sessionId, title, onBack }: Props) {
     <KeyboardAvoidingView
       style={{ flex: 1 }}
       behavior={Platform.OS === "ios" ? "padding" : "height"}
+      keyboardVerticalOffset={Platform.OS === "ios" ? 88 : 0}
+      enabled={Platform.OS === "ios"}
     >
     <View style={styles.screen}>
       <View style={[styles.rowBetween, { padding: spacing.sm, borderBottomWidth: 1, borderBottomColor: colors.border }]}>

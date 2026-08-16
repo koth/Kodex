@@ -25,7 +25,7 @@ export class ControlClient {
 
   constructor(
     private readonly conn: RelayConnection,
-    private readonly requestTimeoutMs: number = 30_000,
+    private readonly requestTimeoutMs: number = 10_000,
   ) {}
 
   /** Send a control request and await its matching response. */

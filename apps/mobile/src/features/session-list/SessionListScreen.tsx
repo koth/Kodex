@@ -1,5 +1,6 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { View, Text, FlatList, Pressable, ActivityIndicator, RefreshControl } from "react-native";
+import { useFocusEffect } from "@react-navigation/native";
 import { useAppController, useConnectionState } from "../../app/AppServicesContext";
 import type { WorkspaceSessionList } from "../../types";
 import { styles, colors, spacing } from "../theme";
@@ -17,7 +18,7 @@ export function SessionListScreen({ onOpenSession }: { onOpenSession: (sessionId
   const [error, setError] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
 
-  const refresh = async () => {
+  const refresh = useCallback(async () => {
     setLoading(true);
     setError(null);
     try {
@@ -28,12 +29,18 @@ export function SessionListScreen({ onOpenSession }: { onOpenSession: (sessionId
     } finally {
       setLoading(false);
     }
-  };
+  }, [controller]);
 
   useEffect(() => {
     if (connState === "connected") void refresh();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [connState]);
+
+  useFocusEffect(
+    useCallback(() => {
+      if (connState === "connected") void refresh();
+    }, [connState, refresh]),
+  );
 
   const connected = connState === "connected";
   const createNew = async () => {

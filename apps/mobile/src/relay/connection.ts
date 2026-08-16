@@ -29,6 +29,14 @@ export class RelayConnection {
     return this.sessionKey !== null;
   }
 
+  getSessionKey(): { bytes: Uint8Array } | null {
+    return this.sessionKey;
+  }
+
+  getPeerDeviceId(): string | null {
+    return this.peerDeviceId;
+  }
+
   /** Send an envelope: encrypt to EncryptedEnvelope when a key is installed,
    * otherwise send plain Envelope JSON (auth phase). */
   async sendEnvelope(envelope: Envelope): Promise<void> {

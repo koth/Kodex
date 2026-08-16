@@ -28,6 +28,11 @@ import {
 } from "../account/binding";
 import type { BoundDevice } from "../account/binding";
 import {
+  loadSession,
+  persistSession,
+  clearSession,
+} from "../account/session";
+import {
   subscriptionStateFromStatus,
   demoteOnExpiry,
   NO_SUBSCRIPTION,
@@ -54,6 +59,9 @@ export class AppController {
   private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
   private connectingPromise: Promise<boolean> | null = null;
   private reconnectAttempt = 0;
+  private connectionGeneration = 0;
+  private lastSessionKey: SessionKey | null = null;
+  private lastPeerDeviceId: string | null = null;
   private stopLoop = false;
   private subscription: SubscriptionState = { ...NO_SUBSCRIPTION };
   private onSubscriptionChange: ((state: SubscriptionState) => void) | null = null;
@@ -144,17 +152,24 @@ export class AppController {
       .join("");
     console.log(`[pairing] sessionKey prefix=${keyHex} pcDeviceId=${result.pcDeviceId} phoneDeviceId=${result.phoneDeviceId}`);
     this.conn.installSessionKey(result.sessionKey, result.pcDeviceId);
+    this.lastSessionKey = result.sessionKey;
+    this.lastPeerDeviceId = result.pcDeviceId;
+    await persistSession(this.secretStore, {
+      key: result.sessionKey,
+      peer_device_id: result.pcDeviceId,
+    });
 
     this.control = new ControlClient(this.conn);
     this.permissions.setControlClient(this.control);
     this.connState.transition("connected");
 
+    const generation = ++this.connectionGeneration;
     this.stopLoop = false;
-    this.loopPromise = this.runLoop().catch(() => {});
+    this.loopPromise = this.runLoop(generation).catch(() => {});
     this.startHeartbeat();
   }
 
-  private async runLoop(): Promise<void> {
+  private async runLoop(generation: number): Promise<void> {
     if (!this.conn || !this.control) return;
     const onEvent: EventSink = (frame: EventFrame) =>
       this.sessionStore.applyEventFrame(frame);
@@ -166,6 +181,7 @@ export class AppController {
       onOther,
       () => this.stopLoop,
     );
+    if (this.stopLoop || generation !== this.connectionGeneration) return;
     void this.handleConnectionLoss();
   }
 
@@ -248,10 +264,39 @@ export class AppController {
     this.connState.transition("paired/e2e");
     const result = await runPairingResume(this.conn, bound);
     this.conn.installSessionKey(result.sessionKey, result.pcDeviceId);
+    this.lastSessionKey = result.sessionKey;
+    this.lastPeerDeviceId = result.pcDeviceId;
+    await persistSession(this.secretStore, {
+      key: result.sessionKey,
+      peer_device_id: result.pcDeviceId,
+    });
 
     this.control = new ControlClient(this.conn);
     this.permissions.setControlClient(this.control);
-    this.connState.transition("connected");
+  }
+
+  /**
+   * Reconnect with the same E2E key already established in this process.
+   * This keeps a transient relay/network drop seamless without asking the PC
+   * to re-run a pairing handshake. Only used when both sides still share the
+   * in-memory key from the original pairing.
+   */
+  private async establishCachedConnection(
+    transport: RelayTransport,
+    key: SessionKey,
+    peerDeviceId: string,
+  ): Promise<void> {
+    const identity = await this.ensureIdentity();
+    this.connState.transition("connecting");
+    this.conn = new RelayConnection(transport);
+
+    this.connState.transition("authenticating");
+    const auth = buildDeviceAuthArgs(identity);
+    await this.conn.authenticate(auth.deviceId, auth.devicePubkey, auth.signature, auth.timestampMs);
+
+    this.conn.installSessionKey(key, peerDeviceId);
+    this.control = new ControlClient(this.conn);
+    this.permissions.setControlClient(this.control);
   }
 
   /**
@@ -270,17 +315,34 @@ export class AppController {
     }
 
     if (transport) {
-      await this.establishBoundConnection(transport, bound);
+      if (this.lastSessionKey && this.lastPeerDeviceId) {
+        await this.establishCachedConnection(
+          transport,
+          this.lastSessionKey,
+          this.lastPeerDeviceId,
+        );
+      } else {
+        await this.establishBoundConnection(transport, bound);
+      }
     } else {
       if (!this.reconnectTransportFactory) {
         throw new Error("no transport factory configured for resume");
       }
       const ws = await this.reconnectTransportFactory(endpoint!);
-      await this.establishBoundConnection(ws, bound);
+      if (this.lastSessionKey && this.lastPeerDeviceId) {
+        await this.establishCachedConnection(
+          ws,
+          this.lastSessionKey,
+          this.lastPeerDeviceId,
+        );
+      } else {
+        await this.establishBoundConnection(ws, bound);
+      }
     }
 
+    const generation = ++this.connectionGeneration;
     this.stopLoop = false;
-    this.loopPromise = this.runLoop().catch(() => {});
+    this.loopPromise = this.runLoop(generation).catch(() => {});
     this.startHeartbeat();
   }
 
@@ -296,31 +358,47 @@ export class AppController {
   }
 
   private async doAutoResume(): Promise<boolean> {
-    try {
-      await this.resumeFromBoundTransport();
-      this.reconnectAttempt = 0;
-      return true;
-    } catch {
-      this.reconnectAttempt += 1;
-      const delay = Math.min(500 * 2 ** (this.reconnectAttempt - 1), 8_000);
-      await this.sleep(delay);
-      this.connState.transition("disconnected");
-      return false;
+    while (!this.stopLoop) {
+      try {
+        await this.resumeFromBoundTransport();
+        if (this.control) {
+          await this.control.getState();
+        }
+        this.connState.transition("connected");
+        this.reconnectAttempt = 0;
+        return true;
+      } catch {
+        if (this.lastSessionKey && this.lastPeerDeviceId) {
+          this.lastSessionKey = null;
+          this.lastPeerDeviceId = null;
+          await clearSession(this.secretStore);
+        }
+        this.reconnectAttempt += 1;
+        this.connState.transition("connecting");
+        if (this.reconnectAttempt >= 8) {
+          this.connState.transition("disconnected");
+          return false;
+        }
+        const delay = Math.min(500 * 2 ** (this.reconnectAttempt - 1), 8_000);
+        await this.sleep(delay);
+      }
     }
+    return false;
   }
 
   /** App startup: mark the connection as bootstrapping, then attempt a
    * persisted resume. Returns true if a connection was established. */
   async boot(): Promise<boolean> {
-    if (this.connState.state !== "connected") {
-      this.connState.transition("connecting");
-    }
     await this.ensureIdentity();
-    return this.tryAutoResume();
+    this.connState.transition("disconnected");
+    return false;
   }
 
   async unbindAndClear(): Promise<void> {
     await clearBoundDevice(this.secretStore);
+    await clearSession(this.secretStore);
+    this.lastSessionKey = null;
+    this.lastPeerDeviceId = null;
   }
 
   setSubscriptionFromStatus(status: SubscriptionStatus): void {
@@ -374,17 +452,22 @@ export class AppController {
       workspace_root: opts?.workspaceRoot ?? null,
       agent: (opts?.agent ?? null) as never,
     });
+    this.sessionStore.beginSession(res.session_id);
     return res.session_id;
   }
 
   async switchSession(sessionId: string, workspaceRoot?: string | null) {
+    this.sessionStore.beginSession(sessionId);
     return this.controlClient().switchSession(sessionId, workspaceRoot ?? null);
   }
 
   /** Fetch and install the active session's full snapshot. Call after
    * switching, not on every pairing/list refresh. */
-  async getState(): Promise<void> {
+  async getState(expectedSessionId?: string): Promise<void> {
     const response = await this.controlClient().getState();
+    if (expectedSessionId && response.snapshot.session.id !== expectedSessionId) {
+      throw new Error("switched session state mismatch");
+    }
     this.sessionStore.setSnapshot(response.snapshot);
   }
 
@@ -440,8 +523,9 @@ export class AppController {
 
   /** Start (or restart) the receive loop using the current connection. */
   startReceiveLoop(): Promise<void> {
+    const generation = ++this.connectionGeneration;
     this.stopLoop = false;
-    this.loopPromise = this.runLoop().catch(() => {});
+    this.loopPromise = this.runLoop(generation).catch(() => {});
     return this.loopPromise;
   }
 

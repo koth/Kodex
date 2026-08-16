@@ -1,5 +1,6 @@
-import { useState } from "react";
-import { View, Text, TextInput, Pressable, ActivityIndicator } from "react-native";
+import { useEffect, useState } from "react";
+import { View, Text, TextInput, Pressable, ActivityIndicator, Keyboard } from "react-native";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { styles, colors, spacing } from "../theme";
 
 interface Props {
@@ -13,6 +14,21 @@ interface Props {
 export function Composer({ onSend, disabled, error }: Props) {
   const [text, setText] = useState("");
   const [sending, setSending] = useState(false);
+  const [keyboardHeight, setKeyboardHeight] = useState(0);
+  const insets = useSafeAreaInsets();
+
+  useEffect(() => {
+    const show = Keyboard.addListener("keyboardDidShow", (event) => {
+      setKeyboardHeight(event.endCoordinates.height);
+    });
+    const hide = Keyboard.addListener("keyboardDidHide", () => {
+      setKeyboardHeight(0);
+    });
+    return () => {
+      show.remove();
+      hide.remove();
+    };
+  }, []);
 
   const canSend = text.trim().length > 0 && !disabled && !sending;
 
@@ -31,7 +47,17 @@ export function Composer({ onSend, disabled, error }: Props) {
   };
 
   return (
-    <View style={{ backgroundColor: colors.bg, borderTopWidth: 1, borderTopColor: colors.border }}>
+    <View
+      style={{
+        backgroundColor: colors.bg,
+        borderTopWidth: 1,
+        borderTopColor: colors.border,
+        paddingBottom:
+          keyboardHeight > 0
+            ? Math.max(0, keyboardHeight - insets.bottom) + 16
+            : 0,
+      }}
+    >
       {error ? (
         <Text style={{ color: colors.danger, paddingHorizontal: spacing.sm, paddingTop: spacing.xs }}>
           {error}

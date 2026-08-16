@@ -16,7 +16,6 @@ export function PairingQrPanel({ refreshKey }: Props) {
   const [status, setStatus] = useState<Status>("idle");
   const [error, setError] = useState<string | null>(null);
   const [connected, setConnected] = useState(false);
-  const [refreshIn, setRefreshIn] = useState(0);
 
   const mint = useCallback(async () => {
     setStatus("minting");
@@ -37,7 +36,6 @@ export function PairingQrPanel({ refreshKey }: Props) {
         });
       }
       setStatus("ready");
-      setRefreshIn(100);
     } catch (e) {
       setStatus("error");
       setError(String(e));
@@ -66,20 +64,6 @@ export function PairingQrPanel({ refreshKey }: Props) {
     };
   }, []);
 
-  useEffect(() => {
-    if (status !== "ready") return;
-    const id = window.setInterval(() => {
-      setRefreshIn((n) => {
-        if (n <= 1) {
-          void mint();
-          return 100;
-        }
-        return n - 1;
-      });
-    }, 1000);
-    return () => window.clearInterval(id);
-  }, [status, mint]);
-
   return (
     <div className="account-pairing">
       <span className="account-hint">配对二维码</span>
@@ -102,9 +86,6 @@ export function PairingQrPanel({ refreshKey }: Props) {
           >
             {connected ? "● 已连接 relay" : "○ 未连接 relay"}
           </p>
-          {status === "ready" && (
-            <p className="account-pairing-ttl">二维码 {refreshIn}s 后刷新</p>
-          )}
           {status === "minting" && (
             <p className="account-pairing-ttl">生成中…</p>
           )}
