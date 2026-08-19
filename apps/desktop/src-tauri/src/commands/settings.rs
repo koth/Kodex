@@ -612,6 +612,28 @@ fn lsp_snapshot_with_paths(
     Ok(LspSettingsSnapshot { servers })
 }
 
+/// Build a `Command` for an npm-family installer (`npm`, `sh`, ...).
+///
+/// A GUI-launched app may not inherit the user's interactive shell PATH, so
+/// the program is resolved to an absolute path through the augmented
+/// `search_paths()` (current PATH + homebrew/nvm/volta/etc. install roots).
+/// The child also receives that augmented PATH because `npm` is itself a
+/// `#!/usr/bin/env node` script — without it, spawning npm fails with
+/// `env: node: No such file or directory` even when npm was found.
+fn npm_command_with_augmented_path(program: &str) -> Command {
+    let search_paths = app_core::settings::search_paths();
+    let resolved_program = search_paths
+        .iter()
+        .map(|dir| dir.join(program))
+        .find(|candidate| candidate.is_file())
+        .unwrap_or_else(|| PathBuf::from(program));
+    let mut command = Command::new(resolved_program);
+    if let Ok(joined) = std::env::join_paths(&search_paths) {
+        command.env("PATH", joined);
+    }
+    command
+}
+
 fn install_agent(
     paths: &app_core::AppPaths,
     agent: AgentCliId,
@@ -626,7 +648,7 @@ fn install_agent(
     }
 
     let (program, args) = install_command(agent);
-    let mut command = Command::new(program);
+    let mut command = npm_command_with_augmented_path(program);
     command
         .args(args)
         .stdin(Stdio::piped())
@@ -934,7 +956,8 @@ fn install_claude_agent_acp_from_npm(paths: &app_core::AppPaths) -> Result<Strin
 
     let npm = if cfg!(windows) { "npm.cmd" } else { "npm" };
     let temp_prefix = temp_dir.to_string_lossy().to_string();
-    let output = Command::new(npm)
+    let mut npm_command = npm_command_with_augmented_path(npm);
+    let output = npm_command
         .args([
             "install",
             "--prefix",

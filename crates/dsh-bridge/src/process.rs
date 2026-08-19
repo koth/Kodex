@@ -333,8 +333,42 @@ fn search_paths() -> Vec<std::path::PathBuf> {
                 search_paths.push(p);
             }
         }
+        // Common version-manager install roots; GUI-launched apps do not
+        // inherit the shell hooks that put these on PATH.
+        if let Some(home) = dirs_next::home_dir() {
+            for suffix in [".volta/bin", ".local/share/mise/shims", ".asdf/shims"] {
+                let p = home.join(suffix);
+                if !search_paths.contains(&p) {
+                    search_paths.push(p);
+                }
+            }
+            if let Some(entries) = nvm_version_bin_dirs(&home) {
+                for p in entries {
+                    if !search_paths.contains(&p) {
+                        search_paths.push(p);
+                    }
+                }
+            }
+        }
     }
     search_paths
+}
+
+/// nvm keeps each installed Node version at `~/.nvm/versions/node/vX.Y.Z/bin`.
+/// Return those bin directories, newest version first, so a GUI-launched app
+/// can find a `dsh` shim installed through nvm without the shell hook.
+#[cfg(target_os = "macos")]
+fn nvm_version_bin_dirs(home: &std::path::Path) -> Option<Vec<std::path::PathBuf>> {
+    let versions_dir = home.join(".nvm/versions/node");
+    let mut dirs: Vec<std::path::PathBuf> = std::fs::read_dir(&versions_dir)
+        .ok()?
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.path().join("bin"))
+        .filter(|path| path.is_dir())
+        .collect();
+    dirs.sort();
+    dirs.reverse();
+    if dirs.is_empty() { None } else { Some(dirs) }
 }
 
 #[cfg(test)]
