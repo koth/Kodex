@@ -103,7 +103,7 @@ pub async fn spawn_dsh_web(config: SpawnDshWebConfig) -> anyhow::Result<(String,
     } else if cfg!(not(windows)) && is_script_file(&dsh) {
         let mut wrapper = Command::new("/bin/sh");
         let mut cmd_str = dsh.to_string_lossy().to_string();
-        for arg in ["web", "--port", "0"] {
+        for arg in ["web", "--port", "0", "--no-open"] {
             cmd_str.push(' ');
             cmd_str.push_str(&shell_words::quote(arg));
         }
@@ -114,7 +114,9 @@ pub async fn spawn_dsh_web(config: SpawnDshWebConfig) -> anyhow::Result<(String,
     } else {
         Command::new(&dsh)
     };
-    spawn_with_args(cmd, &dsh, &["web", "--port", "0"], config).await
+    // `--no-open`: this is a Kodex-managed headless process; the UI connects
+    // to the discovered endpoint itself, so dsh must not open a browser.
+    spawn_with_args(cmd, &dsh, &["web", "--port", "0", "--no-open"], config).await
 }
 
 /// Shared spawn leg: set env, pipes, spawn, and read the readiness line.
@@ -125,6 +127,14 @@ async fn spawn_with_args(
     config: SpawnDshWebConfig,
 ) -> anyhow::Result<(String, DshChild)> {
     cmd.args(args);
+    // `dsh` is an npm shim (`#!/usr/bin/env node`): a GUI-launched app does
+    // not inherit the user's interactive shell PATH, so hand the child the
+    // same augmented search path used to locate the binary. Without this,
+    // the shim exits immediately with `env: node: No such file or directory`
+    // and no readiness line is ever printed.
+    if let Ok(joined) = std::env::join_paths(search_paths()) {
+        cmd.env("PATH", joined);
+    }
     if !config.dsh_home.is_empty() {
         cmd.env("DSH_HOME", &config.dsh_home);
     }
