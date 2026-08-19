@@ -92,7 +92,7 @@ import {
 
 export type AgentSettingsTab = Extract<
   AgentCliId,
-  "codebuddy" | "codex-acp" | "claude-agent-acp"
+  "codebuddy" | "codex-acp" | "claude-agent-acp" | "deepseek-harness"
 >;
 export type SettingsPane =
   | "general"
@@ -149,6 +149,7 @@ const AGENT_SETTINGS_TABS: Array<{ id: AgentSettingsTab; label: string }> = [
   { id: "claude-agent-acp", label: "Claude" },
   { id: "codex-acp", label: "Codex" },
   { id: "codebuddy", label: "CodeBuddy" },
+  { id: "deepseek-harness", label: "DeepSeek Harness" },
 ];
 
 const WEB_TOOL_PROVIDER_OPTIONS = [
@@ -4426,6 +4427,32 @@ export function SettingsPage({
                           </div>
                           {renderAgentRuntime("claude-agent-acp")}
                           {renderClaudeFastModelControl()}
+                        </div>
+                        {renderByokPool()}
+                      </>
+                    )}
+
+                    {activeAgentTab === "deepseek-harness" && (
+                      <>
+                        <div className="settings-provider-config">
+                          <div className="settings-provider-config-head">
+                            <div>
+                              <span>DeepSeek Harness</span>
+                              <p>
+                                Kodex 会通过 <code>dsh web</code> 拉起完整的
+                                DeepSeek Harness 会话（工具卡片、计划、diff、推理均可用）。
+                                需要先安装 <code>dsh</code> CLI（npm 全局包），
+                                并使用下方 BYOK 模型池中的一个已配置 API key。
+                              </p>
+                            </div>
+                            <span className="settings-provider-active">
+                              {snapshot.settings.selected_agent ===
+                              "deepseek-harness"
+                                ? "当前默认"
+                                : "可选"}
+                            </span>
+                          </div>
+                          {renderAgentRuntime("deepseek-harness")}
                         </div>
                         {renderByokPool()}
                       </>

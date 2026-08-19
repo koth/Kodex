@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex, Weak};
 pub(super) type ShutdownCleanupHook = dyn Fn() + Send + Sync + 'static;
 
 #[derive(Clone, Default)]
-pub(crate) struct ShutdownSignal {
+pub struct ShutdownSignal {
     inner: Arc<ShutdownState>,
 }
 
@@ -26,17 +26,17 @@ struct ShutdownState {
 }
 
 impl ShutdownSignal {
-    pub(crate) fn request_shutdown(&self) {
+    pub fn request_shutdown(&self) {
         self.inner.requested.store(true, Ordering::Release);
         self.kill_registered_agent_children();
         self.run_cleanup_hooks();
     }
 
-    pub(super) fn is_requested(&self) -> bool {
+    pub fn is_requested(&self) -> bool {
         self.inner.requested.load(Ordering::Acquire)
     }
 
-    pub(super) fn register_agent_child(&self, child: &Arc<Mutex<Option<Child>>>) {
+    pub(crate) fn register_agent_child(&self, child: &Arc<Mutex<Option<Child>>>) {
         let Ok(mut guard) = self.inner.agent_children.lock() else {
             return;
         };
@@ -44,7 +44,7 @@ impl ShutdownSignal {
         guard.push(Arc::downgrade(child));
     }
 
-    pub(super) fn register_cleanup_hook(&self, hook: &Arc<ShutdownCleanupHook>) {
+    pub(crate) fn register_cleanup_hook(&self, hook: &Arc<ShutdownCleanupHook>) {
         let Ok(mut guard) = self.inner.cleanup_hooks.lock() else {
             return;
         };

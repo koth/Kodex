@@ -111,6 +111,17 @@ impl Application {
             })
             .unwrap_or_else(|| ui.session.model.clone());
 
+        // DeepSeek Harness: bring up `dsh web` and hand the endpoint to the
+        // harness backend instead of spawning an ACP subprocess.
+        let harness_endpoint = if crate::settings::is_deepseek_harness_command(&agent_command) {
+            Some(
+                crate::dsh_bringup::dsh_bringup()
+                    .ensure_harness_endpoint(&app_paths)
+                    .map_err(anyhow::Error::msg)?,
+            )
+        } else {
+            None
+        };
         let mut session = crate::startup_perf::measure(
             "app/bootstrap/session_handle_start",
             format!("resume={}", resume_session_id.is_some()),
@@ -126,6 +137,7 @@ impl Application {
                     acp_port,
                     remote_ssh: None,
                     mcp_servers: mcp_servers.clone(),
+                    harness_endpoint: harness_endpoint.clone(),
                 })
             },
         )?;
@@ -463,6 +475,7 @@ impl Application {
                     acp_port: local_port,
                     remote_ssh: Some(remote_ssh.clone()),
                     mcp_servers: Vec::new(),
+                    harness_endpoint: None,
                 })
             },
         )?;

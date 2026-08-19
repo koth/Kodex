@@ -254,6 +254,14 @@ pub(super) async fn run_command_loop(
                                 tool_execution_registry.clear();
                                 return Ok(());
                             }
+                            // Harness approvals are answered by the dsh-bridge
+                            // session loop, not the ACP prompt loop; unreachable
+                            // for ACP sessions.
+                            RuntimeCommand::ResolveHarnessApproval { reply_tx, .. } => {
+                                let _ = reply_tx.send(Err(anyhow::anyhow!(
+                                    "ResolveHarnessApproval is not supported by the ACP backend"
+                                )));
+                            }
                             RuntimeCommand::ResolveCodeBuddyInterruption {
                                 session_id,
                                 tool_call_id,
@@ -614,6 +622,13 @@ pub(super) async fn run_command_loop(
                 shutdown_signal.request_shutdown();
                 tool_execution_registry.clear();
                 break;
+            }
+            // Harness approvals are answered by the dsh-bridge session loop,
+            // not the ACP prompt loop; this arm is unreachable for ACP sessions.
+            RuntimeCommand::ResolveHarnessApproval { reply_tx, .. } => {
+                let _ = reply_tx.send(Err(anyhow::anyhow!(
+                    "ResolveHarnessApproval is not supported by the ACP backend"
+                )));
             }
         }
     }

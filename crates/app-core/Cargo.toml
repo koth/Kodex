@@ -9,6 +9,7 @@ anyhow.workspace = true
 base64 = "0.22"
 bytes.workspace = true
 dirs-next = "2.0"
+dsh-bridge = { path = "../dsh-bridge" }
 git-service = { path = "../git-service" }
 http-body-util.workspace = true
 hyper.workspace = true

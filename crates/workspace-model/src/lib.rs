@@ -1461,6 +1461,10 @@ pub enum AgentCliId {
     CodexAcp,
     #[serde(rename = "claude-agent-acp")]
     ClaudeAgentAcp,
+    /// DeepSeek Harness — not an ACP agent. Kodex spawns `dsh web` and speaks
+    /// the harness host RPC through `dsh-bridge` instead of an ACP subprocess.
+    #[serde(rename = "deepseek-harness")]
+    DeepSeekHarness,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]

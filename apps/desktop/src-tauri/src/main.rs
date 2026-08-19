@@ -49,6 +49,15 @@ fn main() {
             let snapshot_bridge_running = snapshot_bridge_running.clone();
             move |app| {
                 app_core::startup_perf::mark("desktop/setup_start", "");
+                // Register the DeepSeek Harness backend: one shared host
+                // registry serves both the ACP harness dispatch and the
+                // Kodex-managed `dsh web` bring-up, so multiple sessions and
+                // workspaces share one spawned process.
+                let harness_registry = std::sync::Arc::new(dsh_bridge::HarnessHostRegistry::new());
+                acp_core::set_harness_backend(std::sync::Arc::new(dsh_bridge::DshBridge::new(
+                    harness_registry.clone(),
+                )));
+                app_core::init_dsh_bringup(harness_registry);
                 if let Err(error) =
                     commands::settings::install_bundled_codex_acp_if_missing(app.handle())
                 {

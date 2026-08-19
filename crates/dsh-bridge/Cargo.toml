@@ -1,0 +1,25 @@
+[package]
+name = "dsh-bridge"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+acp-core = { path = "../acp-core" }
+anyhow.workspace = true
+bytes.workspace = true
+dashmap = "6"
+dirs-next = "2.0"
+futures.workspace = true
+serde_yaml = "0.9"
+reqwest = { workspace = true }
+serde.workspace = true
+serde_json.workspace = true
+shell-words.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time", "sync", "fs", "process", "io-util"] }
+tracing = "0.1"
+uuid.workspace = true
+workspace-model = { path = "../workspace-model" }
+
+[dev-dependencies]
+tempfile.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time", "sync", "test-util"] }

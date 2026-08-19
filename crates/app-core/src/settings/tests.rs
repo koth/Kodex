@@ -2837,3 +2837,97 @@ fn byok_profile_configured_when_only_custom_provider_has_credential() {
         "configured_codex_byok_models must include the custom provider's model"
     );
 }
+
+#[test]
+fn build_dsh_settings_config_maps_configured_byok_providers_to_dsh_routes() {
+    let dir = tempdir().unwrap();
+    let paths = AppPaths::from_root(dir.path().join(".kodex"));
+
+    // Configure two BYOK source providers (deepseek + kimi); leave commandcode
+    // without a key so it is excluded, and CodeBuddy which is always skipped.
+    save_agent_provider_secret(
+        &paths,
+        AgentProviderFamily::Codex,
+        DEEPSEEK_PROVIDER_ID,
+        "deepseek-secret",
+    )
+    .unwrap();
+    save_agent_provider_secret(&paths, AgentProviderFamily::Codex, KIMI_PROVIDER_ID, "kimi-secret")
+        .unwrap();
+
+    let config = build_dsh_settings_config(&paths).unwrap();
+
+    // Both configured providers become routes; CodeBuddy / unconfigured
+    // providers are excluded.
+    let ids: Vec<&str> = config
+        .providers
+        .iter()
+        .map(|route| route.id.as_str())
+        .collect();
+    assert!(ids.contains(&DEEPSEEK_PROVIDER_ID));
+    assert!(ids.contains(&KIMI_PROVIDER_ID));
+    assert!(!ids.contains(&COMMANDCODE_PROVIDER_ID));
+    assert!(!ids.contains(&CODEBUDDY_PROVIDER_ID));
+
+    let deepseek = config
+        .providers
+        .iter()
+        .find(|route| route.id == DEEPSEEK_PROVIDER_ID)
+        .unwrap();
+    // Upstream base URL, never the local codex proxy.
+    assert_eq!(
+        deepseek.base_url,
+        DEEPSEEK_UPSTREAM_HELP_URL
+            .strip_suffix("/chat/completions")
+            .unwrap()
+    );
+    assert_eq!(deepseek.api, "openai-completions");
+    assert_eq!(deepseek.api_key_env, "KODEX_DSH_DEEPSEEK_KEY");
+    assert!(!deepseek.models.is_empty());
+
+    // Provider keys resolve to the same env-var names as the routes' apiKeyEnv.
+    let keys = dsh_provider_keys(&paths);
+    for route in &config.providers {
+        assert!(
+            keys.iter().any(|(env, _)| env == &route.api_key_env),
+            "route {} has no injected key env",
+            route.id
+        );
+    }
+}
+
+#[test]
+fn build_dsh_settings_config_default_model_follows_selected_provider() {
+    let dir = tempdir().unwrap();
+    let paths = AppPaths::from_root(dir.path().join(".kodex"));
+    save_agent_provider_secret(
+        &paths,
+        AgentProviderFamily::Codex,
+        DEEPSEEK_PROVIDER_ID,
+        "deepseek-secret",
+    )
+    .unwrap();
+    save_agent_provider_secret(&paths, AgentProviderFamily::Codex, KIMI_PROVIDER_ID, "kimi-secret")
+        .unwrap();
+    select_codex_acp_provider(&paths, DEEPSEEK_PROVIDER_ID).unwrap();
+
+    let config = build_dsh_settings_config(&paths).unwrap();
+    assert_eq!(config.default_model.provider, DEEPSEEK_PROVIDER_ID);
+    assert_eq!(config.default_model.model, DEEPSEEK_MODEL);
+}
+
+#[test]
+fn deepseek_harness_command_and_label_resolution() {
+    assert!(is_deepseek_harness_command("dsh"));
+    assert!(is_deepseek_harness_command("C:\\tools\\dsh.exe"));
+    assert!(!is_deepseek_harness_command("codex-acp"));
+
+    // `command_for_agent_with_paths` returns the dsh binary name so label
+    // inference surfaces "DeepSeek Harness" rather than the default.
+    let dir = tempdir().unwrap();
+    let paths = AppPaths::from_root(dir.path().join(".kodex"));
+    let command = command_for_agent_with_paths(AgentCliId::DeepSeekHarness, &paths)
+        .expect("dsh command resolves");
+    assert!(is_deepseek_harness_command(&command));
+    assert_eq!(agent_label_for_command(&command), "DeepSeek Harness");
+}

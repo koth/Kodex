@@ -59,6 +59,20 @@ impl AppPaths {
         self.root.join("chats")
     }
 
+    /// DeepSeek Harness home (`~/.kodex/dsh`), passed to `dsh web` as
+    /// `DSH_HOME` so all harness state (settings.yaml, profiles, session
+    /// logs) lives under Kodex's data root rather than `~/.dsh`.
+    pub fn dsh_dir(&self) -> PathBuf {
+        self.root.join("dsh")
+    }
+
+    /// `~/.kodex/dsh/settings.yaml` — the dsh settings document Kodex
+    /// generates/merges from its BYOK provider catalog before spawning
+    /// `dsh web`. See `design-dsh-settings.md`.
+    pub fn dsh_settings_path(&self) -> PathBuf {
+        self.dsh_dir().join("settings.yaml")
+    }
+
     pub fn ensure_root(&self) -> Result<()> {
         std::fs::create_dir_all(&self.root)
             .with_context(|| format!("创建 Kodex 数据根目录 {} 失败", self.root.display()))

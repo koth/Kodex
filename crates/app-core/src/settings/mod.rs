@@ -8,7 +8,8 @@ pub use agent_cli::{
     command_for_agent, command_for_agent_label, command_for_agent_label_with_paths,
     command_for_agent_with_paths, default_agent_for_new_work, detect_agent,
     detect_agent_with_paths, ensure_agent_ready_for_command, is_claude_agent_acp_command,
-    is_codex_acp_command, remote_agent_env_for_command, remote_codex_home,
+    is_codex_acp_command, is_deepseek_harness_command, remote_agent_env_for_command,
+    remote_codex_home,
     remote_codex_proxy_config, remote_linux_command_for_agent,
     remote_linux_command_for_agent_label, resolve_agent_command_with_settings,
     search_paths,
@@ -38,6 +39,9 @@ use remote::{
 };
 
 use anyhow::{Context, Result, anyhow};
+use dsh_bridge::{
+    DshDefaultModel, DshModelEntry, DshProviderRoute, DshSettingsConfig, key_env_for_provider,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::{BTreeMap, BTreeSet};
@@ -1426,6 +1430,163 @@ pub fn codex_acp_bin_dir(paths: &AppPaths) -> PathBuf {
 
 pub fn codex_acp_binary_path(paths: &AppPaths) -> PathBuf {
     codex_acp_bin_dir(paths).join(binary_name("codex-acp"))
+}
+
+/// Build the dsh `settings.yaml` document from Kodex's configured BYOK
+/// provider catalog. One `llm-pi-ai` route per source provider that has a
+/// key; `agent-default-model` picks the currently selected provider/model.
+///
+/// Route fields are mapped from Kodex's provider metadata:
+/// - `baseURL` is the provider's upstream endpoint (never the local codex
+///   proxy — dsh calls the provider directly).
+/// - `api` is derived from the provider protocol (`openai-completions` /
+///   `openai-responses` / `anthropic-messages`).
+/// - `apiKeyEnv` is a Kodex-owned env-var name; the actual secret is injected
+///   into the spawned `dsh web` process env (never written to YAML).
+pub fn build_dsh_settings_config(paths: &AppPaths) -> Result<DshSettingsConfig, String> {
+    let mut routes = Vec::new();
+    for provider in byok_source_provider_ids(paths) {
+        if let Some(route) = dsh_provider_route(paths, &provider) {
+            routes.push(route);
+        }
+    }
+    let default_model = dsh_default_model(paths, &routes);
+    Ok(DshSettingsConfig {
+        providers: routes,
+        default_model,
+    })
+}
+
+/// Resolve the `(apiKeyEnv, secret)` pairs to inject into a spawned `dsh web`
+/// process. Mirrors [`build_dsh_settings_config`] provider selection: one pair
+/// per configured BYOK source provider (excluding the CodeBuddy local proxy).
+pub fn dsh_provider_keys(paths: &AppPaths) -> Vec<(String, String)> {
+    byok_source_provider_ids(paths)
+        .into_iter()
+        .filter(|provider| provider != CODEBUDDY_PROVIDER_ID)
+        .filter_map(|provider| {
+            byok_source_secret(paths, AgentProviderFamily::Codex, &provider)
+                .map(|secret| (key_env_for_provider(&provider), secret))
+        })
+        .collect()
+}
+
+/// Map one Kodex BYOK source provider to a dsh `llm-pi-ai` route. Returns
+/// `None` when the provider has no configured key, is the CodeBuddy local
+/// proxy (not an upstream provider), or lacks a resolvable base URL.
+fn dsh_provider_route(paths: &AppPaths, provider: &str) -> Option<DshProviderRoute> {
+    if provider == CODEBUDDY_PROVIDER_ID {
+        return None;
+    }
+    if byok_source_secret(paths, AgentProviderFamily::Codex, provider).is_none() {
+        return None;
+    }
+
+    let (base_url, api) = if let Some(definition) =
+        profile_definition(AgentProviderFamily::Codex, provider)
+    {
+        (
+            dsh_upstream_base_url(definition.base_url?),
+            dsh_api_for_proxy_kind(definition.proxy_kind),
+        )
+    } else {
+        // Custom provider: base_url/protocol come from the saved catalog entry.
+        let entry = custom_provider_entries(paths)
+            .into_iter()
+            .find(|(id, _)| id == provider)?
+            .1;
+        (
+            dsh_upstream_base_url(entry.base_url.as_deref()?),
+            dsh_api_for_protocol(entry.protocol),
+        )
+    };
+
+    let models = effective_catalog_models_for_provider(paths, provider)
+        .into_iter()
+        .map(|entry| DshModelEntry {
+            id: entry.slug.clone(),
+            name: entry.display_name.unwrap_or(entry.slug),
+            context_window: entry.context_window.unwrap_or(DEFAULT_MODEL_CONTEXT_WINDOW),
+            max_tokens: entry
+                .max_output_tokens
+                .unwrap_or(DEFAULT_MODEL_MAX_OUTPUT_TOKENS),
+        })
+        .collect();
+
+    Some(DshProviderRoute {
+        id: provider.to_string(),
+        api_key_env: key_env_for_provider(provider),
+        api,
+        base_url,
+        models,
+        display_name: None,
+    })
+}
+
+/// Strip an upstream "help" URL down to the API base dsh appends paths to
+/// (`…/chat/completions` → the parent). `base_url` values in the Kodex table
+/// are sometimes full endpoint URLs shown to users as examples; dsh's
+/// `llm-pi-ai` treats `baseURL` as the endpoint root.
+fn dsh_upstream_base_url(base_url: &str) -> String {
+    base_url
+        .strip_suffix("/chat/completions")
+        .unwrap_or(base_url)
+        .trim_end_matches('/')
+        .to_string()
+}
+
+fn dsh_api_for_proxy_kind(kind: AgentProviderProxyKind) -> String {
+    match kind {
+        AgentProviderProxyKind::Responses => "openai-responses".to_string(),
+        AgentProviderProxyKind::ClaudeNative | AgentProviderProxyKind::CompletionToClaude => {
+            "anthropic-messages".to_string()
+        }
+        _ => "openai-completions".to_string(),
+    }
+}
+
+fn dsh_api_for_protocol(protocol: Option<CustomProviderProtocol>) -> String {
+    match protocol {
+        Some(CustomProviderProtocol::Responses) => "openai-responses".to_string(),
+        Some(CustomProviderProtocol::AnthropicMessages) => "anthropic-messages".to_string(),
+        _ => "openai-completions".to_string(),
+    }
+}
+
+/// Pick the dsh `agent-default-model` selection: prefer the currently selected
+/// Codex provider when it has a route; otherwise fall back to the first
+/// configured route and its first model.
+fn dsh_default_model(paths: &AppPaths, routes: &[DshProviderRoute]) -> DshDefaultModel {
+    let current = codex_current_provider(paths);
+    if let Some(route) = routes.iter().find(|route| route.id == current) {
+        let model = if let Some(definition) =
+            profile_definition(AgentProviderFamily::Codex, &current)
+        {
+            definition.default_model.map(str::to_string)
+        } else {
+            None
+        }
+        .or_else(|| route.models.first().map(|model| model.id.clone()))
+        .unwrap_or_default();
+        return DshDefaultModel {
+            provider: current,
+            model,
+        };
+    }
+    if let Some(route) = routes.first() {
+        return DshDefaultModel {
+            provider: route.id.clone(),
+            model: route
+                .models
+                .first()
+                .map(|model| model.id.clone())
+                .unwrap_or_default(),
+        };
+    }
+    DshDefaultModel {
+        provider: String::new(),
+        model: String::new(),
+    }
 }
 
 pub fn claude_agent_acp_binary_path(paths: &AppPaths) -> PathBuf {

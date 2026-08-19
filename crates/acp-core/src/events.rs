@@ -50,6 +50,11 @@ pub struct SessionConfig {
     pub remote_ssh: Option<RemoteSshSessionConfig>,
     #[serde(default, skip_serializing, skip_deserializing)]
     pub mcp_servers: Vec<McpServer>,
+    /// DeepSeek Harness host RPC endpoint (loopback URL). When set, the runtime
+    /// delegates to the registered `HarnessBackend` (`dsh-bridge`) instead of
+    /// spawning an ACP agent subprocess. Transient — never persisted in ACP logs.
+    #[serde(default, skip_serializing, skip_deserializing)]
+    pub harness_endpoint: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

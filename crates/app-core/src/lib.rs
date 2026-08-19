@@ -1,6 +1,7 @@
 mod application;
 mod attachment_cache;
 mod bootstrap;
+mod dsh_bringup;
 mod editor_files;
 mod file_tracker;
 mod image_api;
@@ -23,6 +24,7 @@ pub use application::{
     Application, AppUpdate, HistoryPage, UiPatchCursor, UiSnapshotUpdate,
     normalize_path_for_storage, normalize_tracked_path,
 };
+pub use dsh_bringup::{dsh_bringup, init_dsh_bringup};
 pub use remote_control::{AppCoreRemoteControl, RemoteControl};
 pub use paths::AppPaths;
 

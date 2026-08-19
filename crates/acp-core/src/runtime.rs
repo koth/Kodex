@@ -21,10 +21,10 @@ mod tests;
 mod tool_stop;
 mod workspace_paths;
 use agent_process::{AgentTransport, HiddenAgentProcess, RemoteSshAgentProcess, TcpAgentProcess};
-pub(crate) use permissions::PermissionBroker;
-pub(crate) use shutdown::ShutdownSignal;
+pub use permissions::PermissionBroker;
+pub use shutdown::ShutdownSignal;
 
-pub(crate) enum RuntimeCommand {
+pub enum RuntimeCommand {
     SendPrompt {
         prompt: Vec<UserPromptContent>,
         accepted_tx: Option<mpsc::Sender<anyhow::Result<()>>>,
@@ -50,6 +50,13 @@ pub(crate) enum RuntimeCommand {
         decision: String,
         reply_tx: mpsc::Sender<anyhow::Result<()>>,
     },
+    /// Answer a DeepSeek Harness approval/question (server-request) by its `rpcId`.
+    /// The bridge POSTs a `ClientResponse` to `/api/respond` over the shared HTTP client.
+    ResolveHarnessApproval {
+        rpc_id: String,
+        result: HarnessApprovalResult,
+        reply_tx: mpsc::Sender<anyhow::Result<()>>,
+    },
     CancelPrompt {
         reply_tx: Option<mpsc::Sender<anyhow::Result<()>>>,
     },
@@ -58,6 +65,58 @@ pub(crate) enum RuntimeCommand {
         reply_tx: mpsc::Sender<anyhow::Result<Vec<ClientEvent>>>,
     },
     Shutdown,
+}
+
+/// User decision for a harness approval/question, carried back through
+/// `RuntimeCommand::ResolveHarnessApproval` to the bridge's `/api/respond` POST.
+#[derive(Debug, Clone)]
+pub enum HarnessApprovalResult {
+    /// Approval: `allowed-once` or `rejected`.
+    Approval { approval_id: String, outcome: HarnessApprovalOutcome },
+    /// Question answer batch (one answer per question id).
+    Question { answers: Vec<HarnessQuestionAnswer> },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HarnessApprovalOutcome {
+    AllowedOnce,
+    Rejected,
+}
+
+#[derive(Debug, Clone)]
+pub struct HarnessQuestionAnswer {
+    pub question_id: String,
+    pub selected: Vec<String>,
+    pub custom: Option<String>,
+}
+
+/// Backend contract for a non-ACP session transport (DeepSeek Harness host RPC).
+/// Implemented by `dsh-bridge` and registered at process init via
+/// [`set_harness_backend`], so `acp-core` can dispatch without a compile-time
+/// dependency on the bridge crate (inversion of control breaks the cycle).
+pub trait HarnessBackend: Send + Sync + 'static {
+    fn run_session(
+        &self,
+        config: SessionConfig,
+        tx_events: mpsc::Sender<ClientEvent>,
+        rx_commands: mpsc::Receiver<RuntimeCommand>,
+        permission_broker: PermissionBroker,
+        shutdown_signal: ShutdownSignal,
+    ) -> anyhow::Result<()>;
+}
+
+static HARNESS_BACKEND: std::sync::OnceLock< std::sync::Arc<dyn HarnessBackend>> =
+    std::sync::OnceLock::new();
+
+/// Register the harness backend implementation. Called once at process startup
+/// by the crate that links `dsh-bridge` (e.g. `app-core` or the desktop shell).
+/// Subsequent calls are ignored; the first registration wins.
+pub fn set_harness_backend(backend: std::sync::Arc<dyn HarnessBackend>) {
+    let _ = HARNESS_BACKEND.set(backend);
+}
+
+fn harness_backend() -> Option<std::sync::Arc<dyn HarnessBackend>> {
+    HARNESS_BACKEND.get().cloned()
 }
 
 pub(crate) fn run_session(
@@ -87,6 +146,20 @@ pub(crate) fn run_session(
 
     let log_config = config.clone();
     let result: anyhow::Result<()> = runtime.block_on(async move {
+        if config.harness_endpoint.is_some()
+            && let Some(backend) = harness_backend()
+        {
+            // DeepSeek Harness host RPC backend — no ACP subprocess.
+            // The bridge runs its own tokio runtime; run it on this thread.
+            return backend.run_session(
+                config,
+                tx_events,
+                rx_commands,
+                permission_broker,
+                shutdown_signal,
+            );
+        }
+
         let agent = if config.remote_ssh.is_some() {
             AgentTransport::RemoteSsh(
                 RemoteSshAgentProcess::from_config(&config)?

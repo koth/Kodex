@@ -34,6 +34,15 @@ pub(super) const AGENTS: &[AgentCliDefinition] = &[
         binary: "codebuddy",
         acp_arg: "--acp",
     },
+    /// DeepSeek Harness — not an ACP agent. `binary` is the `dsh` CLI (installed
+    /// via `npm i -g @deepseek-ai/dsh`); `acp_arg` is unused (harness backend
+    /// takes a different path, see `is_deepseek_harness_agent`).
+    AgentCliDefinition {
+        id: AgentCliId::DeepSeekHarness,
+        label: "DeepSeek Harness",
+        binary: "dsh",
+        acp_arg: "",
+    },
 ];
 
 pub fn resolve_agent_command_with_settings(paths: &AppPaths) -> String {
@@ -77,7 +86,35 @@ pub fn remote_linux_command_for_agent(agent: AgentCliId) -> Option<String> {
     Some(command_from_binary(def.binary, def.acp_arg))
 }
 
+pub fn is_deepseek_harness_agent(agent: AgentCliId) -> bool {
+    agent == AgentCliId::DeepSeekHarness
+}
+
+/// Whether an agent command string selects the DeepSeek Harness backend.
+/// `command_for_agent_with_paths` returns the `dsh` binary name for
+/// `AgentCliId::DeepSeekHarness`, so a command whose basename is `dsh` selects
+/// the harness backend (which runs `dsh web` instead of an ACP subprocess).
+pub fn is_deepseek_harness_command(command: &str) -> bool {
+    let command = command.trim();
+    let basename = command
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(command)
+        .trim()
+        .trim_end_matches(".exe")
+        .trim_end_matches(".cmd")
+        .trim_end_matches(".bat");
+    basename.eq_ignore_ascii_case("dsh")
+}
+
 pub fn command_for_agent_with_paths(agent: AgentCliId, paths: &AppPaths) -> Option<String> {
+    // DeepSeek Harness is not an ACP subprocess — `harness_endpoint` selects
+    // the backend — but `agent_command` still carries the `dsh` binary name so
+    // label inference (`agent_label_for_command`) and session persistence see
+    // "DeepSeek Harness" instead of falling back to the default.
+    if is_deepseek_harness_agent(agent) {
+        return Some(binary_name("dsh"));
+    }
     if agent == AgentCliId::CodexAcp {
         let def = definition(agent)?;
         let command = command_from_binary(

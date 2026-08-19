@@ -1,0 +1,894 @@
+//! Map dsh `MuxFrame`/`HostFrame` variants into Kodex [`ClientEvent`]s.
+//!
+//! The mapping layer preserves the fidelity the dsh web UI receives: assistant
+//! text and reasoning chunks, tool calls/results with render intent
+//! (`ToolEventView`), plans (`todo/write`), turn endings, session config, and
+//! approvals/questions. Unrepresentable view data is serialized into
+//! `raw_output` JSON (recoverable, not dropped). Per the design doc, no raw
+//! harness types leak to the frontend — translation stops at `ClientEvent`.
+
+use acp_core::ClientEvent;
+use serde_json::Value;
+use uuid::Uuid;
+use workspace_model::{
+    AgentPlanEntry, AgentPlanEntryPriority, AgentPlanEntryStatus, DiffHunk, DiffLine,
+    DiffLineKind, MessageRole, PermissionInputOption, PermissionInputQuestion,
+    PermissionInputRequest, PermissionOption, TerminalOutput, UsageEvent,
+};
+
+use crate::frame::{
+    AssistantChunkData, AssistantMessageData, ContentBlock, HostFrame, MuxFrame, SessionEvent,
+    StreamChunk, ToolCallData, ToolCallView, ToolEventView, ToolResultData, ToolResultView,
+    TodoItem, TokenUsage, TurnEndReason,
+};
+use crate::host::{PendingApprovalKind, SessionSink};
+
+/// Outcome of mapping one frame: zero or more [`ClientEvent`]s to emit.
+#[derive(Default)]
+pub struct MappedEvents {
+    pub events: Vec<ClientEvent>,
+}
+
+impl MappedEvents {
+    fn single(event: ClientEvent) -> Self {
+        Self { events: vec![event] }
+    }
+    fn many(events: Vec<ClientEvent>) -> Self {
+        Self { events }
+    }
+}
+
+/// Map a `MuxFrame` (already demuxed to the owning session by the router) into
+/// [`ClientEvent`]s. `seq` of the embedded `SessionEvent` updates the sink's
+/// `last_seq` so SSE reconnection can re-baseline from the exact gap.
+///
+/// `sink` is taken by `&SessionSink` so the mapping layer can record pending
+/// approval/question ids for the bridge's respond path; it does **not** send
+/// events to the sink (the caller does, after mapping).
+pub fn map_mux_frame(frame: &MuxFrame, sink: &SessionSink) -> MappedEvents {
+    match frame {
+        MuxFrame::SessionEvent { event, view, .. } => {
+            let mut events = map_session_event(event, view.as_ref(), sink);
+            // Advance last_seq after mapping so re-baseline resumes from the gap.
+            sink.last_seq.store(event.seq, std::sync::atomic::Ordering::Release);
+            MappedEvents::many(events.drain(..).collect())
+        }
+        MuxFrame::SessionSubscribed { last_seq, .. } => {
+            // Seed last_seq from the subscription baseline (lastSeq = last
+            // delivered seq; the next event is lastSeq + 1).
+            sink.last_seq
+                .store((*last_seq).max(0) as u64, std::sync::atomic::Ordering::Release);
+            MappedEvents::default()
+        }
+        MuxFrame::ApprovalRequested {
+            approval_id,
+            tool_name,
+            reason,
+            ..
+        } => {
+            sink.record_pending_approval(approval_id.clone(), PendingApprovalKind::Approval);
+            MappedEvents::single(ClientEvent::ToolPermissionRequest {
+                id: approval_id.clone(),
+                name: tool_name.clone(),
+                options: approval_options(),
+                details: reason.clone(),
+                input: None,
+            })
+        }
+        MuxFrame::ApprovalResolved {
+            approval_id,
+            outcome,
+            ..
+        } => MappedEvents::single(ClientEvent::ToolPermissionResolved {
+            id: approval_id.clone(),
+            outcome: outcome.clone(),
+        }),
+        MuxFrame::QuestionRequested { questions, .. } => {
+            // The bridge answers one ask() as a batch via the question's rpcId.
+            // Use the first question's id as the request id surfaced to the UI;
+            // the full batch is stored in the sink for the respond path.
+            let request_id = questions
+                .first()
+                .map(|q| q.id.clone())
+                .unwrap_or_else(|| Uuid::new_v4().to_string());
+            sink.record_pending_question(request_id.clone());
+            let input = PermissionInputRequest {
+                questions: questions
+                    .iter()
+                    .map(|q| PermissionInputQuestion {
+                        id: q.id.clone(),
+                        header: q.header.clone().unwrap_or_default(),
+                        question: q.question.clone(),
+                        is_other: false,
+                        is_secret: false,
+                        multi_select: q.multi_select.unwrap_or(false),
+                        options: q
+                            .options
+                            .iter()
+                            .flatten()
+                            .map(|o| PermissionInputOption {
+                                label: o.label.clone(),
+                                description: o.description.clone().unwrap_or_default(),
+                            })
+                            .collect(),
+                    })
+                    .collect(),
+            };
+            MappedEvents::single(ClientEvent::ToolPermissionRequest {
+                id: request_id,
+                name: "user_question".to_string(),
+                options: Vec::new(),
+                details: questions
+                    .first()
+                    .and_then(|q| q.detail.clone())
+                    .or_else(|| questions.first().map(|q| q.question.clone())),
+                input: Some(input),
+            })
+        }
+        MuxFrame::QuestionResolved {
+            question_rpc_id,
+            outcome,
+            ..
+        } => MappedEvents::single(ClientEvent::ToolPermissionResolved {
+            id: question_rpc_id.clone(),
+            outcome: outcome.clone(),
+        }),
+        MuxFrame::SessionProjection { key, value, .. } => {
+            if key == "title" {
+                if let Some(title) = value.as_str() {
+                    return MappedEvents::single(ClientEvent::SessionTitleUpdated {
+                        title: title.to_string(),
+                    });
+                }
+            }
+            MappedEvents::default()
+        }
+        MuxFrame::StreamError { error } => {
+            tracing::warn!(target: "dsh-bridge::mapping", error = %error, "mux stream error frame");
+            MappedEvents::single(ClientEvent::Interrupted {
+                reason: format!("harness stream error: {error}"),
+            })
+        }
+        // session/queue, session/jobs, and unknown frames are not represented
+        // in ClientEvent in v1; ignore (debug-logged by the router).
+        MuxFrame::SessionQueue { .. } | MuxFrame::SessionJobs { .. } | MuxFrame::Other => {
+            MappedEvents::default()
+        }
+    }
+}
+
+/// Map a `HostFrame` (demuxed by `sessionId` where present).
+pub fn map_host_frame(frame: &HostFrame) -> MappedEvents {
+    match frame {
+        HostFrame::HostAgentError { message, .. } => MappedEvents::single(
+            ClientEvent::Interrupted {
+                reason: format!("harness agent error: {message}"),
+            },
+        ),
+        HostFrame::HostSessionStatus { running: false, .. } => {
+            // A session that stopped running without a turn/end (host-side
+            // failure) surfaces as Interrupted so the UI can react.
+            MappedEvents::single(ClientEvent::Interrupted {
+                reason: "harness session stopped".to_string(),
+            })
+        }
+        HostFrame::StreamError { error } => {
+            tracing::warn!(target: "dsh-bridge::mapping", error = %error, "host stream error frame");
+            MappedEvents::single(ClientEvent::Interrupted {
+                reason: format!("harness host stream error: {error}"),
+            })
+        }
+        // session-added/removed, workspace-*, archived-*, remote-event are not
+        // represented in v1 (host-global frames are ignored or broadcast per
+        // the design doc's open question).
+        _ => MappedEvents::default(),
+    }
+}
+
+/// Map a `SessionEvent` (+ optional `ToolEventView`) into [`ClientEvent`]s.
+pub fn map_session_event(
+    event: &SessionEvent,
+    view: Option<&ToolEventView>,
+    _sink: &SessionSink,
+) -> Vec<ClientEvent> {
+    match event.type_tag.as_str() {
+        "assistant/chunk" => {
+            let data: Option<AssistantChunkData> = event.data();
+            match data.map(|d| d.chunk) {
+                Some(StreamChunk::TextDelta { text, .. }) => vec![ClientEvent::MessageChunk {
+                    role: MessageRole::Assistant,
+                    content: text,
+                }],
+                Some(StreamChunk::ReasoningDelta { text, .. }) => {
+                    // ThinkingActivity is a boolean flag in the current DTO;
+                    // reasoning text has no dedicated field, so we mark activity
+                    // active. A future DTO change can carry the text.
+                    let _ = text;
+                    vec![ClientEvent::ThinkingActivity { active: true }]
+                }
+                Some(StreamChunk::Usage { usage }) => vec![usage_event(&usage)],
+                _ => Vec::new(),
+            }
+        }
+        "assistant/message" => {
+            let data: Option<AssistantMessageData> = event.data();
+            let mut out = Vec::new();
+            if let Some(data) = data {
+                for block in &data.message.content {
+                    if let ContentBlock::Text { text } = block {
+                        out.push(ClientEvent::MessageChunk {
+                            role: MessageRole::Assistant,
+                            content: text.clone(),
+                        });
+                    }
+                }
+                if let Some(usage) = &data.usage {
+                    out.push(usage_event(usage));
+                }
+            }
+            out
+        }
+        "tool/call" => {
+            let data: Option<ToolCallData> = event.data();
+            let (name, call_id, raw_input) = match data {
+                Some(d) => (d.name, d.call_id, d.arguments.clone()),
+                None => (String::new(), String::new(), String::new()),
+            };
+            let (kind, summary) = match view {
+                Some(ToolEventView::Call { view }) => {
+                    let kind = match view {
+                        ToolCallView::Terminal(_) => "execute".to_string(),
+                        ToolCallView::Diff(_) => "edit".to_string(),
+                        ToolCallView::Generic(g) => g.kind.clone().unwrap_or_default(),
+                        ToolCallView::Other => String::new(),
+                    };
+                    let summary = view.title().map(|t| t.to_string()).unwrap_or_else(|| name.clone());
+                    (kind, summary)
+                }
+                _ => (String::new(), name.clone()),
+            };
+            let raw_input_value = serde_json::from_str::<Value>(&raw_input).ok();
+            vec![ClientEvent::ToolStarted {
+                id: call_id,
+                parent_id: None,
+                name: name.clone(),
+                kind,
+                summary,
+                is_subagent: false,
+                raw_input: raw_input_value
+                    .as_ref()
+                    .map(|v| serde_json::to_string(v).unwrap_or_default()),
+            }]
+        }
+        "tool/result" => {
+            let data: Option<ToolResultData> = event.data();
+            let call_id = data
+                .as_ref()
+                .and_then(|d| d.message.content.first())
+                .and_then(|b| match b {
+                    ContentBlock::ToolResult { tool_call_id, .. } => Some(tool_call_id.clone()),
+                    _ => None,
+                })
+                .unwrap_or_default();
+            let mut out = Vec::new();
+
+            // Diff views → one ToolDiff per file (before ToolCompleted).
+            if let Some(ToolEventView::Result { view }) = view {
+                if let ToolResultView::Diff(diff_view) = view {
+                    for fd in &diff_view.diffs {
+                        out.push(ClientEvent::ToolDiff {
+                            id: call_id.clone(),
+                            path: fd.path.clone(),
+                            old_text: fd.old_text.clone(),
+                            new_text: fd.new_text.clone(),
+                        });
+                    }
+                }
+            }
+
+            let (outcome, terminal_output, raw_output) =
+                match (data.as_ref(), view) {
+                    (Some(d), Some(ToolEventView::Result { view })) => render_result(d, view),
+                    (Some(d), None) => (result_outcome(d), None, result_text(d)),
+                    _ => ("completed".to_string(), None, None),
+                };
+
+            if data.as_ref().is_some_and(|d| d.error.is_some()) {
+                out.push(ClientEvent::ToolFailed {
+                    id: call_id,
+                    name: None,
+                    error: data
+                        .as_ref()
+                        .and_then(|d| d.error.as_ref())
+                        .map(|e| format!("{}: {}", e.name, e.code))
+                        .unwrap_or_else(|| "tool error".to_string()),
+                    raw_output,
+                    terminal_output,
+                });
+            } else {
+                out.push(ClientEvent::ToolCompleted {
+                    id: call_id,
+                    name: None,
+                    outcome,
+                    raw_output,
+                    terminal_output,
+                });
+            }
+            out
+        }
+        "todo/write" => {
+            let data: Option<TodoWriteData> = event.data();
+            let entries = data
+                .map(|d| d.todos)
+                .unwrap_or_default()
+                .into_iter()
+                .map(todo_to_plan_entry)
+                .collect();
+            vec![ClientEvent::PlanUpdated { entries }]
+        }
+        "turn/end" => {
+            let data: Option<TurnEndData> = event.data();
+            let stop_reason = data
+                .as_ref()
+                .map(|d| d.reason.kind.clone())
+                .unwrap_or_else(|| "completed".to_string());
+            vec![ClientEvent::TurnFinished { stop_reason }]
+        }
+        "request/header" => {
+            // The full header/config is rich; in v1 we emit a hydrated
+            // SessionConfigState placeholder so the UI knows config is live.
+            vec![ClientEvent::SessionConfigUpdated {
+                state: workspace_model::SessionConfigState {
+                    hydrated: true,
+                    controls: Vec::new(),
+                },
+            }]
+        }
+        // turn/start, step/start, step/end, user/message, request/context,
+        // session/end-seed: log-only or surface metadata not represented in
+        // ClientEvent in v1. Ignorable per dsh's merge-extensibility guard.
+        _ => Vec::new(),
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct TodoWriteData {
+    #[serde(default)]
+    todos: Vec<TodoItem>,
+}
+
+#[derive(serde::Deserialize)]
+struct TurnEndData {
+    reason: TurnEndReason,
+}
+
+fn approval_options() -> Vec<PermissionOption> {
+    vec![
+        PermissionOption {
+            id: "allowed-once".to_string(),
+            label: "Allow once".to_string(),
+            kind: "allow_once".to_string(),
+        },
+        PermissionOption {
+            id: "rejected".to_string(),
+            label: "Reject".to_string(),
+            kind: "reject_once".to_string(),
+        },
+    ]
+}
+
+fn todo_to_plan_entry(todo: TodoItem) -> AgentPlanEntry {
+    let status = match todo.status.as_str() {
+        "in_progress" => AgentPlanEntryStatus::InProgress,
+        "completed" => AgentPlanEntryStatus::Completed,
+        _ => AgentPlanEntryStatus::Pending,
+    };
+    AgentPlanEntry {
+        id: None,
+        content: todo.content,
+        priority: AgentPlanEntryPriority::Medium,
+        status,
+    }
+}
+
+fn render_result(
+    data: &ToolResultData,
+    view: &ToolResultView,
+) -> (String, Option<TerminalOutput>, Option<String>) {
+    match view {
+        ToolResultView::Terminal(t) => {
+            let outcome = if t.exit_code == Some(0) {
+                "completed".to_string()
+            } else {
+                "failed".to_string()
+            };
+            let term = Some(TerminalOutput {
+                exit_code: t.exit_code,
+                output: t.output.clone().unwrap_or_default(),
+            });
+            (outcome, term, None)
+        }
+        ToolResultView::Diff(_) => {
+            // Diffs already emitted as ToolDiff events; the completed card
+            // carries the model-facing result text as raw_output.
+            ("completed".to_string(), None, result_text(data))
+        }
+        ToolResultView::Search(v) | ToolResultView::Read(v) | ToolResultView::Web(v) => {
+            // Unrepresentable structured views → raw_output JSON (recoverable).
+            (
+                result_outcome(data),
+                None,
+                Some(serde_json::to_string(v).unwrap_or_default()),
+            )
+        }
+        ToolResultView::Generic(_) => ("completed".to_string(), None, result_text(data)),
+        ToolResultView::Other => ("completed".to_string(), None, result_text(data)),
+    }
+}
+
+fn result_outcome(data: &ToolResultData) -> String {
+    if data.error.is_some() {
+        "failed".to_string()
+    } else {
+        "completed".to_string()
+    }
+}
+
+/// Model-facing result text: concatenate text blocks of the tool-result message.
+fn result_text(data: &ToolResultData) -> Option<String> {
+    let texts: Vec<&str> = data
+        .message
+        .content
+        .iter()
+        .filter_map(|b| match b {
+            ContentBlock::Text { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+    if texts.is_empty() {
+        None
+    } else {
+        Some(texts.join("\n"))
+    }
+}
+
+fn usage_event(usage: &TokenUsage) -> ClientEvent {
+    ClientEvent::UsageUpdated {
+        usage: UsageEvent {
+            scope: workspace_model::UsageEventScope::TurnDelta,
+            model: None,
+            provider: None,
+            agent_cli: None,
+            tokens: workspace_model::UsageTokenBreakdown {
+                input_tokens: Some(usage.input_tokens),
+                output_tokens: Some(usage.output_tokens),
+                cache_read_tokens: usage.cache_read_tokens,
+                cache_write_tokens: usage.cache_write_tokens,
+                reasoning_tokens: usage.reasoning_tokens,
+                ..Default::default()
+            },
+            ..Default::default()
+        },
+    }
+}
+
+/// Reconstruct a diff hunk list from a `FileDiff` (for `ToolDiffPreview`).
+/// Used by history replay when the frontend wants hunk-level preview.
+pub fn file_diff_to_hunks(path: &str, old: Option<&str>, new: &str) -> DiffHunk {
+    let heading = path.to_string();
+    let mut lines = Vec::new();
+    if let Some(old) = old {
+        for line in old.lines() {
+            lines.push(DiffLine {
+                kind: DiffLineKind::Context,
+                content: line.to_string(),
+            });
+        }
+    }
+    for line in new.lines() {
+        lines.push(DiffLine {
+            kind: DiffLineKind::Added,
+            content: line.to_string(),
+        });
+    }
+    DiffHunk { heading, lines }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::host::SessionSink;
+    use acp_core::PermissionBroker;
+    use std::sync::mpsc;
+
+    fn test_sink() -> (SessionSink, mpsc::Receiver<ClientEvent>) {
+        let (tx, rx) = mpsc::channel();
+        (SessionSink::new(tx, PermissionBroker::default()), rx)
+    }
+
+    fn mux(json: serde_json::Value) -> MuxFrame {
+        serde_json::from_value(json).expect("fixture frame must deserialize")
+    }
+
+    fn session_event(type_tag: &str, seq: u64, data: serde_json::Value) -> serde_json::Value {
+        serde_json::json!({
+            "type": "session/event",
+            "sessionId": "s-1",
+            "event": { "type": type_tag, "seq": seq, "time": 0.0, "data": data }
+        })
+    }
+
+    #[test]
+    fn maps_assistant_chunk_text() {
+        let (sink, _rx) = test_sink();
+        let frame = mux(session_event(
+            "assistant/chunk",
+            1,
+            serde_json::json!({ "turn": 1, "step": 1, "chunk": { "type": "text-delta", "index": 0, "text": "Hello" } }),
+        ));
+        let mapped = map_mux_frame(&frame, &sink);
+        assert_eq!(
+            mapped.events,
+            vec![ClientEvent::MessageChunk {
+                role: MessageRole::Assistant,
+                content: "Hello".to_string(),
+            }]
+        );
+        assert_eq!(sink.last_seq.load(std::sync::atomic::Ordering::Acquire), 1);
+    }
+
+    #[test]
+    fn maps_assistant_reasoning_chunk_to_thinking() {
+        let (sink, _rx) = test_sink();
+        let frame = mux(session_event(
+            "assistant/chunk",
+            2,
+            serde_json::json!({ "turn": 1, "step": 1, "chunk": { "type": "reasoning-delta", "index": 0, "text": "think..." } }),
+        ));
+        let mapped = map_mux_frame(&frame, &sink);
+        assert_eq!(mapped.events, vec![ClientEvent::ThinkingActivity { active: true }]);
+    }
+
+    #[test]
+    fn maps_tool_call_with_terminal_view() {
+        let (sink, _rx) = test_sink();
+        let frame = mux(serde_json::json!({
+            "type": "session/event",
+            "sessionId": "s-1",
+            "event": {
+                "type": "tool/call",
+                "seq": 3,
+                "time": 0.0,
+                "data": { "turn": 1, "step": 1, "callId": "call-1", "name": "bash", "arguments": "{\"command\":\"ls\"}" }
+            },
+            "view": { "for": "call", "view": { "card": "terminal", "title": "ls", "cwd": "/tmp" } }
+        }));
+        let mapped = map_mux_frame(&frame, &sink);
+        assert!(matches!(
+            &mapped.events[0],
+            ClientEvent::ToolStarted {
+                id, name, kind, summary, raw_input, ..
+            } if id == "call-1" && name == "bash" && kind == "execute" && summary == "ls"
+                && raw_input.as_deref() == Some("{\"command\":\"ls\"}")
+        ));
+    }
+
+    #[test]
+    fn maps_tool_result_diff_view_to_tool_diff_plus_completed() {
+        let (sink, _rx) = test_sink();
+        let frame = mux(serde_json::json!({
+            "type": "session/event",
+            "sessionId": "s-1",
+            "event": {
+                "type": "tool/result",
+                "seq": 4,
+                "time": 0.0,
+                "data": {
+                    "turn": 1, "step": 1,
+                    "message": {
+                        "role": "user",
+                        "content": [{ "type": "tool-result", "toolCallId": "call-1", "content": [] }]
+                    }
+                }
+            },
+            "view": {
+                "for": "result",
+                "view": {
+                    "card": "diff",
+                    "diffs": [{ "path": "a.txt", "oldText": "old", "newText": "new" }]
+                }
+            }
+        }));
+        let mapped = map_mux_frame(&frame, &sink);
+        assert_eq!(
+            mapped.events,
+            vec![
+                ClientEvent::ToolDiff {
+                    id: "call-1".to_string(),
+                    path: "a.txt".to_string(),
+                    old_text: Some("old".to_string()),
+                    new_text: "new".to_string(),
+                },
+                ClientEvent::ToolCompleted {
+                    id: "call-1".to_string(),
+                    name: None,
+                    outcome: "completed".to_string(),
+                    raw_output: None,
+                    terminal_output: None,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn maps_tool_result_terminal_view_to_terminal_output() {
+        let (sink, _rx) = test_sink();
+        let frame = mux(serde_json::json!({
+            "type": "session/event",
+            "sessionId": "s-1",
+            "event": {
+                "type": "tool/result",
+                "seq": 5,
+                "time": 0.0,
+                "data": {
+                    "turn": 1, "step": 1,
+                    "message": {
+                        "role": "user",
+                        "content": [{ "type": "tool-result", "toolCallId": "call-2", "content": [] }]
+                    }
+                }
+            },
+            "view": { "for": "result", "view": { "card": "terminal", "output": "out", "exitCode": 0 } }
+        }));
+        let mapped = map_mux_frame(&frame, &sink);
+        assert!(matches!(
+            &mapped.events[0],
+            ClientEvent::ToolCompleted {
+                terminal_output: Some(TerminalOutput { output, exit_code: Some(0), .. }),
+                ..
+            } if output == "out"
+        ));
+    }
+
+    #[test]
+    fn maps_todo_write_to_plan() {
+        let (sink, _rx) = test_sink();
+        let frame = mux(session_event(
+            "todo/write",
+            6,
+            serde_json::json!({
+                "todos": [
+                    { "content": "Read code", "status": "in_progress" },
+                    { "content": "Fix bug", "status": "pending" },
+                    { "content": "Test", "status": "completed" },
+                ]
+            }),
+        ));
+        let mapped = map_mux_frame(&frame, &sink);
+        assert!(matches!(
+            &mapped.events[0],
+            ClientEvent::PlanUpdated { entries } if entries.len() == 3
+                && entries[0].status == AgentPlanEntryStatus::InProgress
+                && entries[1].status == AgentPlanEntryStatus::Pending
+                && entries[2].status == AgentPlanEntryStatus::Completed
+        ));
+    }
+
+    #[test]
+    fn maps_turn_end_to_finished() {
+        let (sink, _rx) = test_sink();
+        let frame = mux(session_event(
+            "turn/end",
+            7,
+            serde_json::json!({ "turn": 1, "reason": { "kind": "completed" } }),
+        ));
+        let mapped = map_mux_frame(&frame, &sink);
+        assert_eq!(
+            mapped.events,
+            vec![ClientEvent::TurnFinished {
+                stop_reason: "completed".to_string(),
+            }]
+        );
+    }
+
+    #[test]
+    fn maps_approval_requested_and_resolved() {
+        let (sink, rx) = test_sink();
+        let requested = mux(serde_json::json!({
+            "type": "approval/requested",
+            "sessionId": "s-1",
+            "approvalId": "a-1",
+            "toolName": "bash",
+            "callId": "call-1",
+            "reason": "shell"
+        }));
+        let mapped = map_mux_frame(&requested, &sink);
+        assert!(matches!(
+            &mapped.events[0],
+            ClientEvent::ToolPermissionRequest {
+                id, name, options, details, input: None, ..
+            } if id == "a-1" && name == "bash" && options.len() == 2 && details.as_deref() == Some("shell")
+        ));
+
+        let resolved = mux(serde_json::json!({
+            "type": "approval/resolved",
+            "sessionId": "s-1",
+            "approvalId": "a-1",
+            "outcome": "allowed-once"
+        }));
+        let mapped = map_mux_frame(&resolved, &sink);
+        assert_eq!(
+            mapped.events,
+            vec![ClientEvent::ToolPermissionResolved {
+                id: "a-1".to_string(),
+                outcome: "allowed-once".to_string(),
+            }]
+        );
+        drop(rx);
+    }
+
+    #[test]
+    fn maps_question_requested_to_input_request() {
+        let (sink, _rx) = test_sink();
+        let frame = mux(serde_json::json!({
+            "type": "question/requested",
+            "sessionId": "s-1",
+            "questions": [
+                { "id": "q1", "question": "Proceed?", "options": [{ "label": "Yes" }, { "label": "No" }] }
+            ]
+        }));
+        let mapped = map_mux_frame(&frame, &sink);
+        assert!(matches!(
+            &mapped.events[0],
+            ClientEvent::ToolPermissionRequest {
+                id, name, input: Some(PermissionInputRequest { questions }), ..
+            } if id == "q1" && name == "user_question" && questions.len() == 1
+                && questions[0].options.len() == 2
+        ));
+    }
+
+    #[test]
+    fn maps_session_projection_title() {
+        let (sink, _rx) = test_sink();
+        let frame = mux(serde_json::json!({
+            "type": "session/projection",
+            "sessionId": "s-1",
+            "key": "title",
+            "value": "Fix auth bug",
+            "seq": 8
+        }));
+        let mapped = map_mux_frame(&frame, &sink);
+        assert_eq!(
+            mapped.events,
+            vec![ClientEvent::SessionTitleUpdated {
+                title: "Fix auth bug".to_string(),
+            }]
+        );
+    }
+
+    #[test]
+    fn maps_host_agent_error_to_interrupted() {
+        let frame: HostFrame = serde_json::from_value(serde_json::json!({
+            "type": "host/agent-error",
+            "sessionId": "s-1",
+            "message": "boom"
+        }))
+        .unwrap();
+        let mapped = map_host_frame(&frame);
+        assert_eq!(
+            mapped.events,
+            vec![ClientEvent::Interrupted {
+                reason: "harness agent error: boom".to_string(),
+            }]
+        );
+    }
+
+    #[test]
+    fn unknown_event_type_is_ignored_not_fatal() {
+        // Additive harness schema change: a new event type we do not know must
+        // not produce events or break the stream (12.7).
+        let (sink, _rx) = test_sink();
+        let frame = mux(session_event(
+            "session/future-event",
+            9,
+            serde_json::json!({ "anything": true }),
+        ));
+        let mapped = map_mux_frame(&frame, &sink);
+        assert!(mapped.events.is_empty());
+        // last_seq still advances so re-baseline resumes past the unknown frame.
+        assert_eq!(sink.last_seq.load(std::sync::atomic::Ordering::Acquire), 9);
+    }
+
+    #[test]
+    fn unknown_tool_card_falls_back_to_generic() {
+        let (sink, _rx) = test_sink();
+        let frame = mux(serde_json::json!({
+            "type": "session/event",
+            "sessionId": "s-1",
+            "event": {
+                "type": "tool/call",
+                "seq": 10,
+                "time": 0.0,
+                "data": { "turn": 1, "step": 1, "callId": "call-9", "name": "future-tool", "arguments": "{}" }
+            },
+            "view": { "for": "call", "view": { "card": "future-card", "title": "x" } }
+        }));
+        let mapped = map_mux_frame(&frame, &sink);
+        assert!(matches!(
+            &mapped.events[0],
+            ClientEvent::ToolStarted { id, .. } if id == "call-9"
+        ));
+    }
+
+    #[test]
+    fn unrepresentable_view_serializes_to_raw_output_json() {
+        let (sink, _rx) = test_sink();
+        let frame = mux(serde_json::json!({
+            "type": "session/event",
+            "sessionId": "s-1",
+            "event": {
+                "type": "tool/result",
+                "seq": 11,
+                "time": 0.0,
+                "data": {
+                    "turn": 1, "step": 1,
+                    "message": {
+                        "role": "user",
+                        "content": [{ "type": "tool-result", "toolCallId": "call-10", "content": [] }]
+                    }
+                }
+            },
+            "view": { "for": "result", "view": { "card": "read", "path": "a.rs", "lines": [{ "number": 1, "text": "fn main() {}" }] } }
+        }));
+        let mapped = map_mux_frame(&frame, &sink);
+        assert!(matches!(
+            &mapped.events[0],
+            ClientEvent::ToolCompleted { raw_output: Some(raw), .. } if raw.contains("a.rs") && raw.contains("fn main")
+        ));
+    }
+
+    #[test]
+    fn history_replay_reconstructs_client_event_sequence() {
+        // 8.3: a fixture history page (assistant text + tool call + turn end)
+        // reconstructs the expected ClientEvent sequence.
+        let (sink, _rx) = test_sink();
+        let history = serde_json::json!([
+            session_event("assistant/message", 1, serde_json::json!({
+                "turn": 1, "step": 1,
+                "message": {
+                    "role": "assistant",
+                    "content": [{ "type": "text", "text": "Working on it" }]
+                }
+            })),
+            session_event("tool/call", 2, serde_json::json!({
+                "turn": 1, "step": 1, "callId": "call-1", "name": "bash", "arguments": "{\"command\":\"ls\"}"
+            })),
+            session_event("tool/result", 3, serde_json::json!({
+                "turn": 1, "step": 1,
+                "message": {
+                    "role": "user",
+                    "content": [{ "type": "tool-result", "toolCallId": "call-1", "content": [{ "type": "text", "text": "done" }] }]
+                }
+            })),
+            session_event("turn/end", 4, serde_json::json!({ "turn": 1, "reason": { "kind": "completed" } })),
+        ]);
+        let frames: Vec<MuxFrame> = history
+            .as_array()
+            .unwrap()
+            .iter()
+            .cloned()
+            .map(mux)
+            .collect();
+        let mut events = Vec::new();
+        for frame in &frames {
+            events.extend(map_mux_frame(frame, &sink).events);
+        }
+        // assistant message → tool started → tool completed → turn finished
+        assert!(matches!(&events[0], ClientEvent::MessageChunk { role: MessageRole::Assistant, content } if content == "Working on it"));
+        assert!(matches!(&events[1], ClientEvent::ToolStarted { id, .. } if id == "call-1"));
+        assert!(matches!(&events[2], ClientEvent::ToolCompleted { id, .. } if id == "call-1"));
+        assert!(matches!(&events[3], ClientEvent::TurnFinished { .. }));
+        // last_seq ends at the final event so a re-baseline resumes past it.
+        assert_eq!(sink.last_seq.load(std::sync::atomic::Ordering::Acquire), 4);
+    }
+}

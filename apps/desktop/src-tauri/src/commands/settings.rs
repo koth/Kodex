@@ -658,6 +658,7 @@ fn install_command(agent: AgentCliId) -> (&'static str, Vec<&'static str>) {
     let npm = if cfg!(windows) { "npm.cmd" } else { "npm" };
     match agent {
         AgentCliId::Codebuddy => (npm, vec!["install", "-g", "@tencent-ai/codebuddy-code"]),
+        AgentCliId::DeepSeekHarness => (npm, vec!["install", "-g", "@deepseek-ai/dsh"]),
         AgentCliId::Goose => {
             if cfg!(windows) {
                 (
@@ -680,6 +681,9 @@ fn install_command(agent: AgentCliId) -> (&'static str, Vec<&'static str>) {
         }
         AgentCliId::CodexAcp | AgentCliId::ClaudeAgentAcp => {
             unreachable!("managed agents are handled separately")
+        }
+        AgentCliId::DeepSeekHarness => {
+            unreachable!("dsh install is handled by the npm branch above")
         }
     }
 }
@@ -1377,6 +1381,10 @@ fn manual_instruction(agent: AgentCliId) -> Option<String> {
         ),
         AgentCliId::ClaudeAgentAcp => Some(
             "点击下载会优先把安装包内置的 Claude Agent ACP 安装到 `~/.kodex/bin`，未内置时再在线下载；默认使用 BYOK 通道，请先保存至少一个 BYOK 模型 API key。"
+                .to_string(),
+        ),
+        AgentCliId::DeepSeekHarness => Some(
+            "点击下载会通过 `npm install -g @deepseek-ai/dsh` 安装 `dsh` CLI；使用前请在本页配置 DeepSeek API key（会传给 `dsh web` 的 `DEEPSEEK_API_KEY`）。"
                 .to_string(),
         ),
     }

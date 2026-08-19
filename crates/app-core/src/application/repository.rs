@@ -152,6 +152,7 @@ impl Application {
             acp_port: self.acp_port,
             remote_ssh: None,
             mcp_servers: Vec::new(),
+            harness_endpoint: None,
         };
 
         let prompt = format!(

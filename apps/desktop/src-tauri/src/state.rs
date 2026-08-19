@@ -322,6 +322,7 @@ impl AppState {
         self.lsp_service.shutdown_all();
         self.terminal_service.shutdown_all();
         self.codebuddy_proxy.stop();
+        app_core::dsh_bringup().shutdown();
     }
 
     pub fn lsp_service(&self) -> LspService {

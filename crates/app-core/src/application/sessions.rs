@@ -6,6 +6,7 @@ struct PreparedSessionRuntime {
     acp_port: u16,
     remote_ssh: Option<RemoteSshSessionConfig>,
     mcp_servers: Vec<acp_core::McpServer>,
+    harness_endpoint: Option<String>,
     web_tools_mcp: Option<crate::web_tools_mcp::WebToolsMcpHandle>,
     image_mcp: Option<crate::image_mcp::ImageMcpHandle>,
     image_capabilities: workspace_model::ImageCapabilities,
@@ -341,6 +342,26 @@ impl Application {
             return self.prepare_remote_session_runtime(agent_command);
         }
 
+        // DeepSeek Harness: no ACP subprocess, no codex/image/web-tools MCP.
+        // Kodex writes the dsh settings document, spawns `dsh web`, and the
+        // returned endpoint selects the harness backend via
+        // `SessionConfig.harness_endpoint`.
+        if crate::settings::is_deepseek_harness_command(agent_command) {
+            let harness_endpoint =
+                crate::dsh_bringup::dsh_bringup().ensure_harness_endpoint(&self.app_paths)?;
+            return Ok(PreparedSessionRuntime {
+                workspace_root: self.session_config_workspace_root(None),
+                agent_env: Vec::new(),
+                acp_port: 0,
+                remote_ssh: None,
+                mcp_servers: Vec::new(),
+                harness_endpoint: Some(harness_endpoint),
+                web_tools_mcp: None,
+                image_mcp: None,
+                image_capabilities: workspace_model::ImageCapabilities::assumed_native(),
+            });
+        }
+
         crate::settings::ensure_agent_ready_for_command(agent_command, &self.app_paths)
             .map_err(|e| e.to_string())?;
         let workspace_root = self.session_config_workspace_root(None);
@@ -355,6 +376,7 @@ impl Application {
             acp_port: self.acp_port,
             remote_ssh: None,
             mcp_servers,
+            harness_endpoint: None,
             web_tools_mcp,
             image_mcp,
             image_capabilities,
@@ -393,6 +415,7 @@ impl Application {
             acp_port: local_port,
             remote_ssh: Some(remote_ssh),
             mcp_servers: Vec::new(),
+            harness_endpoint: None,
             web_tools_mcp: None,
             image_mcp: None,
             image_capabilities: workspace_model::ImageCapabilities::assumed_native(),
@@ -605,6 +628,7 @@ impl Application {
             acp_port: prepared_runtime.acp_port,
             remote_ssh: prepared_runtime.remote_ssh.clone(),
             mcp_servers: prepared_runtime.mcp_servers.clone(),
+            harness_endpoint: prepared_runtime.harness_endpoint.clone(),
         })
         .map_err(|e| e.to_string())?;
         if let Some(acp_id) = resume_id_for_handle {
@@ -740,6 +764,7 @@ impl Application {
             acp_port: prepared_runtime.acp_port,
             remote_ssh: prepared_runtime.remote_ssh.clone(),
             mcp_servers: prepared_runtime.mcp_servers.clone(),
+            harness_endpoint: prepared_runtime.harness_endpoint.clone(),
         })
         .map_err(|e| e.to_string())?;
         let _ = session.set_permission_mode(mode.as_deref().unwrap_or("Build"));
@@ -865,6 +890,7 @@ impl Application {
             acp_port: prepared_runtime.acp_port,
             remote_ssh: prepared_runtime.remote_ssh.clone(),
             mcp_servers: prepared_runtime.mcp_servers.clone(),
+            harness_endpoint: prepared_runtime.harness_endpoint.clone(),
         })
         .map_err(|e| e.to_string())?;
         let _ = session.set_permission_mode("Build");

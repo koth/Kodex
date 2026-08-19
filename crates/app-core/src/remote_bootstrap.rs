@@ -812,6 +812,10 @@ fn agent_id(agent: AgentCliId) -> &'static str {
         AgentCliId::ClaudeAgentAcp => "claude-agent-acp",
         AgentCliId::Codebuddy => "codebuddy",
         AgentCliId::Goose => "goose",
+        // DeepSeek Harness is not a remote ACP agent; it runs locally as a
+        // `dsh web` process. This branch is unreachable for remote sessions
+        // (the harness backend is local-only in v1).
+        AgentCliId::DeepSeekHarness => "dsh",
     }
 }
 

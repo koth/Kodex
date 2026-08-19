@@ -5,20 +5,20 @@ use std::sync::{Arc, Mutex, mpsc};
 use workspace_model::PermissionInputResponse;
 
 #[derive(Clone, Debug, Default)]
-pub(crate) struct PermissionBroker {
+pub struct PermissionBroker {
     state: Arc<Mutex<PermissionBrokerState>>,
     mode: Arc<Mutex<PermissionPolicyMode>>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub(crate) struct PermissionResolution {
-    pub(crate) option_id: Option<String>,
-    pub(crate) guidance: Option<String>,
-    pub(crate) input_response: Option<PermissionInputResponse>,
+pub struct PermissionResolution {
+    pub option_id: Option<String>,
+    pub guidance: Option<String>,
+    pub input_response: Option<PermissionInputResponse>,
 }
 
 impl PermissionResolution {
-    pub(crate) fn new(
+    pub fn new(
         option_id: Option<String>,
         guidance: Option<String>,
         input_response: Option<PermissionInputResponse>,
@@ -45,7 +45,7 @@ struct PermissionBrokerState {
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub(in crate::runtime) enum PermissionPolicyMode {
+pub(crate) enum PermissionPolicyMode {
     ReadOnly,
     #[default]
     Build,
@@ -53,7 +53,7 @@ pub(in crate::runtime) enum PermissionPolicyMode {
 }
 
 impl PermissionBroker {
-    pub(crate) fn register(
+    pub fn register(
         &self,
         request_id: String,
     ) -> anyhow::Result<mpsc::Receiver<PermissionResolution>> {
@@ -80,7 +80,7 @@ impl PermissionBroker {
         Ok(rx)
     }
 
-    pub(crate) fn resolve(
+    pub fn resolve(
         &self,
         request_id: &str,
         option_id: Option<String>,
@@ -113,7 +113,7 @@ impl PermissionBroker {
         Ok(true)
     }
 
-    pub(crate) fn cancel(&self, request_id: &str) -> anyhow::Result<bool> {
+    pub fn cancel(&self, request_id: &str) -> anyhow::Result<bool> {
         let sender = {
             let mut state = self
                 .state
@@ -131,7 +131,7 @@ impl PermissionBroker {
         Ok(true)
     }
 
-    pub(crate) fn set_mode(&self, mode_id: &str) -> anyhow::Result<()> {
+    pub fn set_mode(&self, mode_id: &str) -> anyhow::Result<()> {
         let normalized = mode_id.to_ascii_lowercase();
         let mode = match normalized.as_str() {
             "full-access" | "fullaccess" | "full_access" | "danger-full-access"
@@ -148,11 +148,11 @@ impl PermissionBroker {
         Ok(())
     }
 
-    pub(in crate::runtime) fn mode(&self) -> PermissionPolicyMode {
+    pub(crate) fn mode(&self) -> PermissionPolicyMode {
         self.mode.lock().map(|mode| *mode).unwrap_or_default()
     }
 
-    pub(crate) fn cancel_all(&self) -> anyhow::Result<()> {
+    pub fn cancel_all(&self) -> anyhow::Result<()> {
         let pending = {
             let mut state = self
                 .state

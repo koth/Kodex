@@ -247,6 +247,7 @@ mod tests {
                 ssh_password: None,
             }),
             mcp_servers: Vec::new(),
+            harness_endpoint: None,
         }
     }
 

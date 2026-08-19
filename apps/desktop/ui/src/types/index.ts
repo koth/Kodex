@@ -806,7 +806,8 @@ export type AgentCliId =
   | "codebuddy"
   | "goose"
   | "codex-acp"
-  | "claude-agent-acp";
+  | "claude-agent-acp"
+  | "deepseek-harness";
 export type AppTheme =
   | "kodex_dark"
   | "midnight"

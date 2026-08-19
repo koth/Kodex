@@ -274,6 +274,24 @@ impl SessionHandle {
             .map_err(|_| anyhow!("ACP command reply channel closed"))?
     }
 
+    pub fn resolve_harness_approval(
+        &self,
+        rpc_id: &str,
+        result: crate::runtime::HarnessApprovalResult,
+    ) -> anyhow::Result<()> {
+        let (reply_tx, reply_rx) = mpsc::channel();
+        self.command_tx
+            .send(RuntimeCommand::ResolveHarnessApproval {
+                rpc_id: rpc_id.to_string(),
+                result,
+                reply_tx,
+            })
+            .map_err(|_| anyhow!("ACP command channel closed"))?;
+        reply_rx
+            .recv()
+            .map_err(|_| anyhow!("ACP command reply channel closed"))?
+    }
+
     pub fn cancel_prompt(&self) -> anyhow::Result<()> {
         self.permission_broker.cancel_all()?;
         let (reply_tx, reply_rx) = mpsc::channel();

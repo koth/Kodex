@@ -12,7 +12,7 @@ mod broker;
 mod shell;
 
 pub(super) use broker::PermissionPolicyMode;
-pub(crate) use broker::{PermissionBroker, PermissionResolution};
+pub use broker::{PermissionBroker, PermissionResolution};
 pub(super) use shell::shell_command_prefers_apply_patch_for_writes;
 use shell::{
     collect_shell_commands, extract_write_paths_from_command_text, is_usable_write_path,

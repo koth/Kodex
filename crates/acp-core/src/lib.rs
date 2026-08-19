@@ -2,10 +2,14 @@ mod client;
 mod codex_api_proxy;
 mod events;
 mod mapping;
-mod runtime;
+pub mod runtime;
 
 pub use agent_client_protocol::schema::McpServer;
 pub use client::{PromptTask, SessionHandle};
+pub use runtime::{
+    HarnessApprovalOutcome, HarnessApprovalResult, HarnessBackend, HarnessQuestionAnswer,
+    PermissionBroker, RuntimeCommand, set_harness_backend, ShutdownSignal,
+};
 pub use codex_api_proxy::{
     any_active_proxy_retry_status, clear_codex_api_proxy_model_provider_map,
     codex_api_proxy_base_url, configure_codex_api_proxy_model_provider_map,

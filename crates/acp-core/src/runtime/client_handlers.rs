@@ -3110,6 +3110,7 @@ mod tests {
             acp_port: 0,
             remote_ssh: None,
             mcp_servers: Vec::new(),
+            harness_endpoint: None,
         }
     }
 

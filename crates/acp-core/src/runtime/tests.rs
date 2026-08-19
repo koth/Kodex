@@ -246,6 +246,7 @@ fn remote_ssh_agent_process_waits_for_forward_and_finishes_after_tcp_close() {
             ssh_password: None,
         }),
         mcp_servers: Vec::new(),
+        harness_endpoint: None,
     };
     let agent = RemoteSshAgentProcess::from_config(&config).unwrap();
     let runtime = tokio::runtime::Builder::new_current_thread()
@@ -598,6 +599,7 @@ fn test_session_config(agent_command: &str) -> SessionConfig {
         acp_port: 0,
         remote_ssh: None,
         mcp_servers: Vec::new(),
+        harness_endpoint: None,
     }
 }
 
@@ -1020,6 +1022,7 @@ fn mock_agent_session_config_with_options(
         acp_port: 0,
         remote_ssh: None,
         mcp_servers: Vec::new(),
+        harness_endpoint: None,
     }
 }
 

@@ -897,6 +897,7 @@ describe("SettingsPage LSP settings", () => {
       "Claude",
       "Codex",
       "CodeBuddy",
+      "DeepSeek Harness",
     ]);
   });
 

@@ -6,6 +6,7 @@ members = [
     "crates/app-core",
     "crates/codebuddy-proxy",
     "crates/codebuddy-sdk",
+    "crates/dsh-bridge",
     "crates/git-service",
     "crates/relay-client",
     "crates/relay-protocol",
