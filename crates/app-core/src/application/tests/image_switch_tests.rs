@@ -41,13 +41,7 @@ fn reapply_image_capabilities_updates_prompt_gate_and_handle() {
     app.reapply_image_capabilities("gpt-5.4", Some("timiai"));
     assert!(app.ui.image_capabilities.native_view);
     assert!(app.ui.prompt_capabilities.image);
-    assert!(
-        app.image_mcp
-            .as_ref()
-            .unwrap()
-            .capabilities()
-            .native_view
-    );
+    assert!(app.image_mcp.as_ref().unwrap().capabilities().native_view);
 
     // Switch back to a text-only model: native_view becomes false, but a
     // `view_image` fallback is still attached (view_fallback=true), so the
@@ -57,13 +51,7 @@ fn reapply_image_capabilities_updates_prompt_gate_and_handle() {
     assert!(!app.ui.image_capabilities.native_view);
     assert!(app.ui.image_capabilities.view_fallback);
     assert!(app.ui.prompt_capabilities.image);
-    assert!(
-        !app.image_mcp
-            .as_ref()
-            .unwrap()
-            .capabilities()
-            .native_view
-    );
+    assert!(!app.image_mcp.as_ref().unwrap().capabilities().native_view);
 
     app.session.shutdown();
 }

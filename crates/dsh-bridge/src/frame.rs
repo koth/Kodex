@@ -584,7 +584,8 @@ mod tests {
 
     #[test]
     fn tool_call_view_unknown_card_falls_back() {
-        let raw = serde_json::json!({ "for": "call", "view": { "card": "future-card", "title": "x" } });
+        let raw =
+            serde_json::json!({ "for": "call", "view": { "card": "future-card", "title": "x" } });
         let view: ToolEventView = serde_json::from_value(raw).unwrap();
         match view {
             ToolEventView::Call { view } => assert!(matches!(view, ToolCallView::Other)),

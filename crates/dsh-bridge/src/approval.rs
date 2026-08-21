@@ -63,7 +63,10 @@ impl PendingApprovals {
         match (entry.kind, result) {
             (
                 PendingApprovalKind::Approval,
-                HarnessApprovalResult::Approval { approval_id, outcome },
+                HarnessApprovalResult::Approval {
+                    approval_id,
+                    outcome,
+                },
             ) => {
                 let wire_outcome = match outcome {
                     HarnessApprovalOutcome::AllowedOnce => ApprovalOutcomeWire::AllowedOnce,
@@ -78,8 +81,16 @@ impl PendingApprovals {
                 Some(ClientResponse::ok(rpc_id.to_string(), value))
             }
             (PendingApprovalKind::Question, HarnessApprovalResult::Question { answers }) => {
-                // The respond rpcId is the question/requested ServerRequest's rpcId.
-                let _ = self.question_rpc_ids.iter().find(|(id, _)| id == rpc_id);
+                // The respond rpcId is the question/requested ServerRequest's
+                // rpcId, not the UI-facing question id: the harness matches
+                // the pending ask by rpcId and rejects any other id as
+                // `bad-response` (which surfaced as a silent hang — the
+                // question stayed open forever).
+                let respond_rpc_id = self
+                    .question_rpc_ids
+                    .iter()
+                    .find(|(id, _)| id == rpc_id)
+                    .map(|(_, rpc_id)| rpc_id.clone())?;
                 let wire_answers: Vec<AskUserQuestionAnswerItemWire> = answers
                     .iter()
                     .map(|a: &HarnessQuestionAnswer| AskUserQuestionAnswerItemWire {
@@ -95,7 +106,7 @@ impl PendingApprovals {
                     },
                 };
                 let value = serde_json::to_value(&payload).ok()?;
-                Some(ClientResponse::ok(rpc_id.to_string(), value))
+                Some(ClientResponse::ok(respond_rpc_id, value))
             }
             // Kind/result mismatch — the UI sent the wrong shape for this id.
             _ => None,

@@ -196,6 +196,13 @@ pub enum ClientEvent {
     },
     TurnFinished {
         stop_reason: String,
+        /// Upstream-specific detail carried alongside the stop reason, when
+        /// available. For a harness `turn/end` of kind `error`, this holds the
+        /// normalized `LlmFailure` (message / code / HTTP status) so the UI can
+        /// surface the real cause (e.g. `429 rate limited`) instead of only the
+        /// generic refusal wording. `None` when the backend provided none.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        detail: Option<String>,
     },
     Interrupted {
         reason: String,

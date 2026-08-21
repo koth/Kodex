@@ -88,7 +88,10 @@ fn resolve_model_attributes_precedence() {
     // Static table baseline (gpt-5.5 is in MODEL_MAX_OUTPUT_TOKENS at 128_000).
     let baseline = resolve_model_attributes(None, "gpt-5.5", TIMIAI_PROVIDER_ID);
     assert_eq!(baseline.max_output_tokens, 128_000);
-    assert_eq!(baseline.reasoning_effort, workspace_model::ReasoningEffort::None);
+    assert_eq!(
+        baseline.reasoning_effort,
+        workspace_model::ReasoningEffort::None
+    );
 
     // Custom max_output_tokens overrides the static table.
     let custom = resolve_model_attributes(
@@ -104,7 +107,10 @@ fn resolve_model_attributes_precedence() {
         TIMIAI_PROVIDER_ID,
     );
     assert_eq!(custom.max_output_tokens, 32_000);
-    assert_eq!(custom.reasoning_effort, workspace_model::ReasoningEffort::High);
+    assert_eq!(
+        custom.reasoning_effort,
+        workspace_model::ReasoningEffort::High
+    );
 }
 
 #[test]
@@ -123,7 +129,10 @@ fn resolve_model_attributes_falls_back_to_static_when_attributes_missing() {
     assert_eq!(resolved.max_output_tokens, 128_000);
     // Reasoning defaults to None when neither the custom entry nor the static
     // table supplies it.
-    assert_eq!(resolved.reasoning_effort, workspace_model::ReasoningEffort::None);
+    assert_eq!(
+        resolved.reasoning_effort,
+        workspace_model::ReasoningEffort::None
+    );
 }
 
 #[test]
@@ -137,8 +146,7 @@ fn resolve_model_attributes_multimodal_override_beats_heuristic() {
         supports_image_input: Some(true),
         reasoning_effort: None,
     };
-    let resolved =
-        resolve_model_attributes(Some(&entry), "deepseek-v4-pro", DEEPSEEK_PROVIDER_ID);
+    let resolved = resolve_model_attributes(Some(&entry), "deepseek-v4-pro", DEEPSEEK_PROVIDER_ID);
     assert!(resolved.supports_image_input);
 }
 
@@ -172,7 +180,10 @@ fn codex_acp_model_catalog_entry_reflects_custom_attributes() {
     assert_eq!(entry["max_context_window"].as_i64(), Some(500_000));
     assert_eq!(entry["max_output_tokens"].as_i64(), Some(96_000));
     // Multimodal override: deepseek-style text-only is overridden to false.
-    assert_eq!(entry["supports_image_detail_original"].as_bool(), Some(false));
+    assert_eq!(
+        entry["supports_image_detail_original"].as_bool(),
+        Some(false)
+    );
     assert_eq!(entry["input_modalities"], json!(["text"]));
     assert_eq!(entry["default_reasoning_level"], "high");
     let supported = entry["supported_reasoning_levels"].as_array().unwrap();
@@ -202,11 +213,17 @@ fn codex_acp_model_catalog_entry_defaults_remain_when_attributes_missing() {
     // Custom attribute absent: defaults to the static table.
     assert_eq!(
         entry["context_window"].as_i64(),
-        Some(model_context_window_for_provider("gpt-5.5", TIMIAI_PROVIDER_ID))
+        Some(model_context_window_for_provider(
+            "gpt-5.5",
+            TIMIAI_PROVIDER_ID
+        ))
     );
     assert_eq!(
         entry["max_output_tokens"].as_i64(),
-        Some(model_max_output_tokens_for_provider("gpt-5.5", TIMIAI_PROVIDER_ID))
+        Some(model_max_output_tokens_for_provider(
+            "gpt-5.5",
+            TIMIAI_PROVIDER_ID
+        ))
     );
     // No reasoning attribute: catalog stays on the historical `none` shape.
     assert_eq!(entry["default_reasoning_level"], "none");
@@ -258,7 +275,9 @@ fn write_codex_byok_channel_config_falls_back_to_static_when_no_custom_attribute
     save_provider_models(
         &paths,
         TIMIAI_PROVIDER_ID,
-        vec![workspace_model::ModelAttributesInput::from_slug(TIMIAI_CODEX_MODEL)],
+        vec![workspace_model::ModelAttributesInput::from_slug(
+            TIMIAI_CODEX_MODEL,
+        )],
     )
     .unwrap();
     save_agent_provider_secret(

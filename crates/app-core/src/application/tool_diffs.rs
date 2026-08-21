@@ -36,7 +36,7 @@ impl Application {
         if !tool_command_write_hint_paths(tool.raw_input.as_deref()).is_empty()
             || !tool_command_write_hint_paths(Some(tool.detail_text.as_str())).is_empty()
         {
-return Self::tool_looks_like_shell_command(tool)
+            return Self::tool_looks_like_shell_command(tool)
                 || is_file_write_tool_identity(&tool.kind, &tool.name)
                 || self
                     .ui

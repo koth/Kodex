@@ -5,6 +5,7 @@ pub(super) struct RuntimeEventApplyResult {
     pub(super) ui_changed: bool,
     pub(super) had_file_changes: bool,
     pub(super) turn_stop_reason: Option<String>,
+    pub(super) turn_detail: Option<String>,
 }
 
 fn events_may_affect_review_changes(events: &[ClientEvent]) -> bool {
@@ -29,16 +30,22 @@ impl Application {
         self.ui.usage.current_turn = Default::default();
         self.ui.session.status = SessionStatus::Streaming;
         let events = self.session.send_prompt(prompt)?;
-        let turn_stop_reason = events.iter().rev().find_map(|event| match event {
-            ClientEvent::TurnFinished { stop_reason } => Some(stop_reason.clone()),
+        let turn_end = events.iter().rev().find_map(|event| match event {
+            ClientEvent::TurnFinished {
+                stop_reason,
+                detail,
+            } => Some((stop_reason.clone(), detail.clone())),
             _ => None,
         });
         for event in events {
             self.apply_event_with_dirty_tracking(&event);
         }
-        if let Some(stop_reason) = turn_stop_reason.as_deref()
-            && let Some(notice) =
-                turn_finished_notice(stop_reason, self.ui.session.agent_cli.as_deref())
+        if let Some((stop_reason, detail)) = turn_end.as_ref()
+            && let Some(notice) = turn_finished_notice(
+                stop_reason,
+                detail.as_deref(),
+                self.ui.session.agent_cli.as_deref(),
+            )
         {
             self.push_system_message(notice);
         }
@@ -345,9 +352,9 @@ impl Application {
         let result = match result_rx.try_recv() {
             Ok(result) => result,
             Err(std::sync::mpsc::TryRecvError::Empty) => return false,
-            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                Err(anyhow::anyhow!("image degradation worker exited unexpectedly"))
-            }
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => Err(anyhow::anyhow!(
+                "image degradation worker exited unexpectedly"
+            )),
         };
         let pending = self
             .pending_image_degradation
@@ -438,7 +445,9 @@ impl Application {
         }
         let steers = std::mem::take(&mut self.ui.pending_steers);
         for steer in &steers {
-            self.ui.timeline.push(TimelineItem::Message(steer.message_id));
+            self.ui
+                .timeline
+                .push(TimelineItem::Message(steer.message_id));
         }
         let _ = steers;
         true
@@ -481,7 +490,6 @@ impl Application {
             return;
         }
 
-
         let pending_retry_changed = self.retry_pending_tool_write_detections();
 
         // Drain a completed background image degradation before doing anything
@@ -489,9 +497,7 @@ impl Application {
         // to the agent. While a degradation is pending the user message is
         // already visible (with original images), so we just wait for the
         // background thread.
-        if self.pending_image_degradation.is_some()
-            && self.try_complete_image_degradation()
-        {
+        if self.pending_image_degradation.is_some() && self.try_complete_image_degradation() {
             self.bump_revision();
             return;
         }
@@ -575,8 +581,11 @@ impl Application {
 
             ui_changed |= self.persist_current_turn_file_changes();
             if let Some(stop_reason) = result.turn_stop_reason.as_deref()
-                && let Some(notice) =
-                    turn_finished_notice(stop_reason, self.ui.session.agent_cli.as_deref())
+                && let Some(notice) = turn_finished_notice(
+                    stop_reason,
+                    result.turn_detail.as_deref(),
+                    self.ui.session.agent_cli.as_deref(),
+                )
             {
                 self.push_system_message(notice);
                 ui_changed = true;
@@ -602,10 +611,17 @@ impl Application {
         let workspace_root = self.ui.workspace.root.clone();
         let mut had_file_changes = false;
         let mut batch_file_versions = HashMap::<String, String>::new();
-        let turn_stop_reason = events.iter().rev().find_map(|event| match event {
-            ClientEvent::TurnFinished { stop_reason } => Some(stop_reason.clone()),
-            _ => None,
-        });
+        let (turn_stop_reason, turn_detail) =
+            match events.iter().rev().find_map(|event| match event {
+                ClientEvent::TurnFinished {
+                    stop_reason,
+                    detail,
+                } => Some((stop_reason.clone(), detail.clone())),
+                _ => None,
+            }) {
+                Some((reason, detail)) => (Some(reason), detail),
+                None => (None, None),
+            };
 
         // Events are collected in batches. Some agents emit ToolStarted and ToolDiff in
         // the same batch after the file has already been written. Start recording before
@@ -836,6 +852,7 @@ impl Application {
             ui_changed,
             had_file_changes,
             turn_stop_reason,
+            turn_detail,
         }
     }
 
@@ -871,7 +888,9 @@ impl Application {
         paths.extend(tool_command_write_hint_paths(tool.raw_input.as_deref()));
         if !tool.detail_text.trim().is_empty() {
             paths.extend(tool_event_hint_paths(Some(tool.detail_text.as_str())));
-            paths.extend(tool_command_write_hint_paths(Some(tool.detail_text.as_str())));
+            paths.extend(tool_command_write_hint_paths(Some(
+                tool.detail_text.as_str(),
+            )));
         }
         paths.sort();
         paths.dedup();

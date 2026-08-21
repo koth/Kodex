@@ -219,6 +219,7 @@ pub(super) async fn run_command_loop(
                                         )?;
                                         let _ = tx_events.send(ClientEvent::TurnFinished {
                                             stop_reason: "cancelled".into(),
+                                            detail: None,
                                         });
                                         tool_execution_registry.clear();
                                         if let Some(reply_tx) = reply_tx {

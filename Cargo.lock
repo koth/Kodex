@@ -1053,8 +1053,10 @@ dependencies = [
  "shell-words",
  "tempfile",
  "tokio",
+ "tokio-tungstenite",
  "tracing",
  "uuid",
+ "windows-sys 0.61.2",
  "workspace-model",
 ]
 

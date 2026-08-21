@@ -189,8 +189,7 @@ impl Application {
                         // `model` is stored provider-qualified; show the bare
                         // label in the UI while keeping the qualified value in
                         // `pending_model_restore` for provider-aware restore.
-                        ui.session.model =
-                            super::config::display_model_from_persisted(&model);
+                        ui.session.model = super::config::display_model_from_persisted(&model);
                         ui.session.mode = mode;
                     }
                     ui.messages = messages;
@@ -319,23 +318,19 @@ impl Application {
         // The session is already started, so the returned MCP server entry is
         // discarded — the handle is enough for `degrade_prompt_for_image_fallback`
         // to call `view_image` via the internal codex-api-proxy HTTP path.
-        let (image_mcp, image_capabilities) =
-            match super::sessions::prepare_image_mcp(
-                &app_paths,
-                &agent_command,
-                &startup_model,
-                &ui.workspace.root.display().to_string(),
-                false,
-            ) {
-                Ok((_image_servers, handle, caps)) => (handle, caps),
-                Err(error) => {
-                    crate::startup_perf::mark(
-                        "app/bootstrap/image_mcp_failed",
-                        error,
-                    );
-                    (None, workspace_model::ImageCapabilities::default())
-                }
-            };
+        let (image_mcp, image_capabilities) = match super::sessions::prepare_image_mcp(
+            &app_paths,
+            &agent_command,
+            &startup_model,
+            &ui.workspace.root.display().to_string(),
+            false,
+        ) {
+            Ok((_image_servers, handle, caps)) => (handle, caps),
+            Err(error) => {
+                crate::startup_perf::mark("app/bootstrap/image_mcp_failed", error);
+                (None, workspace_model::ImageCapabilities::default())
+            }
+        };
         ui.image_capabilities = image_capabilities;
         // `prompt_capabilities.image` gates image attachments and mirrors
         // `image_capabilities.image_capable()` (native_view || view_fallback),
@@ -521,8 +516,7 @@ impl Application {
                         // `model` is stored provider-qualified; show the bare
                         // label in the UI while keeping the qualified value in
                         // `pending_model_restore` for provider-aware restore.
-                        ui.session.model =
-                            super::config::display_model_from_persisted(&model);
+                        ui.session.model = super::config::display_model_from_persisted(&model);
                         ui.session.mode = mode;
                     }
                     ui.messages = messages;

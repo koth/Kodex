@@ -71,10 +71,7 @@ impl ImageMcpService {
     }
 
     fn capabilities(&self) -> ImageCapabilities {
-        self.caps
-            .lock()
-            .map(|guard| *guard)
-            .unwrap_or_default()
+        self.caps.lock().map(|guard| *guard).unwrap_or_default()
     }
 
     fn update_capabilities(&self, caps: ImageCapabilities) {
@@ -477,7 +474,10 @@ async fn handle_tool_call(params: Value, service: ImageMcpService) -> Result<Val
             "tool not available in current capability mode",
         ));
     }
-    let arguments = params.get("arguments").cloned().unwrap_or_else(|| json!({}));
+    let arguments = params
+        .get("arguments")
+        .cloned()
+        .unwrap_or_else(|| json!({}));
     let api = ImageApi::new((*service.config).clone(), service.view_cache.clone());
     let result = match name {
         "view_image" => api.view_image(&arguments).await,
@@ -608,11 +608,18 @@ mod tests {
             .unwrap()
             .to_string();
         let payload: Value = response.json().await.unwrap();
-        assert_eq!(payload["result"]["serverInfo"]["name"].as_str(), Some("kodex-image"));
+        assert_eq!(
+            payload["result"]["serverInfo"]["name"].as_str(),
+            Some("kodex-image")
+        );
         session_id
     }
 
-    async fn list_tools(client: &reqwest::Client, handle: &ImageMcpHandle, session_id: &str) -> Vec<String> {
+    async fn list_tools(
+        client: &reqwest::Client,
+        handle: &ImageMcpHandle,
+        session_id: &str,
+    ) -> Vec<String> {
         let response: Value = client
             .post(handle.url())
             .header(TOKEN_HEADER, handle.token())
@@ -814,21 +821,21 @@ mod tests {
             view_fallback: false,
         }))
         .unwrap();
-       let tools = run_async(async {
-           let client = reqwest::Client::new();
-           let session_id = initialize(&client, &handle).await;
-           // Simulate a model switch to a text-only BYOK model.
-           handle.update_capabilities(ImageCapabilities {
-               native_view: false,
-               native_generate: false,
-               native_edit: false,
-               view_fallback: false,
-           });
-           list_tools(&client, &handle, &session_id).await
-       });
-       assert!(tools.contains(&"view_image".to_string()));
-       assert!(tools.contains(&"generate_image".to_string()));
-   }
+        let tools = run_async(async {
+            let client = reqwest::Client::new();
+            let session_id = initialize(&client, &handle).await;
+            // Simulate a model switch to a text-only BYOK model.
+            handle.update_capabilities(ImageCapabilities {
+                native_view: false,
+                native_generate: false,
+                native_edit: false,
+                view_fallback: false,
+            });
+            list_tools(&client, &handle, &session_id).await
+        });
+        assert!(tools.contains(&"view_image".to_string()));
+        assert!(tools.contains(&"generate_image".to_string()));
+    }
 
     #[test]
     fn model_switch_tools_list_changes_both_directions() {

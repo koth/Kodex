@@ -14,7 +14,7 @@
 //! teardown kills the child.
 
 use crate::AppPaths;
-use crate::settings::{build_dsh_settings_config, dsh_provider_keys};
+use crate::settings::{build_dsh_settings_config, dsh_provider_keys, ensure_dsh_proxy_routing};
 use dsh_bridge::{
     DshChild, HarnessHost, HarnessHostRegistry, SpawnDshWebConfig, spawn_dsh_web, write_settings,
 };
@@ -88,13 +88,21 @@ impl DshBringup {
     /// endpoint. Subsequent calls reuse the cached endpoint as long as the host
     /// is still alive.
     pub fn ensure_harness_endpoint(&self, paths: &AppPaths) -> Result<String, String> {
-        if let Some(managed) = self.managed.lock().map_err(|_| "dsh bringup lock poisoned")?.as_ref()
+        if let Some(managed) = self
+            .managed
+            .lock()
+            .map_err(|_| "dsh bringup lock poisoned")?
+            .as_ref()
             && self.registry.host_alive(&managed.endpoint)
         {
             return Ok(managed.endpoint.clone());
         }
 
         // 1. Write ~/.kodex/dsh/settings.yaml from the BYOK provider catalog.
+        //    First ensure the local codex_api_proxy is running and knows every
+        //    configured source provider, so the harness's chat/completions
+        //    traffic (routed through the proxy) can reach each upstream.
+        ensure_dsh_proxy_routing(paths);
         let config = build_dsh_settings_config(paths).map_err(|e| e.to_string())?;
         write_settings(&paths.dsh_settings_path(), &config)
             .map_err(|e| format!("failed to write dsh settings.yaml: {e}"))?;
@@ -120,11 +128,13 @@ impl DshBringup {
         host.attach_child(child);
 
         // 4. Cache the managed host so subsequent sessions reuse it.
-        *self.managed.lock().map_err(|_| "dsh bringup lock poisoned")? =
-            Some(ManagedHost {
-                endpoint: endpoint.clone(),
-                host,
-            });
+        *self
+            .managed
+            .lock()
+            .map_err(|_| "dsh bringup lock poisoned")? = Some(ManagedHost {
+            endpoint: endpoint.clone(),
+            host,
+        });
         Ok(endpoint)
     }
 

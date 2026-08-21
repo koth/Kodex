@@ -1,5 +1,5 @@
 import { afterEach, describe, it, expect, vi } from "vitest";
-import { act, fireEvent, render, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, waitFor, within } from "@testing-library/react";
 import { clearMocks, mockConvertFileSrc } from "@tauri-apps/api/mocks";
 import { ConversationTimeline, type TimelineTurnChangeSet } from "./ConversationTimeline";
 import {
@@ -15,6 +15,7 @@ import type {
 } from "../../types/index";
 
 afterEach(() => {
+  cleanup();
   clearMocks();
   vi.useRealTimers();
   vi.unstubAllGlobals();
@@ -332,7 +333,7 @@ describe("ThinkingIndicator", () => {
       <ConversationTimeline snapshot={snapshot} onPermissionSelect={() => {}} />,
     );
 
-    expect(container.textContent).toContain("已处理 1m 5s");
+    expect(container.textContent).toContain("已处理 1 次工具调用 · 1m 5s");
     expect(container.textContent).toContain("final answer");
     expect(container.textContent).not.toContain("intermediate reply");
     expect(container.textContent).not.toContain("pnpm test");
@@ -463,7 +464,7 @@ describe("ThinkingIndicator", () => {
       <ConversationTimeline snapshot={snapshot} onPermissionSelect={() => {}} />,
     );
 
-    expect(container.textContent).toContain("已处理 1m 30s");
+    expect(container.textContent).toContain("已处理 · 1m 30s");
     expect(container.textContent).toContain("final long answer");
     expect(container.textContent).not.toContain("visible intermediate 10");
 
@@ -501,7 +502,7 @@ describe("ThinkingIndicator", () => {
     );
 
     expect(container.querySelector(".timeline-turn-summary.is-completed")?.textContent).toContain(
-      "已处理 4s",
+      "已处理 · 4s",
     );
     expect(container.querySelector(".timeline-collapse-toggle")).toBeNull();
   });
@@ -534,7 +535,7 @@ describe("ThinkingIndicator", () => {
     );
 
     expect(container.querySelector(".timeline-turn-summary.is-completed")?.textContent).toContain(
-      "已处理 1m 5s",
+      "已处理 · 1m 5s",
     );
   });
 
@@ -2168,6 +2169,8 @@ describe("ConversationTimeline – window paging trigger", () => {
     const collapseSummaries = container.querySelectorAll(".timeline-collapse-toggle");
     // Both fully visible completed turns should collapse naturally.
     expect(collapseSummaries.length).toBeGreaterThanOrEqual(2);
+    // Restored process context must say what is hidden instead of looking lost.
+    expect(collapseSummaries[0].textContent).toContain("30 次工具调用");
     // The last turn's intermediate tools are collapsed away…
     expect(container.textContent).not.toContain("run 2-5");
     // …while its final answer stays visible.

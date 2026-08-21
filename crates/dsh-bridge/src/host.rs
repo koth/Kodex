@@ -1,9 +1,9 @@
 //! Shared `HarnessHost` + `SessionRouter` + `HarnessHostRegistry` (Mode B).
 //!
 //! One `HarnessHost` owns one `dsh web` process (or one external endpoint), one
-//! mux + one host SSE connection, a dedicated multi-thread tokio runtime, and a
+//! mux + one host WebSocket connection, a dedicated multi-thread tokio runtime, and a
 //! `SessionRouter`. Multiple Kodex `SessionHandle`s targeting the same endpoint
-//! share the host: the mux/host SSE read loops run on the host's own runtime
+//! share the host: the mux/host WebSocket read loops run on the host's own runtime
 //! (outliving any single session), and frames are demuxed by `sessionId` into
 //! per-session sinks. Control POSTs go direct over the shared `reqwest` client
 //! (not serialized through the router).
@@ -23,7 +23,7 @@ use crate::frame::{HostFrame, MuxFrame};
 use crate::rpc_types::{RpcId, ServerRequest, SessionId};
 use crate::transport::HttpClient;
 
-/// Bound on the re-baseline fan-out (`session.history` calls) after an SSE drop.
+/// Bound on the re-baseline fan-out (`session.history` calls) after a stream drop.
 /// Matches the design doc's `REBASELINE_CONCURRENCY` default (4) for the
 /// typical 1–3 session desktop case.
 const REBASELINE_CONCURRENCY: usize = 4;
@@ -57,7 +57,7 @@ pub struct SessionSink {
     /// The dsh session id, set once `session.create` returns.
     session_id: Mutex<Option<SessionId>>,
     /// Set when the session has been removed by the host (`host/session-removed`)
-    /// during an SSE gap, so re-baseline skips it and marks it Interrupted.
+    /// during a stream gap, so re-baseline skips it and marks it Interrupted.
     removed: AtomicBool,
 }
 
@@ -134,6 +134,28 @@ impl SessionSink {
         }
     }
 
+    /// Remove a pending question batch once the harness reports it resolved.
+    pub fn clear_pending_question(&self, ui_id: &str) {
+        if let Ok(mut guard) = self.question_rpc_ids.lock() {
+            guard.retain(|(id, _)| id != ui_id);
+        }
+        if let Ok(mut pending) = self.pending.lock() {
+            pending.retain(|e| !(e.kind == PendingApprovalKind::Question && e.ui_id == ui_id));
+        }
+    }
+
+    /// The UI-facing question id (`request_id`) for a pending batch, resolved
+    /// from its rpcId — `question/resolved` names the batch by rpcId, while
+    /// `ToolPermissionResolved` must carry the id the UI registered.
+    pub fn question_ui_id_for_rpc_id(&self, rpc_id: &str) -> Option<String> {
+        self.question_rpc_ids.lock().ok().and_then(|guard| {
+            guard
+                .iter()
+                .find(|(_, id)| id == rpc_id)
+                .map(|(ui_id, _)| ui_id.clone())
+        })
+    }
+
     pub fn pending_approvals(&self) -> PendingApprovals {
         let entries = self.pending.lock().map(|g| g.clone()).unwrap_or_default();
         let qrpc = self
@@ -145,7 +167,7 @@ impl SessionSink {
     }
 }
 
-/// Demuxes host-level SSE frames by `sessionId` to per-session sinks.
+/// Demuxes host-level WebSocket frames by `sessionId` to per-session sinks.
 /// Frames whose `sessionId` is not registered are dropped with a debug log
 /// (not errors — e.g. a session created by another client of the same host).
 pub struct SessionRouter {
@@ -189,7 +211,7 @@ impl SessionRouter {
         self.sinks.get(session_id).map(|r| r.clone())
     }
 
-    /// Snapshot all live sessions for re-baseline after an SSE drop.
+    /// Snapshot all live sessions for re-baseline after a stream drop.
     pub fn live_sessions(&self) -> Vec<(SessionId, Arc<SessionSink>)> {
         self.sinks
             .iter()
@@ -213,20 +235,20 @@ impl Default for SessionRouter {
 }
 
 /// One harness host: a shared `HttpClient`, a dedicated multi-thread `Runtime`,
-/// the mux + host SSE read loops, and a `SessionRouter`. Refcounted by active
-/// sessions; the last drop closes the SSE streams, disposes the runtime, and
+/// the mux + host WebSocket read loops, and a `SessionRouter`. Refcounted by active
+/// sessions; the last drop closes the WebSocket streams, disposes the runtime, and
 /// kills the spawned `dsh web` process (if Kodex spawned it).
 pub struct HarnessHost {
     endpoint: String,
     client: HttpClient,
     router: Arc<SessionRouter>,
     runtime: Runtime,
-    /// Notified when the SSE loops should stop (last session dropped or
+    /// Notified when the WebSocket loops should stop (last session dropped or
     /// shutdown). Drives cancellation of the read loops.
     stop: Arc<Notify>,
-    /// Whether Kodex spawned the process (true) or connected to an external
-    /// endpoint (false). Only spawned processes are killed on last-drop.
-    spawned: bool,
+    /// Whether Kodex owns a child attached to this host. Only owned children
+    /// are killed on last-drop; external endpoints are never terminated.
+    spawned: AtomicBool,
     /// Optional child handle for a Kodex-spawned `dsh web` process.
     child: Mutex<Option<crate::process::DshChild>>,
     /// Host version recorded by the startup probe (for diagnostics/branching).
@@ -239,7 +261,7 @@ impl std::fmt::Debug for HarnessHost {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("HarnessHost")
             .field("endpoint", &self.endpoint)
-            .field("spawned", &self.spawned)
+            .field("spawned", &self.spawned.load(Ordering::Acquire))
             .finish_non_exhaustive()
     }
 }
@@ -263,7 +285,7 @@ impl HarnessHost {
             router: Arc::new(SessionRouter::new()),
             runtime,
             stop: Arc::new(Notify::new()),
-            spawned,
+            spawned: AtomicBool::new(spawned),
             child: Mutex::new(None),
             version: Mutex::new(None),
             torn_down: AtomicBool::new(false),
@@ -292,9 +314,11 @@ impl HarnessHost {
         });
         // Start the SSE read loops on the host's own runtime.
         let host_for_mux = host.clone();
-        host.runtime.spawn(async move { host_for_mux.run_mux_loop().await });
+        host.runtime
+            .spawn(async move { host_for_mux.run_mux_loop().await });
         let host_for_host = host.clone();
-        host.runtime.spawn(async move { host_for_host.run_host_loop().await });
+        host.runtime
+            .spawn(async move { host_for_host.run_host_loop().await });
         Ok(host)
     }
 
@@ -326,6 +350,7 @@ impl HarnessHost {
 
     /// Attach a Kodex-spawned child so it is killed on last-drop.
     pub fn attach_child(&self, child: crate::process::DshChild) {
+        self.spawned.store(true, Ordering::Release);
         if let Ok(mut guard) = self.child.lock() {
             *guard = Some(child);
         }
@@ -401,7 +426,7 @@ impl HarnessHost {
     /// Dispatch one mux `ServerRequest`: parse the payload as a `MuxFrame`,
     /// demux by `sessionId`, map to `ClientEvent`(s), send to the matched sink.
     /// Unmatched/unknown frames are dropped with a debug log.
- fn dispatch_mux(&self, req: &ServerRequest) {
+    fn dispatch_mux(&self, req: &ServerRequest) {
         let frame: MuxFrame = match serde_json::from_value(req.payload.clone()) {
             Ok(f) => f,
             Err(err) => {
@@ -412,12 +437,38 @@ impl HarnessHost {
         // Attach question rpcId: question/requested frames carry the batch's
         // stable rpcId on the ServerRequest envelope; record it on the sink so
         // the respond path can echo it.
-        if let MuxFrame::QuestionRequested { session_id, questions, .. } = &frame {
+        if let MuxFrame::QuestionRequested {
+            session_id,
+            questions,
+            ..
+        } = &frame
+        {
             if let Some(sink) = self.router.get(session_id) {
                 if let Some(first) = questions.first() {
                     sink.attach_question_rpc_id(first.id.clone(), req.rpcId.clone());
                 }
             }
+        }
+        // question/resolved names the batch by rpcId, while the UI tracks it by
+        // the request id (the first question id): translate before mapping so
+        // ToolPermissionResolved reaches the panel that is waiting on it.
+        if let MuxFrame::QuestionResolved {
+            session_id,
+            question_rpc_id,
+            ..
+        } = &frame
+            && let Some(sink) = self.router.get(session_id)
+            && let Some(ui_id) = sink.question_ui_id_for_rpc_id(question_rpc_id)
+        {
+            sink.clear_pending_question(&ui_id);
+            sink.send(ClientEvent::ToolPermissionResolved {
+                id: ui_id,
+                outcome: match frame {
+                    MuxFrame::QuestionResolved { outcome, .. } => outcome.clone(),
+                    _ => unreachable!(),
+                },
+            });
+            return;
         }
         let Some(session_id) = frame.session_id() else {
             tracing::debug!(target: "dsh-bridge::host::mux", "mux frame without sessionId; dropping");
@@ -549,7 +600,7 @@ impl HarnessHost {
         self.stop.notify_waiters();
         // Kill a Kodex-spawned process (stdin EOF grace then terminate); never
         // kill an external endpoint.
-        if self.spawned {
+        if self.spawned.load(Ordering::Acquire) {
             if let Ok(mut guard) = self.child.lock() {
                 if let Some(child) = guard.take() {
                     let _ = crate::process::kill_child(child);
@@ -658,4 +709,4 @@ impl HarnessHostRegistryHandle {
 
 // silence unused-import warnings for types referenced only in docs/comments
 #[allow(dead_code)]
- fn _unused(_: Value, _: RpcId) {}
+fn _unused(_: Value, _: RpcId) {}

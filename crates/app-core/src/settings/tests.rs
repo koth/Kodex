@@ -498,7 +498,10 @@ fn codebuddy_provider_in_catalog_for_both_families() {
         .find(|p| p.id == CODEBUDDY_PROVIDER_ID)
         .unwrap_or_else(|| panic!("codebuddy profile missing from codex"));
     assert_eq!(codex.label, CODEBUDDY_PROVIDER_NAME);
-    assert_eq!(codex.proxy_kind, AgentProviderProxyKind::CompletionToResponses);
+    assert_eq!(
+        codex.proxy_kind,
+        AgentProviderProxyKind::CompletionToResponses
+    );
     assert_eq!(codex.managed_proxy_kind, ManagedProxyKind::Codebuddy);
     assert!(!codex.configured, "codebuddy unconfigured by default");
     assert!(codex.requires_credential);
@@ -515,7 +518,10 @@ fn codebuddy_provider_in_catalog_for_both_families() {
         .iter()
         .find(|p| p.id == CODEBUDDY_PROVIDER_ID)
         .unwrap_or_else(|| panic!("codebuddy profile missing from claude"));
-    assert_eq!(claude.proxy_kind, AgentProviderProxyKind::CompletionToClaude);
+    assert_eq!(
+        claude.proxy_kind,
+        AgentProviderProxyKind::CompletionToClaude
+    );
     assert_eq!(claude.managed_proxy_kind, ManagedProxyKind::Codebuddy);
     assert!(!claude.configured);
     assert_eq!(claude.port, Some(CODEBUDDY_DEFAULT_PORT));
@@ -542,7 +548,14 @@ fn codebuddy_configured_after_saving_key_and_port() {
     assert!(!profile.configured);
 
     // Save config with a custom port + key
-    let snap = save_codebuddy_config(&paths, Some(17870), "secret-key".to_string(), "internal".to_string(), false).unwrap();
+    let snap = save_codebuddy_config(
+        &paths,
+        Some(17870),
+        "secret-key".to_string(),
+        "internal".to_string(),
+        false,
+    )
+    .unwrap();
     let profile = snap
         .codex_acp
         .profiles
@@ -578,7 +591,14 @@ fn codebuddy_save_with_empty_key_keeps_existing_key() {
     let paths = AppPaths::from_root(dir.path().join(".kodex"));
 
     // Seed a configured key + port.
-    save_codebuddy_config(&paths, Some(17870), "secret-key".to_string(), "internal".to_string(), false).unwrap();
+    save_codebuddy_config(
+        &paths,
+        Some(17870),
+        "secret-key".to_string(),
+        "internal".to_string(),
+        false,
+    )
+    .unwrap();
     assert_eq!(
         codebuddy_secret(&paths).as_deref(),
         Some("secret-key"),
@@ -586,7 +606,14 @@ fn codebuddy_save_with_empty_key_keeps_existing_key() {
     );
 
     // Re-save with an empty key — the stored key must survive.
-    save_codebuddy_config(&paths, Some(17870), String::new(), "internal".to_string(), false).unwrap();
+    save_codebuddy_config(
+        &paths,
+        Some(17870),
+        String::new(),
+        "internal".to_string(),
+        false,
+    )
+    .unwrap();
     assert_eq!(
         codebuddy_secret(&paths).as_deref(),
         Some("secret-key"),
@@ -662,7 +689,14 @@ fn codebuddy_secret_appears_in_byok_model_catalog_with_correct_label() {
     )
     .unwrap();
     // Save the proxy key through the same entry point the settings UI uses.
-    save_codebuddy_config(&paths, None, "ck-secret".to_string(), "internal".to_string(), false).unwrap();
+    save_codebuddy_config(
+        &paths,
+        None,
+        "ck-secret".to_string(),
+        "internal".to_string(),
+        false,
+    )
+    .unwrap();
 
     // byok_source_secret must now resolve the dedicated codebuddy slot.
     let resolved = byok_source_secret(&paths, AgentProviderFamily::Codex, CODEBUDDY_PROVIDER_ID);
@@ -671,7 +705,10 @@ fn codebuddy_secret_appears_in_byok_model_catalog_with_correct_label() {
     // provider_label must surface "CodeBuddy" rather than silently falling
     // back to TimiAI (which is what used to happen because the match lacked
     // the codebuddy arm).
-    assert_eq!(provider_label(CODEBUDDY_PROVIDER_ID), CODEBUDDY_PROVIDER_NAME);
+    assert_eq!(
+        provider_label(CODEBUDDY_PROVIDER_ID),
+        CODEBUDDY_PROVIDER_NAME
+    );
     assert_eq!(
         provider_label_for_paths(&paths, CODEBUDDY_PROVIDER_ID),
         CODEBUDDY_PROVIDER_NAME
@@ -687,9 +724,7 @@ fn codebuddy_secret_appears_in_byok_model_catalog_with_correct_label() {
         .as_array()
         .unwrap()
         .iter()
-        .filter(|entry| {
-            entry["_meta"]["source_provider"].as_str() == Some(CODEBUDDY_PROVIDER_ID)
-        })
+        .filter(|entry| entry["_meta"]["source_provider"].as_str() == Some(CODEBUDDY_PROVIDER_ID))
         .collect();
     assert_eq!(
         codebuddy_entries.len(),
@@ -733,7 +768,14 @@ fn codebuddy_emit_model_provider_map_pins_local_proxy_base_url_chat_completions(
     )
     .unwrap();
     // Buying a port + key registers the codebuddy BYOK source.
-    save_codebuddy_config(&paths, Some(17870), "ck-secret".to_string(), "internal".to_string(), false).unwrap();
+    save_codebuddy_config(
+        &paths,
+        Some(17870),
+        "ck-secret".to_string(),
+        "internal".to_string(),
+        false,
+    )
+    .unwrap();
     save_provider_models_with_model_list_url(
         &paths,
         CODEBUDDY_PROVIDER_ID,
@@ -863,10 +905,7 @@ fn default_agent_for_new_work_uses_codebuddy_when_claude_byok_is_unconfigured() 
     // Default agent is now CodexAcp when neither agent is configured.
     // With only a codebuddy binary present and no keys saved, CodexAcp
     // is the default and its command resolves.
-    assert_eq!(
-        default_agent_for_new_work(&paths),
-        AgentCliId::CodexAcp
-    );
+    assert_eq!(default_agent_for_new_work(&paths), AgentCliId::CodexAcp);
 }
 
 #[test]
@@ -888,10 +927,7 @@ fn default_agent_for_new_work_keeps_configured_claude_byok() {
 
     // The default agent is now CodexAcp; saving a Claude secret should
     // not change the selected agent.
-    assert_eq!(
-        default_agent_for_new_work(&paths),
-        AgentCliId::CodexAcp
-    );
+    assert_eq!(default_agent_for_new_work(&paths), AgentCliId::CodexAcp);
 }
 
 #[test]
@@ -992,7 +1028,10 @@ fn codex_acp_timiai_source_creates_byok_config_file() {
     assert!(content.contains("[model_providers.timiai]"));
     assert!(!content.contains("model_providers = {"));
     let doc = content.parse::<DocumentMut>().unwrap();
-    assert_eq!(doc["model"].as_str(), Some(byok_encoded_model_slug(TIMIAI_CODEX_MODEL, TIMIAI_PROVIDER_ID).as_str()));
+    assert_eq!(
+        doc["model"].as_str(),
+        Some(byok_encoded_model_slug(TIMIAI_CODEX_MODEL, TIMIAI_PROVIDER_ID).as_str())
+    );
     assert_eq!(doc["model_provider"].as_str(), Some(BYOK_PROVIDER_ID));
     assert_eq!(
         doc["preferred_auth_method"].as_str(),
@@ -1211,7 +1250,10 @@ fn codex_acp_deepseek_config_creates_provider_config() {
     let content = std::fs::read_to_string(codex_config_path(&paths)).unwrap();
     assert!(content.contains("[model_providers.deepseek]"));
     let doc = content.parse::<DocumentMut>().unwrap();
-    assert_eq!(doc["model"].as_str(), Some(byok_encoded_model_slug(DEEPSEEK_MODEL, DEEPSEEK_PROVIDER_ID).as_str()));
+    assert_eq!(
+        doc["model"].as_str(),
+        Some(byok_encoded_model_slug(DEEPSEEK_MODEL, DEEPSEEK_PROVIDER_ID).as_str())
+    );
     assert_eq!(doc["model_provider"].as_str(), Some(BYOK_PROVIDER_ID));
     assert_eq!(
         doc["model_max_output_tokens"].as_integer(),
@@ -1292,11 +1334,11 @@ fn codex_acp_commandcode_catalog_uses_provider_specific_model_limits() {
 
     let content = std::fs::read_to_string(codex_config_path(&paths)).unwrap();
     let doc = content.parse::<DocumentMut>().unwrap();
-    assert_eq!(doc["model"].as_str(), Some(byok_encoded_model_slug(COMMANDCODE_MODEL, COMMANDCODE_PROVIDER_ID).as_str()));
     assert_eq!(
-        doc["model_provider"].as_str(),
-        Some(BYOK_PROVIDER_ID)
+        doc["model"].as_str(),
+        Some(byok_encoded_model_slug(COMMANDCODE_MODEL, COMMANDCODE_PROVIDER_ID).as_str())
     );
+    assert_eq!(doc["model_provider"].as_str(), Some(BYOK_PROVIDER_ID));
     // `model_context_window` is intentionally omitted; see byok channel test.
     assert!(doc.get("model_context_window").is_none());
     assert_eq!(
@@ -1704,13 +1746,21 @@ fn custom_provider_saves_config_and_exports_model_provider_map() {
     save_provider_models(
         &paths,
         &custom_id,
-        vec![workspace_model::ModelAttributesInput::from_slug("lab-model")],
+        vec![workspace_model::ModelAttributesInput::from_slug(
+            "lab-model",
+        )],
     )
     .unwrap();
     let command = command_for_agent_with_paths(AgentCliId::CodexAcp, &paths).unwrap();
     let env = agent_env_for_command(&command, &paths);
-    let expected_env_key = format!("CUSTOM_PROVIDER_{}_API_KEY", custom_id.strip_prefix("custom_").unwrap_or(&custom_id).to_ascii_uppercase());
-     assert!(env.contains(&(expected_env_key.clone(), "lab-secret".to_string())));
+    let expected_env_key = format!(
+        "CUSTOM_PROVIDER_{}_API_KEY",
+        custom_id
+            .strip_prefix("custom_")
+            .unwrap_or(&custom_id)
+            .to_ascii_uppercase()
+    );
+    assert!(env.contains(&(expected_env_key.clone(), "lab-secret".to_string())));
     let (_, provider_map) = env
         .iter()
         .find(|(name, _)| name == KODEX_MODEL_PROVIDER_MAP_ENV)
@@ -1722,7 +1772,7 @@ fn custom_provider_saves_config_and_exports_model_provider_map() {
         .iter()
         .find(|entry| entry["display_name"].as_str() == Some("lab-model"))
         .unwrap();
-     assert_eq!(custom_entry["provider"].as_str(), Some(custom_id.as_str()));
+    assert_eq!(custom_entry["provider"].as_str(), Some(custom_id.as_str()));
     assert_eq!(
         custom_entry["base_url"].as_str(),
         Some("https://api.lab.test/v1/responses")
@@ -1730,15 +1780,15 @@ fn custom_provider_saves_config_and_exports_model_provider_map() {
     assert_eq!(custom_entry["protocol"].as_str(), Some("responses"));
     assert_eq!(
         custom_entry["env_key"].as_str(),
-         Some(expected_env_key.as_str())
+        Some(expected_env_key.as_str())
     );
 
-     let snapshot = reset_provider_models(&paths, &custom_id).unwrap();
+    let snapshot = reset_provider_models(&paths, &custom_id).unwrap();
     let profile = snapshot
         .codex_acp
         .profiles
         .iter()
-         .find(|profile| profile.id == custom_id)
+        .find(|profile| profile.id == custom_id)
         .unwrap();
     assert!(profile.custom);
     assert!(profile.configured);
@@ -2129,9 +2179,11 @@ api_key = "mimo-secret"
     let catalog = std::fs::read_to_string(codex_model_catalog_path(&paths)).unwrap();
     let catalog: serde_json::Value = serde_json::from_str(&catalog).unwrap();
     let models = catalog["models"].as_array().unwrap();
-    assert!(models.iter().any(|model| {
-        model["display_name"].as_str() == Some(KIMI_MODEL)
-    }));
+    assert!(
+        models
+            .iter()
+            .any(|model| { model["display_name"].as_str() == Some(KIMI_MODEL) })
+    );
 }
 
 #[test]
@@ -2852,8 +2904,13 @@ fn build_dsh_settings_config_maps_configured_byok_providers_to_dsh_routes() {
         "deepseek-secret",
     )
     .unwrap();
-    save_agent_provider_secret(&paths, AgentProviderFamily::Codex, KIMI_PROVIDER_ID, "kimi-secret")
-        .unwrap();
+    save_agent_provider_secret(
+        &paths,
+        AgentProviderFamily::Codex,
+        KIMI_PROVIDER_ID,
+        "kimi-secret",
+    )
+    .unwrap();
 
     let config = build_dsh_settings_config(&paths).unwrap();
 
@@ -2874,16 +2931,30 @@ fn build_dsh_settings_config_maps_configured_byok_providers_to_dsh_routes() {
         .iter()
         .find(|route| route.id == DEEPSEEK_PROVIDER_ID)
         .unwrap();
-    // Upstream base URL, never the local codex proxy.
+    // openai-completions providers route through the local codex_api_proxy
+    // (pinned per-provider in the path) so the proxy can normalize upstream
+    // parameters (max_completion_tokens → max_tokens).
     assert_eq!(
         deepseek.base_url,
-        DEEPSEEK_UPSTREAM_HELP_URL
-            .strip_suffix("/chat/completions")
-            .unwrap()
+        format!(
+            "{}/providers/{DEEPSEEK_PROVIDER_ID}",
+            acp_core::codex_api_proxy_base_url()
+        )
     );
     assert_eq!(deepseek.api, "openai-completions");
     assert_eq!(deepseek.api_key_env, "KODEX_DSH_DEEPSEEK_KEY");
     assert!(!deepseek.models.is_empty());
+
+    // The web_search plugin's credential reference follows the injected
+    // DeepSeek key env var, not its `DEEPSEEK_API_KEY` default.
+    assert_eq!(
+        config.web_search_api_key_env.as_deref(),
+        Some("KODEX_DSH_DEEPSEEK_KEY")
+    );
+    // And dsh's native deepseek-official adapter must be hidden from the
+    // model picker (empty advisory catalog) so it does not duplicate the
+    // Kodex-routed deepseek group.
+    assert!(config.deepseek_byok_configured);
 
     // Provider keys resolve to the same env-var names as the routes' apiKeyEnv.
     let keys = dsh_provider_keys(&paths);
@@ -2897,6 +2968,35 @@ fn build_dsh_settings_config_maps_configured_byok_providers_to_dsh_routes() {
 }
 
 #[test]
+fn build_dsh_settings_config_marks_timiai_route_as_chat_completions() {
+    // Regression: timiai's `proxy_kind` is `Responses`, but that only names the
+    // local codex_api_proxy entry point — dsh has no proxy in its path and
+    // calls the upstream directly, and timiai's upstream is chat/completions.
+    // Marking the dsh route `openai-responses` made pi-ai send
+    // `max_output_tokens`, which the gateway duplicated into `max_tokens`.
+    let dir = tempdir().unwrap();
+    let paths = AppPaths::from_root(dir.path().join(".kodex"));
+    save_agent_provider_secret(
+        &paths,
+        AgentProviderFamily::Codex,
+        TIMIAI_PROVIDER_ID,
+        "timiai-secret",
+    )
+    .unwrap();
+
+    let config = build_dsh_settings_config(&paths).unwrap();
+    let timiai = config
+        .providers
+        .iter()
+        .find(|route| route.id == TIMIAI_PROVIDER_ID)
+        .expect("timiai route present");
+    assert_eq!(timiai.api, "openai-completions");
+    // No DeepSeek BYOK key configured: no web-search credential reference.
+    assert_eq!(config.web_search_api_key_env, None);
+    assert!(!config.deepseek_byok_configured);
+}
+
+#[test]
 fn build_dsh_settings_config_default_model_follows_selected_provider() {
     let dir = tempdir().unwrap();
     let paths = AppPaths::from_root(dir.path().join(".kodex"));
@@ -2907,8 +3007,13 @@ fn build_dsh_settings_config_default_model_follows_selected_provider() {
         "deepseek-secret",
     )
     .unwrap();
-    save_agent_provider_secret(&paths, AgentProviderFamily::Codex, KIMI_PROVIDER_ID, "kimi-secret")
-        .unwrap();
+    save_agent_provider_secret(
+        &paths,
+        AgentProviderFamily::Codex,
+        KIMI_PROVIDER_ID,
+        "kimi-secret",
+    )
+    .unwrap();
     select_codex_acp_provider(&paths, DEEPSEEK_PROVIDER_ID).unwrap();
 
     let config = build_dsh_settings_config(&paths).unwrap();

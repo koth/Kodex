@@ -21,10 +21,10 @@ pub(crate) fn build_initial_ui(workspace_root: &Path) -> anyhow::Result<UiSnapsh
             "聊天".to_string()
         } else {
             workspace_root
-            .file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or("工作区")
-            .to_string()
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("工作区")
+                .to_string()
         },
         root: workspace_root.to_path_buf(),
         location: WorkspaceLocation::Local,

@@ -126,6 +126,32 @@ pub(crate) fn run_session(
     permission_broker: PermissionBroker,
     shutdown_signal: ShutdownSignal,
 ) -> anyhow::Result<()> {
+    let log_config = config.clone();
+
+    // The DeepSeek Harness backend drives its own multi-thread tokio runtime
+    // and uses `host.runtime().block_on(...)` for control calls. Running it
+    // inside an outer `block_on` would nest runtimes and panic with
+    // "Cannot start a runtime from within a runtime", wedging the worker
+    // thread so `session_config` never hydrates. Dispatch it directly on the
+    // worker thread instead of entering an outer runtime.
+    if config.harness_endpoint.is_some()
+        && let Some(backend) = harness_backend()
+    {
+        let result = backend.run_session(
+            config,
+            tx_events,
+            rx_commands,
+            permission_broker,
+            shutdown_signal,
+        );
+        let payload = match &result {
+            Ok(()) => json!({ "status": "ok" }),
+            Err(error) => json!({ "status": "error", "error": error.to_string() }),
+        };
+        let _ = append_runtime_event_log(&log_config, "runtime/session_result", &payload);
+        return result;
+    }
+
     let runtime = match tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -133,7 +159,7 @@ pub(crate) fn run_session(
         Ok(runtime) => runtime,
         Err(err) => {
             let _ = append_runtime_event_log(
-                &config,
+                &log_config,
                 "runtime/session_result",
                 &json!({
                     "status": "error",
@@ -144,22 +170,7 @@ pub(crate) fn run_session(
         }
     };
 
-    let log_config = config.clone();
     let result: anyhow::Result<()> = runtime.block_on(async move {
-        if config.harness_endpoint.is_some()
-            && let Some(backend) = harness_backend()
-        {
-            // DeepSeek Harness host RPC backend — no ACP subprocess.
-            // The bridge runs its own tokio runtime; run it on this thread.
-            return backend.run_session(
-                config,
-                tx_events,
-                rx_commands,
-                permission_broker,
-                shutdown_signal,
-            );
-        }
-
         let agent = if config.remote_ssh.is_some() {
             AgentTransport::RemoteSsh(
                 RemoteSshAgentProcess::from_config(&config)?

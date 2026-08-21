@@ -8,12 +8,63 @@
 //! bridge's reconnection, and can fail a `session.history` call to exercise
 //! per-session isolation.
 
+use futures::{SinkExt, StreamExt};
 use serde_json::Value;
 use std::net::SocketAddr;
+use std::pin::Pin;
 use std::sync::{Arc, Mutex};
+use std::task::{Context, Poll};
+use tokio::io::ReadBuf;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc;
+use tokio_tungstenite::tungstenite::Message;
+
+/// Wraps a `TcpStream` with a prefix of already-read bytes, so a WebSocket
+/// handshake can re-read the HTTP upgrade request that `handle_connection`
+/// already consumed from the socket.
+struct PrefixedStream {
+    prefix: Vec<u8>,
+    prefix_pos: usize,
+    inner: TcpStream,
+}
+
+impl tokio::io::AsyncRead for PrefixedStream {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        _cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        let this = unsafe { self.get_unchecked_mut() };
+        if this.prefix_pos < this.prefix.len() {
+            let remaining = &this.prefix[this.prefix_pos..];
+            let n = remaining.len().min(buf.remaining());
+            buf.put_slice(&remaining[..n]);
+            this.prefix_pos += n;
+            return Poll::Ready(Ok(()));
+        }
+        Pin::new(&mut this.inner).poll_read(_cx, buf)
+    }
+}
+
+impl tokio::io::AsyncWrite for PrefixedStream {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<std::io::Result<usize>> {
+        let this = unsafe { self.get_unchecked_mut() };
+        Pin::new(&mut this.inner).poll_write(cx, buf)
+    }
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        let this = unsafe { self.get_unchecked_mut() };
+        Pin::new(&mut this.inner).poll_flush(cx)
+    }
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        let this = unsafe { self.get_unchecked_mut() };
+        Pin::new(&mut this.inner).poll_shutdown(cx)
+    }
+}
 
 /// What the mux stream does when the test script ends.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -32,6 +83,10 @@ pub struct MuxScript {
     pub frames: Vec<Value>,
     /// What to do after `frames` are emitted.
     pub end: MuxEnd,
+    /// Wait for the client's mux subscribe message before emitting frames, so
+    /// a scripted server-request never races past the bridge's session
+    /// registration (which precedes the subscribe).
+    pub wait_for_subscribe: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -51,6 +106,8 @@ pub struct MockHarnessConfig {
 struct MockState {
     /// Methods received (POST /api/<method>) with their rpcId, in order.
     pub calls: Vec<(String, String)>,
+    /// `session.create` payloads received, in order.
+    pub creates: Vec<Value>,
     /// `respond` payloads received (approval/question answers).
     pub responds: Vec<Value>,
 }
@@ -109,6 +166,11 @@ impl MockHarness {
 
     pub fn calls(&self) -> Vec<(String, String)> {
         self.state.lock().unwrap().calls.clone()
+    }
+
+    /// Payloads of the `session.create` calls received, in order.
+    pub fn creates(&self) -> Vec<Value> {
+        self.state.lock().unwrap().creates.clone()
     }
 
     pub fn responds(&self) -> Vec<Value> {
@@ -185,7 +247,11 @@ async fn handle_connection(
         }
         buf.extend_from_slice(&tmp[..n]);
     }
-    let body = &buf[head_end..head_end + content_length];
+    let body = if buf.len() >= head_end + content_length {
+        buf[head_end..head_end + content_length].to_vec()
+    } else {
+        Vec::new()
+    };
 
     match (method.as_str(), path.as_str()) {
         ("GET", "/api/events.mux") => {
@@ -193,42 +259,40 @@ async fn handle_connection(
             let scripts = {
                 let mut guard = config.lock().unwrap();
                 // Take the next script; keep the remainder for reconnections.
-                let next = guard.mux.drain(..1).next();
-                if guard.mux.is_empty() {
-                    // No more scripts queued: replay the first one for the
-                    // steady state (idle keep-alive).
+                let next = if guard.mux.is_empty() {
+                    None
+                } else {
+                    guard.mux.drain(..1).next()
+                };
+                if next.is_none() {
+                    // No scripts configured or none remaining: use the
+                    // steady-state idle keep-alive.
                     guard.mux = scripts_for_hold();
                 }
-                next.unwrap_or(MuxScript {
-                    frames: Vec::new(),
-                    end: MuxEnd::Hold,
-                })
+                next.unwrap_or_else(|| scripts_for_hold().remove(0))
             };
-            serve_mux(stream, scripts, drop_tx).await;
+            serve_mux(stream, buf[..head_end].to_vec(), scripts, drop_tx).await;
         }
         ("GET", "/api/events.host") => {
-            // Host stream: keep-alive with no frames (idle comment).
-            let _ = stream
-                .write_all(b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\n\r\n: connected\n\n")
-                .await;
-            let _ = stream.flush().await;
-            // Hold open until the client drops us.
-            let mut tmp = [0u8; 4096];
-            loop {
-                if stream.read(&mut tmp).await.unwrap_or(0) == 0 {
-                    break;
-                }
+            // Host stream: WebSocket keep-alive with no frames (idle).
+            let prefixed = PrefixedStream {
+                prefix: buf[..head_end].to_vec(),
+                prefix_pos: 0,
+                inner: stream,
+            };
+            if let Ok(mut ws) = tokio_tungstenite::accept_async(prefixed).await {
+                while ws.next().await.is_some() {}
             }
         }
         ("POST", "/api/respond") => {
-            let parsed: Value = serde_json::from_slice(body).unwrap_or(Value::Null);
+            let parsed: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
             state.lock().unwrap().responds.push(parsed.clone());
             let receipt = serde_json::json!({ "accepted": true });
             let body = serde_json::to_vec(&receipt).unwrap();
             write_response(&mut stream, 200, "application/json", &body).await;
         }
         ("POST", path) => {
-            let parsed: Value = serde_json::from_slice(body).unwrap_or(Value::Null);
+            let parsed: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
             let rpc_id = parsed
                 .get("rpcId")
                 .and_then(Value::as_str)
@@ -245,6 +309,10 @@ async fn handle_connection(
                 .unwrap()
                 .calls
                 .push((method_name.clone(), rpc_id.clone()));
+            if method_name == "session.create" {
+                let payload = parsed.get("payload").cloned().unwrap_or(Value::Null);
+                state.lock().unwrap().creates.push(payload);
+            }
 
             let value = match method_name.as_str() {
                 "host.describe" => serde_json::json!({
@@ -283,7 +351,16 @@ async fn handle_connection(
                 "session.models" => serde_json::json!({
                     "current": { "provider": "deepseek", "model": "deepseek-v4-pro" },
                     "routable": true,
-                    "groups": [],
+                    "groups": [
+                        {
+                            "id": "deepseek",
+                            "name": "DeepSeek",
+                            "models": [
+                                { "id": "deepseek-v4-pro", "name": "DeepSeek V4 Pro" },
+                                { "id": "deepseek-v4-flash", "name": "DeepSeek V4 Flash" }
+                            ]
+                        }
+                    ],
                     "failures": [],
                 }),
                 "session.selectModel" => serde_json::json!({
@@ -299,39 +376,42 @@ async fn handle_connection(
             let body = serde_json::to_vec(&response).unwrap();
             write_response(&mut stream, 200, "application/json", &body).await;
         }
-        _ => {
+        ("GET", _) => {
             let _ = stream
                 .write_all(b"HTTP/1.1 404 Not Found\r\ncontent-length: 0\r\n\r\n")
+                .await;
+        }
+        _ => {
+            let _ = stream
+                .write_all(b"HTTP/1.1 400 Bad Request\r\ncontent-length: 0\r\n\r\n")
                 .await;
         }
     }
 }
 
-async fn serve_mux(mut stream: TcpStream, script: MuxScript, drop_tx: mpsc::Sender<()>) {
-    let _ = stream
-        .write_all(b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\n\r\n")
-        .await;
-    let _ = stream.flush().await;
+async fn serve_mux(stream: TcpStream, head: Vec<u8>, script: MuxScript, drop_tx: mpsc::Sender<()>) {
+    let prefixed = PrefixedStream {
+        prefix: head,
+        prefix_pos: 0,
+        inner: stream,
+    };
+    let mut ws = match tokio_tungstenite::accept_async(prefixed).await {
+        Ok(ws) => ws,
+        Err(_) => return,
+    };
     for frame in &script.frames {
         let payload = serde_json::to_string(frame).unwrap();
-        let _ = stream
-            .write_all(format!("data: {payload}\n\n").as_bytes())
-            .await;
-        let _ = stream.flush().await;
+        let _ = ws.send(Message::Text(payload.into())).await;
     }
     match script.end {
         MuxEnd::Hold => {
-            // Idle keep-alive until the client disconnects.
-            let mut tmp = [0u8; 4096];
-            loop {
-                if stream.read(&mut tmp).await.unwrap_or(0) == 0 {
-                    break;
-                }
-            }
+            // Idle keep-alive until the client disconnects. Drain incoming
+            // (client→host is a protocol violation; tungstenite closes on it).
+            while ws.next().await.is_some() {}
         }
         MuxEnd::Close => {
             let _ = drop_tx.send(()).await;
-            // Graceful close: end the stream.
+            let _ = ws.close(None).await;
         }
     }
 }
@@ -360,6 +440,7 @@ fn scripts_for_hold() -> Vec<MuxScript> {
     vec![MuxScript {
         frames: Vec::new(),
         end: MuxEnd::Hold,
+        wait_for_subscribe: true,
     }]
 }
 
@@ -396,6 +477,7 @@ pub fn scripts_with(frames: Vec<Value>) -> Vec<MuxScript> {
     vec![MuxScript {
         frames,
         end: MuxEnd::Hold,
+        wait_for_subscribe: true,
     }]
 }
 

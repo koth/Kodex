@@ -48,7 +48,12 @@ pub struct DshModelEntry {
     pub id: String,
     pub name: String,
     pub context_window: i64,
-    pub max_tokens: i64,
+    // Deliberately no `maxTokens`: dsh's llm-pi-ai treats a configured model
+    // `maxTokens` as a per-request *default* (adapterDefaults.maxTokens), on
+    // top of the model capability pi-ai already passes, and the upstream
+    // (litellm) then fails with a duplicate `max_tokens` argument. The
+    // capability value is a model attribute, not a per-route deployment cap,
+    // so it stays out of the generated settings entirely.
 }
 
 /// The default model selection for new dsh sessions.
@@ -58,12 +63,32 @@ pub struct DshDefaultModel {
     pub model: String,
 }
 
-/// The full settings document Kodex writes/merges. Both sections are owned by
-/// Kodex and replaced wholesale on each bring-up.
+/// The full settings document Kodex writes/merges. The `llm-pi-ai` and
+/// `agent-default-model` sections are owned by Kodex and replaced wholesale on
+/// each bring-up; `web-search-deepseek` is written when
+/// `web_search_api_key_env` is set and removed when it is `None`, so a revoked
+/// key never leaves a dangling credential reference behind.
 #[derive(Debug, Clone)]
 pub struct DshSettingsConfig {
     pub providers: Vec<DshProviderRoute>,
     pub default_model: DshDefaultModel,
+    /// Credential reference for dsh's `web-search-deepseek` plugin. Set when
+    /// the DeepSeek BYOK provider is configured: Kodex injects the secret into
+    /// the spawned process under `key_env_for_provider("deepseek")`, and this
+    /// section points the search plugin at that same env var instead of its
+    /// `DEEPSEEK_API_KEY` default.
+    pub web_search_api_key_env: Option<String>,
+    /// Whether the DeepSeek BYOK provider is configured. Drives the
+    /// `llm-deepseek` section: with a key, dsh's native `deepseek-official`
+    /// adapter must advertise an empty model catalog (`models: []`), or it
+    /// resolves the same injected key and lists a second DeepSeek group next
+    /// to the `llm-pi-ai` route (the duplicate picker entries go straight to
+    /// api.deepseek.com, bypassing Kodex's codex_api_proxy). Catalog
+    /// membership is advisory in dsh, so an empty list hides the group without
+    /// breaking sessions already routed to `deepseek-official`. Without a key
+    /// the section is removed entirely, restoring the adapter's own
+    /// `DEEPSEEK_API_KEY` behavior.
+    pub deepseek_byok_configured: bool,
 }
 
 /// Read the existing `settings.yaml` (if any) as a JSON value, so we can
@@ -98,8 +123,10 @@ fn build_llm_section(providers: &[DshProviderRoute]) -> Value {
             let mut m = serde_json::Map::new();
             m.insert("id".into(), Value::String(model.id.clone()));
             m.insert("name".into(), Value::String(model.name.clone()));
-            m.insert("contextWindow".into(), Value::Number(model.context_window.into()));
-            m.insert("maxTokens".into(), Value::Number(model.max_tokens.into()));
+            m.insert(
+                "contextWindow".into(),
+                Value::Number(model.context_window.into()),
+            );
             models.push(Value::Object(m));
         }
         entry.insert("models".into(), Value::Array(models));
@@ -115,6 +142,22 @@ fn build_default_model_section(default: &DshDefaultModel) -> Value {
     let mut section = serde_json::Map::new();
     section.insert("provider".into(), Value::String(default.provider.clone()));
     section.insert("model".into(), Value::String(default.model.clone()));
+    Value::Object(section)
+}
+
+/// Build the `web-search-deepseek` section value.
+fn build_web_search_section(api_key_env: &str) -> Value {
+    let mut section = serde_json::Map::new();
+    section.insert("apiKeyEnv".into(), Value::String(api_key_env.to_string()));
+    Value::Object(section)
+}
+
+/// Build the `llm-deepseek` section value that empties the native
+/// `deepseek-official` adapter's model catalog (Kodex's `llm-pi-ai` deepseek
+/// route replaces it in the picker).
+fn build_llm_deepseek_disabled_section() -> Value {
+    let mut section = serde_json::Map::new();
+    section.insert("models".into(), Value::Array(Vec::new()));
     Value::Object(section)
 }
 
@@ -142,6 +185,22 @@ pub fn write_settings(path: &Path, config: &DshSettingsConfig) -> anyhow::Result
         "agent-default-model".into(),
         build_default_model_section(&config.default_model),
     );
+    match &config.web_search_api_key_env {
+        Some(api_key_env) => {
+            obj.insert(
+                "web-search-deepseek".into(),
+                build_web_search_section(api_key_env),
+            );
+        }
+        None => {
+            obj.remove("web-search-deepseek");
+        }
+    }
+    if config.deepseek_byok_configured {
+        obj.insert("llm-deepseek".into(), build_llm_deepseek_disabled_section());
+    } else {
+        obj.remove("llm-deepseek");
+    }
 
     let yaml = serde_yaml::to_string(&doc).context("failed to serialize dsh settings.yaml")?;
     std::fs::write(path, yaml)
@@ -171,7 +230,6 @@ mod tests {
                 id: "deepseek-v4-pro".into(),
                 name: "DeepSeek V4 Pro".into(),
                 context_window: 1000000,
-                max_tokens: 50000,
             }],
         }
     }
@@ -192,6 +250,8 @@ mod tests {
                 provider: "deepseek".into(),
                 model: "deepseek-v4-pro".into(),
             },
+            web_search_api_key_env: None,
+            deepseek_byok_configured: false,
         };
         write_settings(&path, &cfg).unwrap();
         let text = std::fs::read_to_string(&path).unwrap();
@@ -200,6 +260,139 @@ mod tests {
         assert!(text.contains("baseURL: https://api.deepseek.com/v1"));
         assert!(text.contains("agent-default-model:"));
         assert!(text.contains("provider: deepseek"));
+        assert!(!text.contains("web-search-deepseek:"));
+        assert!(!text.contains("llm-deepseek:"));
+    }
+
+    #[test]
+    fn write_disables_native_deepseek_catalog_when_byok_configured() {
+        // With a DeepSeek BYOK key injected, dsh's native `deepseek-official`
+        // adapter would resolve the same key and list a second DeepSeek group
+        // next to the llm-pi-ai route. Empting its advisory catalog hides the
+        // duplicate without breaking sessions already routed to it.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.yaml");
+        let cfg = DshSettingsConfig {
+            providers: vec![sample_route()],
+            default_model: DshDefaultModel {
+                provider: "deepseek".into(),
+                model: "deepseek-v4-pro".into(),
+            },
+            web_search_api_key_env: Some("KODEX_DSH_DEEPSEEK_KEY".into()),
+            deepseek_byok_configured: true,
+        };
+        write_settings(&path, &cfg).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("llm-deepseek:"));
+        assert!(text.contains("models: []"));
+    }
+
+    #[test]
+    fn write_removes_llm_deepseek_section_when_byok_not_configured() {
+        // Without a Kodex DeepSeek key, no override must linger: the native
+        // adapter falls back to its own DEEPSEEK_API_KEY behavior.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.yaml");
+        let cfg = DshSettingsConfig {
+            providers: vec![sample_route()],
+            default_model: DshDefaultModel {
+                provider: "deepseek".into(),
+                model: "deepseek-v4-pro".into(),
+            },
+            web_search_api_key_env: None,
+            deepseek_byok_configured: true,
+        };
+        write_settings(&path, &cfg).unwrap();
+        assert!(
+            std::fs::read_to_string(&path)
+                .unwrap()
+                .contains("llm-deepseek:")
+        );
+        let cfg2 = DshSettingsConfig {
+            deepseek_byok_configured: false,
+            ..cfg
+        };
+        write_settings(&path, &cfg2).unwrap();
+        assert!(
+            !std::fs::read_to_string(&path)
+                .unwrap()
+                .contains("llm-deepseek:")
+        );
+    }
+
+    #[test]
+    fn write_web_search_section_points_at_injected_key_env() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.yaml");
+        let cfg = DshSettingsConfig {
+            providers: vec![sample_route()],
+            default_model: DshDefaultModel {
+                provider: "deepseek".into(),
+                model: "deepseek-v4-pro".into(),
+            },
+            web_search_api_key_env: Some("KODEX_DSH_DEEPSEEK_KEY".into()),
+            deepseek_byok_configured: true,
+        };
+        write_settings(&path, &cfg).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("web-search-deepseek:"));
+        assert!(text.contains("apiKeyEnv: KODEX_DSH_DEEPSEEK_KEY"));
+    }
+
+    #[test]
+    fn write_removes_web_search_section_when_key_env_is_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.yaml");
+        let cfg = DshSettingsConfig {
+            providers: vec![sample_route()],
+            default_model: DshDefaultModel {
+                provider: "deepseek".into(),
+                model: "deepseek-v4-pro".into(),
+            },
+            web_search_api_key_env: Some("KODEX_DSH_DEEPSEEK_KEY".into()),
+            deepseek_byok_configured: true,
+        };
+        write_settings(&path, &cfg).unwrap();
+        assert!(
+            std::fs::read_to_string(&path)
+                .unwrap()
+                .contains("web-search-deepseek:")
+        );
+        // Key revoked: the section must disappear rather than leave a dangling
+        // reference to an env var nothing injects anymore.
+        let cfg2 = DshSettingsConfig {
+            web_search_api_key_env: None,
+            ..cfg
+        };
+        write_settings(&path, &cfg2).unwrap();
+        assert!(
+            !std::fs::read_to_string(&path)
+                .unwrap()
+                .contains("web-search-deepseek:")
+        );
+    }
+
+    #[test]
+    fn model_entries_omit_max_tokens() {
+        // Regression: a configured model `maxTokens` becomes dsh's per-request
+        // default (adapterDefaults.maxTokens) on top of the model capability
+        // pi-ai already sends, and the upstream litellm rejects the duplicate
+        // `max_tokens` argument. Capability stays out of generated settings.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.yaml");
+        let cfg = DshSettingsConfig {
+            providers: vec![sample_route()],
+            default_model: DshDefaultModel {
+                provider: "deepseek".into(),
+                model: "deepseek-v4-pro".into(),
+            },
+            web_search_api_key_env: None,
+            deepseek_byok_configured: false,
+        };
+        write_settings(&path, &cfg).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(!text.contains("maxTokens"));
+        assert!(text.contains("contextWindow: 1000000"));
     }
 
     #[test]
@@ -217,6 +410,8 @@ mod tests {
                 provider: "deepseek".into(),
                 model: "deepseek-v4-pro".into(),
             },
+            web_search_api_key_env: None,
+            deepseek_byok_configured: false,
         };
         write_settings(&path, &cfg).unwrap();
         let text = std::fs::read_to_string(&path).unwrap();
@@ -236,6 +431,8 @@ mod tests {
                 provider: "deepseek".into(),
                 model: "deepseek-v4-pro".into(),
             },
+            web_search_api_key_env: None,
+            deepseek_byok_configured: false,
         };
         write_settings(&path, &cfg).unwrap();
         // Second run with a different provider set.
@@ -252,6 +449,8 @@ mod tests {
                 provider: "kimi".into(),
                 model: "kimi-k3".into(),
             },
+            web_search_api_key_env: None,
+            deepseek_byok_configured: false,
         };
         write_settings(&path, &cfg2).unwrap();
         let text = std::fs::read_to_string(&path).unwrap();

@@ -28,7 +28,10 @@ pub(super) async fn emit_turn_finished(
         &json!({ "stopReason": stop_reason.clone() }),
     )?;
 
-    let _ = tx_events.send(ClientEvent::TurnFinished { stop_reason });
+    let _ = tx_events.send(ClientEvent::TurnFinished {
+        stop_reason,
+        detail: None,
+    });
     if supports_session_list {
         sync_session_title_from_list_after_turn(config, tx_events, connection, session_id).await;
     }

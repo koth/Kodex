@@ -9,8 +9,8 @@ mod image_capability;
 mod image_mcp;
 mod paths;
 mod reducer;
-mod remote_control;
 pub mod remote_bootstrap;
+mod remote_control;
 pub mod remote_profiles;
 pub mod remote_ssh;
 mod remote_workspace;
@@ -21,12 +21,12 @@ pub mod web_tools_mcp;
 mod workspace_files;
 
 pub use application::{
-    Application, AppUpdate, HistoryPage, UiPatchCursor, UiSnapshotUpdate,
+    AppUpdate, Application, HistoryPage, UiPatchCursor, UiSnapshotUpdate,
     normalize_path_for_storage, normalize_tracked_path,
 };
 pub use dsh_bringup::{dsh_bringup, init_dsh_bringup};
-pub use remote_control::{AppCoreRemoteControl, RemoteControl};
 pub use paths::AppPaths;
+pub use remote_control::{AppCoreRemoteControl, RemoteControl};
 
 pub fn list_remote_workspace_dir(
     config: &acp_core::RemoteSshSessionConfig,
@@ -517,6 +517,7 @@ mod tests {
             &mut ui,
             ClientEvent::TurnFinished {
                 stop_reason: "refusal".into(),
+                detail: None,
             },
         );
 
@@ -587,6 +588,7 @@ mod tests {
             &mut ui,
             ClientEvent::TurnFinished {
                 stop_reason: "end_turn".into(),
+                detail: None,
             },
         );
         assert!(ui.agent_plan.is_empty());
@@ -1817,12 +1819,14 @@ async function clickCanvasNewMenuItem(page: Page, itemText: string) {
             .unwrap();
         assert_eq!(absolute.path, "src/main.rs");
 
-        assert!(app
-            .session_turn_file_diff(&message_id.to_string(), "src/missing.rs")
-            .is_err());
-        assert!(app
-            .session_turn_file_diff(&uuid::Uuid::new_v4().to_string(), "src/main.rs")
-            .is_err());
+        assert!(
+            app.session_turn_file_diff(&message_id.to_string(), "src/missing.rs")
+                .is_err()
+        );
+        assert!(
+            app.session_turn_file_diff(&uuid::Uuid::new_v4().to_string(), "src/main.rs")
+                .is_err()
+        );
     }
 
     fn test_app(dir: &tempfile::TempDir) -> Application {

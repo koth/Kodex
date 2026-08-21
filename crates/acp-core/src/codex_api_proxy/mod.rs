@@ -956,6 +956,15 @@ async fn proxy_codex_api_request(
     if path.ends_with("/messages") {
         return proxy_anthropic_messages_request(request, config, explicit_provider, acp_session_id.as_deref()).await;
     }
+    if path.ends_with("/chat/completions") {
+        return proxy_chat_completions_passthrough_request(
+            request,
+            config,
+            explicit_provider,
+            acp_session_id.as_deref(),
+        )
+        .await;
+    }
     if path.ends_with("/responses/compact") {
         return proxy_native_codex_responses_compact_request(request, config, explicit_provider)
             .await;
@@ -1302,6 +1311,168 @@ async fn proxy_anthropic_messages_codex_responses_request(
     }
     Ok(response)
 }
+/// Transparently forward a native `chat/completions` request (payload already
+/// in chat-completions shape, e.g. from the dsh harness `openai-completions`
+/// adapter) to the configured upstream, normalizing parameter names so
+/// gateways that reject OpenAI-style fields still accept the request.
+///
+/// Unlike the `/responses` entry, the incoming body is already a chat-completions
+/// payload, so no Responses→chat conversion runs. The one normalization that
+/// matters here is `max_completion_tokens` → `max_tokens`: some upstreams
+/// (zai/litellm fronting glm models) reject `max_completion_tokens` as an
+/// unsupported parameter while accepting `max_tokens`, so renaming keeps the
+/// output cap and avoids an upstream 502.
+async fn proxy_chat_completions_passthrough_request(
+    request: Request<Incoming>,
+    config: Arc<RwLock<CodexApiProxyConfig>>,
+    explicit_provider: Option<String>,
+    acp_session_id: Option<&str>,
+) -> anyhow::Result<Response<ProxyBody>> {
+    let body = request.into_body().collect().await?.to_bytes();
+    let config_arc = config.clone();
+    let (config, project_name) = {
+        let guard = config.read().map(|guard| guard.clone()).unwrap_or_else(|_| {
+            CodexApiProxyConfig {
+                provider: "timiai".to_string(),
+                api_key: String::new(),
+                api_keys: BTreeMap::new(),
+                session_ids: BTreeMap::new(),
+                model_providers: BTreeMap::new(),
+                provider_configs: BTreeMap::new(),
+                model_reasoning_efforts: BTreeMap::new(),
+                project_name: None,
+            }
+        });
+        (guard.clone(), guard.project_name.clone())
+    };
+    let mut payload: Value = serde_json::from_slice(&body)?;
+    let requested_stream = payload
+        .get("stream")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let requested_model = payload
+        .get("model")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    let provider_model = decode_provider_model_id(&requested_model);
+    let routing_model = provider_model
+        .as_ref()
+        .map(|model| model.model.as_str())
+        .unwrap_or(requested_model.as_str());
+    // Resolve the upstream provider: an explicit provider in the path wins,
+    // then the model→provider map (covers dsh custom providers), then a
+    // heuristic. The harness sends a bare model slug, so the map is the
+    // primary routing key here.
+    let provider = explicit_provider
+        .clone()
+        .or_else(|| provider_model.as_ref().map(|model| model.provider.clone()))
+        .or_else(|| mapped_proxy_provider_for_model(routing_model, &config.model_providers))
+        .or_else(|| mapped_proxy_provider_for_model(&requested_model, &config.model_providers))
+        .unwrap_or_else(|| {
+            proxy_provider_for_model(routing_model, &config.provider, &config.model_providers)
+        });
+    let payload = provider_model
+        .as_ref()
+        .map(|model| replace_payload_model(payload.clone(), &model.model))
+        .unwrap_or(payload);
+    let payload = normalize_max_tokens_for_chat_payload(payload, &provider);
+    log_chat_payload_summary("chat_completions_passthrough", &payload);
+    let api_key = api_key_for_proxy_provider(&config, &provider);
+    if api_key.trim().is_empty() {
+        return Ok(response_with_status(
+            StatusCode::UNAUTHORIZED,
+            json!({ "error": { "message": format!("API key is not configured for {provider}") } })
+                .to_string(),
+            "application/json",
+        ));
+    }
+    let session_id = resolved_proxy_session_id(&config_arc, &provider, &acp_session_id.map(|s| s.to_string()));
+    // Upstream URL: a provider configured with a base_url (dsh custom routes)
+    // uses it directly; built-in providers fall back to the hardcoded table.
+    let upstream_url = config
+        .provider_configs
+        .get(&provider)
+        .map(|c| c.base_url.clone())
+        .unwrap_or_else(|| upstream_chat_completions_url(&provider).to_string());
+    // Forward the native chat/completions request verbatim — no Responses
+    // conversion — so the dsh harness's openai-completions stream parser
+    // receives the upstream's chat SSE chunks (with their own finish_reason)
+    // instead of a Responses-shaped stream it cannot parse.
+    proxy_chat_completions_passthrough_forward(
+        payload,
+        &api_key,
+        &provider,
+        &upstream_url,
+        &session_id,
+        project_name.as_deref(),
+    )
+    .await
+}
+
+/// Send a native chat/completions payload upstream and stream the response
+/// back verbatim (SSE passthrough for streaming, raw body otherwise). Unlike
+/// [`proxy_chat_completions_codex_responses_request`] this never converts the
+/// chat response to the OpenAI Responses wire shape — the harness speaks
+/// chat/completions natively and must receive exactly what the upstream sent.
+async fn proxy_chat_completions_passthrough_forward(
+    chat_payload: Value,
+    api_key: &str,
+    provider: &str,
+    upstream_url: &str,
+    session_id: &str,
+    project_name: Option<&str>,
+) -> anyhow::Result<Response<ProxyBody>> {
+    let client = reqwest::Client::new();
+    let request = client
+        .post(upstream_url)
+        .header(CONTENT_TYPE, "application/json");
+    let request = if normalize_proxy_provider(provider) == "timiai" {
+        with_timiai_headers(request, api_key, session_id)
+    } else {
+        let req = request.bearer_auth(api_key);
+        let req = if !session_id.is_empty() {
+            req.header("X-Session-Id", session_id)
+        } else {
+            req
+        };
+        if let Some(name) = project_name {
+            req.header("X-Project-Name", name)
+        } else {
+            req
+        }
+    };
+    let request_body = serde_json::to_vec(&chat_payload)?;
+    let upstream = match send_upstream_with_retry(Some(session_id), provider, request.body(request_body)).await {
+        Ok(upstream) => upstream,
+        Err(error) => {
+            log_chat_completions_upstream_error(&provider, upstream_url, &chat_payload, &error);
+            return Err(error.into());
+        }
+    };
+    let status = StatusCode::from_u16(upstream.status().as_u16())?;
+    let content_type = upstream
+        .headers()
+        .get(CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("application/json")
+        .to_string();
+    log_chat_completions_upstream_response(&provider, upstream_url, &chat_payload, status, &content_type);
+    if is_event_stream(&content_type) {
+        return Ok(streaming_passthrough_response(upstream, status, &content_type));
+    }
+    let body = upstream.bytes().await?;
+    if !status.is_success() {
+        log_suspicious_upstream_response(status, &content_type, body.as_ref());
+    }
+    let mut response = Response::new(full_body(Bytes::from(body)));
+    *response.status_mut() = status;
+    if let Ok(value) = content_type.parse() {
+        response.headers_mut().insert(CONTENT_TYPE, value);
+    }
+    Ok(response)
+}
+
 async fn proxy_chat_completions_codex_responses_request(
     chat_payload: Value,
     api_key: &str,
@@ -2304,6 +2475,31 @@ fn responses_reasoning_effort(payload: &Value) -> Option<&str> {
         .or_else(|| payload.get("reasoning_effort").and_then(Value::as_str))
         .map(str::trim)
         .filter(|effort| !effort.is_empty() && *effort != "none")
+}
+
+/// Rename `max_completion_tokens` to `max_tokens` on a chat-completions
+/// payload for upstreams that reject the OpenAI-style name. Some gateways
+/// (zai/litellm fronting glm models) reject `max_completion_tokens` as an
+/// unsupported parameter while accepting `max_tokens`, so this renames the
+/// field in place to keep the output cap and avoid an upstream 502. A
+/// pre-existing `max_tokens` wins if both are present.
+fn normalize_max_tokens_for_chat_payload(mut payload: Value, _provider: &str) -> Value {
+    let Some(object) = payload.as_object_mut() else {
+        return payload;
+    };
+    if let Some(max_completion) = object.remove("max_completion_tokens") {
+        match object.get("max_tokens") {
+            None => {
+                object.insert("max_tokens".to_string(), max_completion);
+            }
+            Some(_) => {
+                // `max_tokens` already present; drop the redundant
+                // `max_completion_tokens` (already removed above) to avoid
+                // sending a duplicate.
+            }
+        }
+    }
+    payload
 }
 
 fn normalize_chat_payload_for_provider(

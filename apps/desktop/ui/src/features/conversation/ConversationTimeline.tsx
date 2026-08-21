@@ -129,6 +129,7 @@ interface TimelineCollapseGroup {
   key: string;
   items: TimelineCollapseCandidate[];
   itemCount: number;
+  toolCount: number;
   durationLabel: string | null;
   /** User message id that starts the turn; anchors the turn-nav ruler even
    *  when the turn is collapsed (its user row is not rendered). */
@@ -197,7 +198,9 @@ function TimelineCollapseSummary({
     <>
       <span className="timeline-turn-summary-main">
         <span className="timeline-collapse-label">
-          已处理{group.durationLabel ? ` ${group.durationLabel}` : ""}
+          已处理
+          {group.toolCount > 0 ? ` ${group.toolCount} 次工具调用` : ""}
+          {group.durationLabel ? ` · ${group.durationLabel}` : ""}
         </span>
         {collapsible && (
           <span className="timeline-collapse-chevron" aria-hidden="true">
@@ -757,10 +760,12 @@ function buildTimelineCollapseState({
     }
 
     const key = `${turnStartMessage?.id ?? "turn"}:${finalAssistant.message.id}`;
+    const toolCount = itemsToCollapse.filter((candidate) => candidate.kind === "tool").length;
     groupsBySummaryIndex.set(finalAssistant.index, {
       key,
       items: itemsToCollapse,
       itemCount: itemsToCollapse.length,
+      toolCount,
       durationLabel: elapsedLabelForTurn(turnStartMessage, finalAssistant.message, itemsToCollapse),
       userMessageId: turnStartMessage?.id ?? null,
     });

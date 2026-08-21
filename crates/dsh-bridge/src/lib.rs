@@ -26,23 +26,21 @@ mod session;
 mod settings_gen;
 mod transport;
 
+pub use host::SessionSink;
 pub use host::{HarnessHost, HarnessHostRegistry, HarnessHostRegistryHandle};
-pub use process::{DshChild, SpawnDshWebConfig, spawn_dsh_web};
+pub use process::{DshChild, SpawnDshWebConfig, kill_child, spawn_dsh_web};
 pub use rpc_types::{
     ClientResponse, PromptContentPart, PromptMode, SessionCreatePayload, SessionPromptPayload,
 };
-pub use transport::HttpClient;
-pub use host::SessionSink;
 pub use session::run_harness_session;
 pub use settings_gen::{
     DshDefaultModel, DshModelEntry, DshProviderRoute, DshSettingsConfig, key_env_for_provider,
     write_settings,
 };
+pub use transport::HttpClient;
 
 use acp_core::runtime::HarnessBackend;
-use acp_core::{
-    ClientEvent, PermissionBroker, RuntimeCommand, SessionConfig, ShutdownSignal,
-};
+use acp_core::{ClientEvent, PermissionBroker, RuntimeCommand, SessionConfig, ShutdownSignal};
 use std::sync::Arc;
 
 /// Bridge backend: implements [`HarnessBackend`] for `acp-core`'s dispatch.

@@ -862,7 +862,7 @@ fn cancel_active_prompt_finishes_locally_when_agent_never_responds() {
     assert!(
         events.iter().any(|event| matches!(
             event,
-            ClientEvent::TurnFinished { stop_reason } if stop_reason == "cancelled"
+            ClientEvent::TurnFinished { stop_reason, .. } if stop_reason == "cancelled"
         )),
         "events: {events:#?}",
     );
@@ -893,7 +893,7 @@ fn prompt_completion_error_finishes_turn_instead_of_hanging() {
     assert!(
         events.iter().any(|event| matches!(
             event,
-            ClientEvent::TurnFinished { stop_reason } if stop_reason == "refusal"
+            ClientEvent::TurnFinished { stop_reason, .. } if stop_reason == "refusal"
         )),
         "expected TurnFinished with refusal stop_reason; events: {events:#?}",
     );
@@ -917,7 +917,7 @@ fn late_prompt_response_after_cancel_does_not_disconnect_session() {
     assert!(
         events.iter().any(|event| matches!(
             event,
-            ClientEvent::TurnFinished { stop_reason } if stop_reason == "cancelled"
+            ClientEvent::TurnFinished { stop_reason, .. } if stop_reason == "cancelled"
         )),
         "events: {events:#?}",
     );

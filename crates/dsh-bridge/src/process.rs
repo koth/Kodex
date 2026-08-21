@@ -21,33 +21,79 @@ use tokio::process::{Child, Command};
 
 /// Maximum time to wait for the `dsh web` readiness line before giving up.
 const READINESS_TIMEOUT: Duration = Duration::from_secs(60);
+/// Windows `CREATE_NO_WINDOW` — spawn without a visible console window.
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x08000000;
 
 /// A Kodex-spawned `dsh web` child process handle, owned by a `HarnessHost`.
-#[derive(Debug)]
 pub struct DshChild {
     inner: Mutex<Option<Child>>,
+    /// Windows job object that kills the whole process tree (dsh web + the
+    /// node process behind the `dsh` shim) when the job handle closes. Kept
+    /// alive for the child's lifetime so closing Kodex reaps everything.
+    #[cfg(windows)]
+    kill_on_drop_job: Option<WindowsKillOnDropJob>,
+}
+
+impl std::fmt::Debug for DshChild {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DshChild").finish_non_exhaustive()
+    }
 }
 
 impl DshChild {
     pub fn new(child: Child) -> Self {
         Self {
             inner: Mutex::new(Some(child)),
+            #[cfg(windows)]
+            kill_on_drop_job: None,
+        }
+    }
+
+    /// Attach the child to a Windows kill-on-close job object so the entire
+    /// process tree is terminated when the job handle is closed (or killed
+    /// explicitly). Best-effort: if job creation fails the child is still
+    /// killed directly by [`kill_child`].
+    #[cfg(windows)]
+    pub fn enable_kill_on_drop_job(&mut self) {
+        if let Ok(guard) = self.inner.lock()
+            && let Some(child) = guard.as_ref()
+            && let Ok(job) = WindowsKillOnDropJob::for_child(child)
+        {
+            self.kill_on_drop_job = Some(job);
         }
     }
 }
 
 /// Kill a spawned child: first close stdin (grace), then kill. Idempotent.
 pub fn kill_child(child: DshChild) -> std::io::Result<()> {
+    #[cfg(windows)]
+    let kill_on_drop_job = child.kill_on_drop_job;
     if let Ok(mut guard) = child.inner.lock() {
         if let Some(mut proc) = guard.take() {
             // Closing stdin signals a graceful shutdown to the Node process;
             // dsh's process-shutdown controller disposes the cordis tree.
             let _ = proc.stdin.take();
-            // Then kill if still alive.
+            // Then kill if still alive. Poll `try_wait` briefly instead of the
+            // blocking `wait()`: the latter requires a tokio runtime context
+            // and can hang when called from a plain thread. The kill-on-drop
+            // job (when enabled) reaps the whole tree on `DshChild` drop, so
+            // an unsettled direct child is not a leak.
             let _ = proc.start_kill();
-            let _ = proc.wait();
+            for _ in 0..40 {
+                match proc.try_wait() {
+                    Ok(Some(_)) => break,
+                    Ok(None) => std::thread::sleep(Duration::from_millis(25)),
+                    Err(_) => break,
+                }
+            }
         }
     }
+    // Close the job handle immediately after termination. With
+    // KILL_ON_JOB_CLOSE this also terminates any surviving descendants of a
+    // shim (e.g. the node process behind `volta run dsh`).
+    #[cfg(windows)]
+    drop(kill_on_drop_job);
     Ok(())
 }
 
@@ -85,8 +131,9 @@ impl Default for SpawnDshWebConfig {
 /// process PATH gaps); if it is not installed, returns a diagnostic error so
 /// the caller can prompt the user to `npm i -g @deepseek-ai/dsh`.
 pub async fn spawn_dsh_web(config: SpawnDshWebConfig) -> anyhow::Result<(String, DshChild)> {
-    let dsh = find_dsh_binary()
-        .ok_or_else(|| anyhow!("dsh CLI not found on PATH; install it with `npm i -g @deepseek-ai/dsh`"))?;
+    let dsh = find_dsh_binary().ok_or_else(|| {
+        anyhow!("dsh CLI not found on PATH; install it with `npm i -g @deepseek-ai/dsh`")
+    })?;
 
     // `--port 0` lets the OS pick a free loopback port; the readiness line
     // reports the actual bound port.
@@ -114,8 +161,8 @@ pub async fn spawn_dsh_web(config: SpawnDshWebConfig) -> anyhow::Result<(String,
     } else {
         Command::new(&dsh)
     };
-    // `--no-open`: this is a Kodex-managed headless process; the UI connects
-    // to the discovered endpoint itself, so dsh must not open a browser.
+    // `--no-open`: dsh web would otherwise open the default browser; Kodex
+    // connects to the discovered endpoint itself.
     spawn_with_args(cmd, &dsh, &["web", "--port", "0", "--no-open"], config).await
 }
 
@@ -127,6 +174,12 @@ async fn spawn_with_args(
     config: SpawnDshWebConfig,
 ) -> anyhow::Result<(String, DshChild)> {
     cmd.args(args);
+    #[cfg(windows)]
+    {
+        // Spawn without a visible console window (the `dsh` shim would
+        // otherwise pop a cmd/volta/node window).
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
     // `dsh` is an npm shim (`#!/usr/bin/env node`): a GUI-launched app does
     // not inherit the user's interactive shell PATH, so hand the child the
     // same augmented search path used to locate the binary. Without this,
@@ -160,7 +213,7 @@ async fn spawn_with_args(
     let stderr = child
         .stderr
         .take()
- .context("dsh web stderr was not piped")?;
+        .context("dsh web stderr was not piped")?;
 
     // Drain stderr to a background task so the child's pipe does not block.
     let stderr_task = tokio::spawn(async move {
@@ -182,28 +235,103 @@ async fn spawn_with_args(
     // non-readiness lines to the debug log.
     let endpoint = tokio::time::timeout(READINESS_TIMEOUT, read_readiness_line(stdout))
         .await
-        .map_err(|_| anyhow!("timed out waiting for dsh web readiness line ({}s)", READINESS_TIMEOUT.as_secs()))??;
+        .map_err(|_| {
+            anyhow!(
+                "timed out waiting for dsh web readiness line ({}s)",
+                READINESS_TIMEOUT.as_secs()
+            )
+        })??;
 
     // The stderr drain can keep running; it ends when the child exits.
     let _ = stderr_task;
 
-    Ok((endpoint, DshChild::new(child)))
+    let mut child = DshChild::new(child);
+    #[cfg(windows)]
+    child.enable_kill_on_drop_job();
+    Ok((endpoint, child))
+}
+
+/// Windows job object with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`: closing the
+/// handle kills every process assigned to it, including descendants spawned
+/// after assignment. Mirrors `acp-core`'s hidden-agent process handling so
+/// closing Kodex reaps the whole `dsh web` tree (shim + node), not just the
+/// direct child.
+#[cfg(windows)]
+struct WindowsKillOnDropJob(windows_sys::Win32::Foundation::HANDLE);
+
+#[cfg(windows)]
+impl std::fmt::Debug for WindowsKillOnDropJob {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WindowsKillOnDropJob")
+            .finish_non_exhaustive()
+    }
+}
+
+#[cfg(windows)]
+unsafe impl Send for WindowsKillOnDropJob {}
+
+#[cfg(windows)]
+impl WindowsKillOnDropJob {
+    fn for_child(child: &Child) -> anyhow::Result<Self> {
+        use std::mem::{size_of, zeroed};
+        use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
+        use windows_sys::Win32::System::JobObjects::{
+            AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+            JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation,
+            SetInformationJobObject,
+        };
+
+        unsafe {
+            let job = CreateJobObjectW(std::ptr::null(), std::ptr::null());
+            if job.is_null() {
+                anyhow::bail!("CreateJobObjectW failed");
+            }
+
+            let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = zeroed();
+            info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+            let set_ok = SetInformationJobObject(
+                job,
+                JobObjectExtendedLimitInformation,
+                &mut info as *mut _ as *mut _,
+                size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+            );
+            if set_ok == 0 {
+                CloseHandle(job);
+                anyhow::bail!("SetInformationJobObject failed");
+            }
+
+            let process = child.raw_handle().unwrap_or(std::ptr::null_mut()) as HANDLE;
+            let assign_ok = AssignProcessToJobObject(job, process);
+            if assign_ok == 0 {
+                CloseHandle(job);
+                anyhow::bail!("AssignProcessToJobObject failed");
+            }
+
+            Ok(Self(job))
+        }
+    }
+}
+
+#[cfg(windows)]
+impl Drop for WindowsKillOnDropJob {
+    fn drop(&mut self) {
+        use windows_sys::Win32::Foundation::CloseHandle;
+        unsafe {
+            let _ = CloseHandle(self.0);
+        }
+    }
 }
 
 /// Read dsh stdout lines until one matches the readiness pattern, returning
 /// the resolved `http://127.0.0.1:<port>` endpoint.
-async fn read_readiness_line(
-    stdout: tokio::process::ChildStdout,
-) -> anyhow::Result<String> {
+async fn read_readiness_line(stdout: tokio::process::ChildStdout) -> anyhow::Result<String> {
     let mut reader = BufReader::new(stdout);
     let mut line = String::new();
     loop {
         line.clear();
         let n = reader.read_line(&mut line).await?;
         if n == 0 {
-            return Err(anyhow!(
-                "dsh web exited before printing the readiness line"
-            ));
+            return Err(anyhow!("dsh web exited before printing the readiness line"));
         }
         let trimmed = line.trim_end();
         tracing::debug!(target: "dsh-bridge::spawn", "dsh stdout: {}", trimmed);
@@ -218,7 +346,7 @@ async fn read_readiness_line(
 /// keep the loopback one.
 fn parse_readiness_line(line: &str) -> Option<String> {
     let prefix = "dsh web:";
- let rest = line.strip_prefix(prefix)?.trim_start();
+    let rest = line.strip_prefix(prefix)?.trim_start();
     // Take the first whitespace-separated token (the URL). dsh may append
     // `(LAN: http://...)` after the local URL.
     let url = rest.split_whitespace().next()?;
@@ -318,13 +446,17 @@ fn search_paths() -> Vec<std::path::PathBuf> {
                 search_paths.push(p);
             }
             // Volta shims (dsh installed via `volta install`).
-            let volta = std::path::PathBuf::from(&local_app_data).join("Volta").join("bin");
+            let volta = std::path::PathBuf::from(&local_app_data)
+                .join("Volta")
+                .join("bin");
             if !search_paths.contains(&volta) {
                 search_paths.push(volta);
             }
         }
         if let Some(user_profile) = std::env::var_os("USERPROFILE") {
-            let volta = std::path::PathBuf::from(&user_profile).join(".volta").join("bin");
+            let volta = std::path::PathBuf::from(&user_profile)
+                .join(".volta")
+                .join("bin");
             if !search_paths.contains(&volta) {
                 search_paths.push(volta);
             }
@@ -332,12 +464,7 @@ fn search_paths() -> Vec<std::path::PathBuf> {
     }
     #[cfg(target_os = "macos")]
     {
-        for extra in [
-            "/opt/homebrew/bin",
-            "/usr/local/bin",
-            "/usr/bin",
-            "/bin",
-        ] {
+        for extra in ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin"] {
             let p = std::path::PathBuf::from(extra);
             if !search_paths.contains(&p) {
                 search_paths.push(p);

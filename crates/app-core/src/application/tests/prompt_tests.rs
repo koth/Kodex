@@ -58,14 +58,14 @@ fn retry_user_message_updates_failed_prompt_and_removes_failure_artifacts() {
         role: MessageRole::User,
         body: "old prompt".into(),
         created_at: current_timestamp(),
-    ..Default::default()
+        ..Default::default()
     });
     app.ui.messages.push(ChatMessage {
         id: system_id,
         role: MessageRole::System,
         body: "会话已断开：boom".into(),
         created_at: current_timestamp(),
-    ..Default::default()
+        ..Default::default()
     });
     app.ui.timeline.push(TimelineItem::Message(user_id));
     app.ui.timeline.push(TimelineItem::Thinking);
@@ -116,14 +116,14 @@ fn retry_user_message_is_rejected_after_assistant_started() {
         role: MessageRole::User,
         body: "old prompt".into(),
         created_at: current_timestamp(),
-    ..Default::default()
+        ..Default::default()
     });
     app.ui.messages.push(ChatMessage {
         id: assistant_id,
         role: MessageRole::Assistant,
         body: "already replying".into(),
         created_at: current_timestamp(),
-    ..Default::default()
+        ..Default::default()
     });
     app.ui.timeline.push(TimelineItem::Message(user_id));
     app.ui.timeline.push(TimelineItem::Message(assistant_id));
@@ -187,6 +187,7 @@ fn interleaved_assistant_messages_survive_session_restore() {
     });
     app.apply_event_with_dirty_tracking(&ClientEvent::TurnFinished {
         stop_reason: "end_turn".into(),
+        detail: None,
     });
 
     let (messages, tools, timeline) = app.store.load_session(&session_id).unwrap();
@@ -269,11 +270,12 @@ fn steer_prompt_queues_pending_message_and_preserves_turn_state() {
     );
     assert_eq!(app.ui.pending_steers.len(), 1);
     assert_eq!(app.ui.pending_steers[0].body, "second prompt");
-    assert!(app
-        .ui
-        .messages
-        .iter()
-        .any(|m| m.role == MessageRole::User && m.body == "second prompt"));
+    assert!(
+        app.ui
+            .messages
+            .iter()
+            .any(|m| m.role == MessageRole::User && m.body == "second prompt")
+    );
 
     let (messages, _tools, _timeline) = app
         .store
@@ -290,7 +292,10 @@ fn steer_prompt_queues_pending_message_and_preserves_turn_state() {
 
     // After the agent responds, the steer is flushed into the timeline and
     // the assistant response to the steer appears as a new message.
-    assert!(app.ui.pending_steers.is_empty(), "pending steers are flushed");
+    assert!(
+        app.ui.pending_steers.is_empty(),
+        "pending steers are flushed"
+    );
     assert!(app.ui.messages.iter().any(|message| {
         message.role == MessageRole::Assistant
             && message.body.contains("Steer accepted: second prompt")
@@ -384,7 +389,7 @@ fn pending_steer_flushes_before_assistant_response_chunk() {
         role: MessageRole::User,
         body: "改为处理登录".into(),
         created_at: current_timestamp(),
-    ..Default::default()
+        ..Default::default()
     });
     let steer_body = app.ui.pending_steers[0].body.clone();
     assert_eq!(app.ui.timeline.len(), 1);
@@ -399,7 +404,11 @@ fn pending_steer_flushes_before_assistant_response_chunk() {
         role: MessageRole::User,
         content: steer_body.clone(),
     });
-    assert_eq!(app.ui.timeline.len(), 1, "steer echo must not enter the timeline");
+    assert_eq!(
+        app.ui.timeline.len(),
+        1,
+        "steer echo must not enter the timeline"
+    );
     assert_eq!(
         app.ui
             .messages
@@ -417,7 +426,10 @@ fn pending_steer_flushes_before_assistant_response_chunk() {
         content: "好的，改为处理登录".into(),
     });
 
-    assert!(app.ui.pending_steers.is_empty(), "steer flushed on assistant chunk");
+    assert!(
+        app.ui.pending_steers.is_empty(),
+        "steer flushed on assistant chunk"
+    );
     let timeline_roles: Vec<MessageRole> = app
         .ui
         .timeline
@@ -435,7 +447,11 @@ fn pending_steer_flushes_before_assistant_response_chunk() {
     // Order: prior streaming assistant, flushed user steer, new assistant.
     assert_eq!(
         timeline_roles,
-        vec![MessageRole::Assistant, MessageRole::User, MessageRole::Assistant]
+        vec![
+            MessageRole::Assistant,
+            MessageRole::User,
+            MessageRole::Assistant
+        ]
     );
     // The prior streaming assistant was not split — it stays a single message.
     assert_eq!(
@@ -474,11 +490,12 @@ fn pending_steer_safety_net_flushes_on_turn_finished() {
         role: MessageRole::User,
         body: "等下再说".into(),
         created_at: current_timestamp(),
-    ..Default::default()
+        ..Default::default()
     });
 
     app.apply_event_with_dirty_tracking(&ClientEvent::TurnFinished {
         stop_reason: "end_turn".into(),
+        detail: None,
     });
 
     assert!(
@@ -486,7 +503,10 @@ fn pending_steer_safety_net_flushes_on_turn_finished() {
         "safety net flushes on TurnFinished"
     );
     assert!(
-        app.ui.timeline.iter().any(|item| matches!(item, TimelineItem::Message(id)
+        app.ui
+            .timeline
+            .iter()
+            .any(|item| matches!(item, TimelineItem::Message(id)
             if app.ui.messages.iter().any(|m| m.id == *id
                 && m.role == MessageRole::User
                 && m.body == "等下再说"))),
@@ -529,7 +549,7 @@ fn agent_title_matching_prompt_acknowledges_protocol_sync() {
         role: MessageRole::Assistant,
         body: "好的，我来修复登录流程。".into(),
         created_at: current_timestamp(),
-    ..Default::default()
+        ..Default::default()
     });
 
     if app.needs_title && !app.agent_title_received {
@@ -561,8 +581,7 @@ fn cancel_prompt_finishes_after_runtime_local_cancel() {
     let deadline = std::time::Instant::now() + Duration::from_secs(10);
     while std::time::Instant::now() < deadline
         && !app.ui.inspector_sections.iter().any(|section| {
-            section.title == "轮次异常"
-                && section.items.iter().any(|item| item == "cancelled")
+            section.title == "轮次异常" && section.items.iter().any(|item| item == "cancelled")
         })
     {
         app.poll_prompt_progress();
@@ -784,13 +803,13 @@ fn claude_session_title_matching_user_prompt_is_ignored() {
 
 #[test]
 fn abnormal_turn_notice_explains_refusal_without_blocking_followup() {
-    let notice = turn_finished_notice("refusal", Some("CodeBuddy"))
+    let notice = turn_finished_notice("refusal", None, Some("CodeBuddy"))
         .expect("refusal should produce a visible notice");
 
     assert!(notice.contains("CodeBuddy"));
     assert!(notice.contains("refusal"));
     assert!(notice.contains("429"));
-    assert!(turn_finished_notice("end_turn", Some("CodeBuddy")).is_none());
+    assert!(turn_finished_notice("end_turn", None, Some("CodeBuddy")).is_none());
 }
 
 #[test]

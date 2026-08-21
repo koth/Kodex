@@ -29,7 +29,7 @@ pub(crate) fn apply_event(ui: &mut UiSnapshot, event: ClientEvent) {
         ClientEvent::UsageUpdated { usage } => {
             apply_usage_update(ui, usage);
         }
-        ClientEvent::TurnFinished { stop_reason } => {
+        ClientEvent::TurnFinished { stop_reason, .. } => {
             finalize_open_tools(ui, &stop_reason);
             ui.thinking_status = None;
             ui.agent_plan.clear();
@@ -1476,6 +1476,18 @@ fn apply_usage_update(ui: &mut UiSnapshot, mut usage: UsageEvent) {
     } else if let Some(known_window) = current_session_context_window(ui) {
         ui.usage.context.window_tokens = Some(known_window.max(0) as u64);
     }
+    // Estimate `used_tokens` when the agent does not report context occupancy
+    // (notably the dsh harness, whose TokenUsage has no used/window fields):
+    // approximate the current context load as the cumulative input + output +
+    // cache tokens seen this session. This is a rough proxy — it over-counts
+    // when context compaction drops history — but lets the UI render a context
+    // bar for agents that never report `used_tokens`.
+    if ui.usage.context.used_tokens.is_none() {
+        let estimated = usage_token_breakdown_sum(&ui.usage.session_total);
+        if estimated > 0 {
+            ui.usage.context.used_tokens = Some(estimated);
+        }
+    }
     if usage.context.updated_at.is_some() {
         ui.usage.context.updated_at = usage.context.updated_at.clone();
     }
@@ -1611,7 +1623,10 @@ fn current_session_context_window(ui: &UiSnapshot) -> Option<i64> {
     // Prefer the choice id (request value), fall back to the session model
     // label; either may carry the `vendor/` prefix that the metadata tables
     // normalize away.
-    let candidates = [current_choice.map(|choice| choice.id.clone()), Some(ui.session.model.clone())];
+    let candidates = [
+        current_choice.map(|choice| choice.id.clone()),
+        Some(ui.session.model.clone()),
+    ];
     for model in candidates.into_iter().flatten() {
         let model = model.trim();
         if model.is_empty() {
@@ -1638,6 +1653,14 @@ fn has_usage_tokens(tokens: &UsageTokenBreakdown) -> bool {
         || tokens.cache_write_tokens.is_some()
         || tokens.reasoning_tokens.is_some()
         || tokens.total_tokens.is_some()
+}
+fn usage_token_breakdown_sum(tokens: &UsageTokenBreakdown) -> u64 {
+    let sum = |opt: Option<u64>| opt.unwrap_or(0);
+    sum(tokens.input_tokens)
+        .saturating_add(sum(tokens.output_tokens))
+        .saturating_add(sum(tokens.cache_read_tokens))
+        .saturating_add(sum(tokens.cache_write_tokens))
+        .saturating_add(sum(tokens.reasoning_tokens))
 }
 
 fn add_usage_tokens(target: &mut UsageTokenBreakdown, delta: &UsageTokenBreakdown) {
@@ -1859,7 +1882,10 @@ mod tests {
         // on a BYOK model must surface as the agent's 828k value, not the
         // 200k default the static table fallbacks produce for unknown
         // providers.
-        let mut ui = ui_with_model_choice("kodex-provider/byok/custom_cline/cline-pass/minimax-m3", Some("custom_cline"));
+        let mut ui = ui_with_model_choice(
+            "kodex-provider/byok/custom_cline/cline-pass/minimax-m3",
+            Some("custom_cline"),
+        );
         apply_event(
             &mut ui,
             ClientEvent::UsageUpdated {
@@ -2033,6 +2059,7 @@ mod tests {
             &mut ui,
             ClientEvent::TurnFinished {
                 stop_reason: "cancelled".into(),
+                detail: None,
             },
         );
 
@@ -2132,6 +2159,7 @@ mod tests {
             &mut ui,
             ClientEvent::TurnFinished {
                 stop_reason: "cancelled".into(),
+                detail: None,
             },
         );
 

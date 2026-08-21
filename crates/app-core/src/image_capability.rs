@@ -60,9 +60,8 @@ pub fn resolve_image_capabilities(
     let is_claude = is_claude_agent_acp_command(agent_command);
 
     let native_view = model_supports_image_input(&decoded_model);
-    let native_generate = is_codex
-        && decoded_provider.as_deref() == Some(DEFAULT_PROVIDER_ID)
-        && !is_claude;
+    let native_generate =
+        is_codex && decoded_provider.as_deref() == Some(DEFAULT_PROVIDER_ID) && !is_claude;
     // kodex-claude has no native generation path; BYOK codex providers go
     // through Responses→Completions conversion and never emit generation events.
     let native_edit = false;
@@ -112,10 +111,7 @@ pub fn model_supports_image_input(model: &str) -> bool {
 /// `kodex-provider/byok/timiai/gpt-5.4`; the trailing segment is the model
 /// and the segment before it (when prefixed with `byok/`) is the provider.
 /// Plain model names pass through unchanged.
-pub fn decode_byok_identifier(
-    model: &str,
-    provider: Option<&str>,
-) -> (String, Option<String>) {
+pub fn decode_byok_identifier(model: &str, provider: Option<&str>) -> (String, Option<String>) {
     let lower = model.to_ascii_lowercase();
     if let Some(rest) = lower.strip_prefix("kodex-provider/byok/") {
         // The slug is `kodex-provider/byok/{source_provider}/{model_slug}`,
@@ -204,8 +200,10 @@ mod tests {
         // decoder must keep the full model id and not truncate it to `zai-org`
         // (which would fall through to the unknown-model default and wrongly
         // appear image-capable).
-        let (model, provider) =
-            decode_byok_identifier("kodex-provider/byok/commandcode/zai-org/GLM-5.2", Some("byok"));
+        let (model, provider) = decode_byok_identifier(
+            "kodex-provider/byok/commandcode/zai-org/GLM-5.2",
+            Some("byok"),
+        );
         assert_eq!(model, "zai-org/glm-5.2");
         assert_eq!(provider.as_deref(), Some("commandcode"));
         let caps = resolve_image_capabilities(
@@ -213,7 +211,10 @@ mod tests {
             Some("byok"),
             CODEX_CMD,
         );
-        assert!(!caps.native_view, "GLM-5.2 via commandcode must be text-only");
+        assert!(
+            !caps.native_view,
+            "GLM-5.2 via commandcode must be text-only"
+        );
         assert!(!caps.native_generate);
     }
 

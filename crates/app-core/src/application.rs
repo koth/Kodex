@@ -1,10 +1,13 @@
 use crate::bootstrap::{build_initial_remote_ui, build_initial_ui, update_initial_agent_notice};
 use crate::file_tracker::FileChangeTracker;
+use crate::image_mcp::ImageMcpHandle;
 use crate::paths::AppPaths;
 use crate::reducer::apply_event;
 use crate::web_tools_mcp::WebToolsMcpHandle;
-use crate::image_mcp::ImageMcpHandle;
-use acp_core::{ClientEvent, PromptTask, RemoteSshSessionConfig, SessionConfig, SessionHandle};
+use acp_core::{
+    ClientEvent, HarnessApprovalOutcome, HarnessApprovalResult, HarnessQuestionAnswer, PromptTask,
+    RemoteSshSessionConfig, SessionConfig, SessionHandle,
+};
 use git_service::GitService;
 use session_store::SessionStore;
 use std::collections::{HashMap, HashSet};
@@ -37,7 +40,6 @@ mod tool_diffs;
 mod ui_snapshot;
 mod update_signal;
 
-pub use update_signal::AppUpdate;
 use diff_utils::{
     expand_tool_diff_fragment_from_disk, looks_like_fragment_to_full_file_text,
     normalize_diff_text_for_session_change, raw_input_has_write_payload,
@@ -53,6 +55,7 @@ use titles::{
     extract_title_from_prompt, extract_title_from_response, is_placeholder_session_title,
 };
 pub use ui_snapshot::{UiPatchCursor, UiSnapshotUpdate};
+pub use update_signal::AppUpdate;
 
 const AGENT_DEFAULT_MODEL_LABEL: &str = "Agent default";
 const RESTORED_INCOMPLETE_TOOL_REASON: &str = "上次会话结束前未完成";
@@ -298,7 +301,11 @@ fn current_timestamp() -> String {
     format!("{millis}")
 }
 
-fn turn_finished_notice(stop_reason: &str, agent_cli: Option<&str>) -> Option<String> {
+fn turn_finished_notice(
+    stop_reason: &str,
+    detail: Option<&str>,
+    agent_cli: Option<&str>,
+) -> Option<String> {
     let agent = agent_cli
         .map(str::trim)
         .filter(|agent| !agent.is_empty())
@@ -307,9 +314,17 @@ fn turn_finished_notice(stop_reason: &str, agent_cli: Option<&str>) -> Option<St
     match stop_reason {
         "end_turn" => None,
         "cancelled" => Some("本轮已取消。".into()),
-        "refusal" => Some(format!(
-            "本轮异常结束：{agent} 返回 `refusal`，没有完成正常收尾。常见原因是上游请求失败、被拒绝或限流（例如 429）；请查看对应智能体日志获取更具体的错误。"
-        )),
+        "refusal" => {
+            let detail = detail.map(str::trim).filter(|d| !d.is_empty());
+            Some(match detail {
+                Some(d) => format!(
+                    "本轮异常结束：{agent} 返回 `refusal`，没有完成正常收尾。上游错误：{d}。若为限流（例如 429）可稍后重试；否则请查看对应智能体日志获取更具体的错误。"
+                ),
+                None => format!(
+                    "本轮异常结束：{agent} 返回 `refusal`，没有完成正常收尾。常见原因是上游请求失败、被拒绝或限流（例如 429）；请查看对应智能体日志获取更具体的错误。"
+                ),
+            })
+        }
         "max_tokens" => Some(format!(
             "本轮异常结束：{agent} 达到最大上下文或输出 token 限制，未完成正常收尾。"
         )),
@@ -322,8 +337,7 @@ fn turn_finished_notice(stop_reason: &str, agent_cli: Option<&str>) -> Option<St
 
 fn humanize_acp_disconnect_reason(reason: &str) -> String {
     let cleaned = sanitize_acp_error_text(reason);
-    let reason =
-        unpack_acp_internal_error(&cleaned).unwrap_or_else(|| cleaned.trim().to_string());
+    let reason = unpack_acp_internal_error(&cleaned).unwrap_or_else(|| cleaned.trim().to_string());
     let lower = reason.to_ascii_lowercase();
     if lower.contains("requested token count exceeds")
         || lower.contains("maximum context length")
@@ -400,7 +414,9 @@ fn sanitize_acp_error_text(input: &str) -> String {
         if let Some(idx) = line.find(": ") {
             let head = &line[..idx];
             let looks_like_target = !head.contains(' ')
-                && head.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | ':' | '-'))
+                && head
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | ':' | '-'))
                 && head.matches("::").count() >= 1;
             if looks_like_target {
                 line = line[idx + 2..].trim_start();
@@ -597,13 +613,16 @@ fn agent_label_matches_command(label: &str, agent_command: &str) -> bool {
     if is_codebuddy_agent_label(label) {
         return agent_command.to_ascii_lowercase().contains("codebuddy");
     }
-    false
+    crate::settings::agent_id_for_label(label)
+        .is_some_and(crate::settings::is_deepseek_harness_agent)
+        && crate::settings::is_deepseek_harness_command(agent_command)
 }
 
 fn is_known_agent_command(agent_command: &str) -> bool {
     crate::settings::is_codex_acp_command(agent_command)
         || crate::settings::is_claude_agent_acp_command(agent_command)
         || agent_command.to_ascii_lowercase().contains("codebuddy")
+        || crate::settings::is_deepseek_harness_command(agent_command)
 }
 
 fn normalize_title_for_prompt_compare(value: &str) -> String {
@@ -672,11 +691,9 @@ impl Application {
     }
 
     pub(super) fn broadcast_ui_updated(&mut self) {
-        let _ = self
-            .update_tx
-            .send(update_signal::AppUpdate::UiUpdated {
-                revision: self.ui.revision,
-            });
+        let _ = self.update_tx.send(update_signal::AppUpdate::UiUpdated {
+            revision: self.ui.revision,
+        });
     }
 
     pub(super) fn broadcast_permission_request(

@@ -144,12 +144,8 @@ where
             relative.push(sanitize_relative_path(path, false)?);
         }
         let arg_refs = relative.iter().map(String::as_str).collect::<Vec<_>>();
-        let response: RemoteExistsBatchResponse = self.run_node_json(
-            PATHS_EXIST_SCRIPT,
-            &arg_refs,
-            None,
-            REMOTE_LIST_DIR_TIMEOUT,
-        )?;
+        let response: RemoteExistsBatchResponse =
+            self.run_node_json(PATHS_EXIST_SCRIPT, &arg_refs, None, REMOTE_LIST_DIR_TIMEOUT)?;
         if response.exists.len() != paths.len() {
             bail!(
                 "远程存在性探测返回数量不匹配：expected {}, got {}",

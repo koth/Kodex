@@ -256,6 +256,23 @@ impl Application {
     ) -> Result<(), String> {
         self.start_permission_write_baseline_if_allowed(request_id, option_id.as_deref());
 
+        // DeepSeek Harness: approvals/questions are server-requested by dsh and
+        // must be answered via `session.resolve_harness_approval` (→ `/api/respond`),
+        // not the ACP `PermissionBroker` (the bridge does not consume it).
+        if crate::settings::is_deepseek_harness_command(&self.agent_command) {
+            let result = self.build_harness_approval_result(
+                request_id,
+                option_id.as_deref(),
+                input_response,
+            );
+            self.session
+                .resolve_harness_approval(request_id, result)
+                .map_err(|error| error.to_string())?;
+            let decision = option_id.as_deref().unwrap_or("cancelled");
+            self.mark_tool_permission_selected(request_id, decision);
+            return Ok(());
+        }
+
         let delivered_to_acp_request = self
             .session
             .resolve_permission(request_id, option_id.clone(), guidance, input_response)
@@ -273,6 +290,40 @@ impl Application {
         }
 
         Ok(())
+    }
+
+    /// Build the harness approval/question result from the composer's
+    /// permission decision, for `session.resolve_harness_approval`.
+    /// `option_id` is the chosen approval option (`allowed-once`/`rejected`)
+    /// for approvals; `input_response` carries question answers.
+    fn build_harness_approval_result(
+        &self,
+        request_id: &str,
+        option_id: Option<&str>,
+        input_response: Option<workspace_model::PermissionInputResponse>,
+    ) -> HarnessApprovalResult {
+        if let Some(response) = input_response
+            && !response.answers.is_empty()
+        {
+            let answers = response
+                .answers
+                .into_iter()
+                .map(|(question_id, selected)| HarnessQuestionAnswer {
+                    question_id,
+                    selected,
+                    custom: None,
+                })
+                .collect();
+            return HarnessApprovalResult::Question { answers };
+        }
+        let outcome = match option_id.unwrap_or("rejected") {
+            "allowed-once" => HarnessApprovalOutcome::AllowedOnce,
+            _ => HarnessApprovalOutcome::Rejected,
+        };
+        HarnessApprovalResult::Approval {
+            approval_id: request_id.to_string(),
+            outcome,
+        }
     }
 
     pub(super) fn auto_resolve_full_access_permission_if_applicable(
@@ -390,12 +441,15 @@ impl Application {
             existing
                 .as_ref()
                 .and_then(|(_, provider, _)| {
-                    provider.as_deref().and_then(real_provider).map(str::to_string)
+                    provider
+                        .as_deref()
+                        .and_then(real_provider)
+                        .map(str::to_string)
                 })
                 .or_else(|| {
-                    existing
-                        .as_ref()
-                        .and_then(|(model, _, _)| provider_from_model_value(model).map(str::to_string))
+                    existing.as_ref().and_then(|(model, _, _)| {
+                        provider_from_model_value(model).map(str::to_string)
+                    })
                 })
         });
         let display_model = display_model_from_persisted(&self.ui.session.model);
@@ -524,15 +578,18 @@ impl Application {
         });
     }
 
-pub(super) fn current_model_provider_for_persistence(&self) -> Option<String> {
+    pub(super) fn current_model_provider_for_persistence(&self) -> Option<String> {
         let authoritative = self.authoritative_model_selection.as_ref();
         let pending = self.pending_model_restore.as_ref();
         let candidates = [
             authoritative.and_then(|selection| selection.provider.clone()),
-            authoritative
-                .and_then(|selection| provider_from_model_value(&selection.value).map(str::to_string)),
+            authoritative.and_then(|selection| {
+                provider_from_model_value(&selection.value).map(str::to_string)
+            }),
             pending.and_then(|selection| selection.provider.clone()),
-            pending.and_then(|selection| provider_from_model_value(&selection.value).map(str::to_string)),
+            pending.and_then(|selection| {
+                provider_from_model_value(&selection.value).map(str::to_string)
+            }),
         ];
         // Skip the generic "byok" wrapper id: it is not a per-model source
         // provider and writing it to the `model_provider` column (or embedding
@@ -544,7 +601,7 @@ pub(super) fn current_model_provider_for_persistence(&self) -> Option<String> {
             }
         }
 
-let model_control =
+        let model_control =
             self.ui.session_config.controls.iter().find(|control| {
                 control.category == workspace_model::SessionConfigCategory::Model
             })?;
@@ -566,9 +623,7 @@ let model_control =
     /// (`restore_pending_model_selection`): prefer the authoritative
     /// selection set when the user picked a model, fall back to a pending
     /// restore, then to the current session-config control value.
-    pub(super) fn current_model_for_background_session(
-        &self,
-    ) -> Option<(String, Option<String>)> {
+    pub(super) fn current_model_for_background_session(&self) -> Option<(String, Option<String>)> {
         if let Some(selection) = self.authoritative_model_selection.as_ref() {
             let provider = selection
                 .provider
@@ -587,12 +642,10 @@ let model_control =
                 .or_else(|| provider_from_model_value(&selection.value).map(str::to_string));
             return Some((selection.value.clone(), provider));
         }
-        let model_control = self
-            .ui
-            .session_config
-            .controls
-            .iter()
-            .find(|control| control.category == workspace_model::SessionConfigCategory::Model)?;
+        let model_control =
+            self.ui.session_config.controls.iter().find(|control| {
+                control.category == workspace_model::SessionConfigCategory::Model
+            })?;
         let value_id = current_model_value(model_control).to_string();
         let provider = infer_current_model_provider(model_control)
             .and_then(|provider| real_provider(&provider).map(str::to_string));
@@ -760,8 +813,10 @@ pub(super) fn apply_model_selection_to_control(
             .iter()
             .filter(|choice| choice_matches_model_value(choice, selection_label))
             .collect();
-        let mut known_providers: Vec<String> =
-            matching.iter().filter_map(|&choice| choice_provider(choice)).collect();
+        let mut known_providers: Vec<String> = matching
+            .iter()
+            .filter_map(|&choice| choice_provider(choice))
+            .collect();
         known_providers.sort();
         known_providers.dedup();
         if known_providers.len() > 1 {
@@ -842,7 +897,6 @@ pub(super) fn requalify_persisted_model(
     let qualified = provider_qualified_model_value(display_model, effective.as_deref());
     (qualified, effective)
 }
-
 
 fn infer_current_model_provider(control: &workspace_model::SessionConfigControl) -> Option<String> {
     provider_from_model_value(&control.current_value_id)
@@ -972,14 +1026,15 @@ fn byok_source_provider_id(provider: &str) -> Option<&str> {
     let trimmed = provider.trim();
     let is_byok_source = matches!(
         trimmed,
-        "timiai" | "commandcode" | "codebuddy" | "deepseek" | "kimi_code" | "xiaomi_mimo"
+        "timiai"
+            | "commandcode"
+            | "codebuddy"
+            | "deepseek"
+            | "kimi_code"
+            | "xiaomi_mimo"
             | "custom"
     ) || trimmed.starts_with("custom_");
-    if is_byok_source {
-        Some(trimmed)
-    } else {
-        None
-    }
+    if is_byok_source { Some(trimmed) } else { None }
 }
 
 /// Returns the provider unless it is the generic BYOK wrapper id ("byok"),

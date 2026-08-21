@@ -3456,3 +3456,39 @@ fn send_upstream_with_retry_cancellation_clears_registry_entry() {
     );
     let _ = handle.join();
 }
+
+#[test]
+fn normalize_max_tokens_renames_max_completion_tokens_to_max_tokens() {
+    let payload = json!({
+        "model": "glm-5.2",
+        "messages": [{"role": "user", "content": "hi"}],
+        "max_completion_tokens": 4096,
+    });
+    let out = normalize_max_tokens_for_chat_payload(payload, "timiai");
+    assert_eq!(out["max_tokens"], json!(4096));
+    assert!(out.get("max_completion_tokens").is_none());
+}
+
+#[test]
+fn normalize_max_tokens_keeps_existing_max_tokens_and_drops_duplicate() {
+    // When both fields are present, `max_tokens` wins and the redundant
+    // `max_completion_tokens` is removed so the upstream never sees a
+    // duplicate-parameter error.
+    let payload = json!({
+        "model": "glm-5.2",
+        "messages": [],
+        "max_completion_tokens": 8192,
+        "max_tokens": 1024,
+    });
+    let out = normalize_max_tokens_for_chat_payload(payload, "timiai");
+    assert_eq!(out["max_tokens"], json!(1024));
+    assert!(out.get("max_completion_tokens").is_none());
+}
+
+#[test]
+fn normalize_max_tokens_is_noop_without_max_completion_tokens() {
+    let payload = json!({"model": "glm-5.2", "messages": [], "max_tokens": 512});
+    let out = normalize_max_tokens_for_chat_payload(payload, "timiai");
+    assert_eq!(out["max_tokens"], json!(512));
+    assert!(out.get("max_completion_tokens").is_none());
+}

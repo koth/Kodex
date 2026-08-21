@@ -105,10 +105,16 @@ where
         }
     }
 
- fn with_app<R>(&self, f: impl FnOnce(&mut crate::Application) -> Result<R, String>) -> Result<R, String> {
- let mut app = self.app.lock().map_err(|e| format!("Application mutex poisoned: {e}"))?;
- f(&mut app)
- }
+    fn with_app<R>(
+        &self,
+        f: impl FnOnce(&mut crate::Application) -> Result<R, String>,
+    ) -> Result<R, String> {
+        let mut app = self
+            .app
+            .lock()
+            .map_err(|e| format!("Application mutex poisoned: {e}"))?;
+        f(&mut app)
+    }
 }
 
 #[allow(dead_code)]
@@ -119,13 +125,11 @@ where
     /// Send a prompt marked as remote-origin (destructive permissions will
     /// require explicit approval instead of auto-resolving). Used by tests
     /// and the relay path; the local command bridge uses `send_prompt`.
-    pub fn send_prompt_remote(
-        &self,
-        prompt: Vec<UserPromptContent>,
-    ) -> Result<(), String> {
+    pub fn send_prompt_remote(&self, prompt: Vec<UserPromptContent>) -> Result<(), String> {
         self.with_app(|app| {
             app.set_remote_mode(true);
-            app.send_prompt_content_background(prompt).map_err(|e| e.to_string())
+            app.send_prompt_content_background(prompt)
+                .map_err(|e| e.to_string())
         })
     }
 
@@ -143,78 +147,81 @@ impl<F> RemoteControl for AppCoreRemoteControl<F>
 where
     F: Fn() -> Result<Vec<WorkspaceSessionList>, String> + Send + Sync,
 {
- fn list_sessions(&self) -> impl std::future::Future<Output = Result<Vec<WorkspaceSessionList>, String>> + Send {
- let result = (self.list_sessions_fn)();
- async move { result }
- }
+    fn list_sessions(
+        &self,
+    ) -> impl std::future::Future<Output = Result<Vec<WorkspaceSessionList>, String>> + Send {
+        let result = (self.list_sessions_fn)();
+        async move { result }
+    }
 
- fn create_session(
- &self,
- _workspace_root: Option<String>,
- agent: Option<AgentCliId>,
- ) -> impl std::future::Future<Output = Result<String, String>> + Send {
- let result = self.with_app(|app| {
- app.session_create(agent)?;
- Ok(app.ui.session.id.to_string())
- });
- async move { result }
- }
+    fn create_session(
+        &self,
+        _workspace_root: Option<String>,
+        agent: Option<AgentCliId>,
+    ) -> impl std::future::Future<Output = Result<String, String>> + Send {
+        let result = self.with_app(|app| {
+            app.session_create(agent)?;
+            Ok(app.ui.session.id.to_string())
+        });
+        async move { result }
+    }
 
- fn switch_session(
- &self,
- session_id: String,
- _workspace_root: Option<String>,
- ) -> impl std::future::Future<Output = Result<(), String>> + Send {
- let result = self.with_app(|app| app.session_switch(&session_id));
- async move { result }
- }
+    fn switch_session(
+        &self,
+        session_id: String,
+        _workspace_root: Option<String>,
+    ) -> impl std::future::Future<Output = Result<(), String>> + Send {
+        let result = self.with_app(|app| app.session_switch(&session_id));
+        async move { result }
+    }
 
- fn send_prompt(
- &self,
- prompt: Vec<UserPromptContent>,
- ) -> impl std::future::Future<Output = Result<(), String>> + Send {
- let result = self.with_app(|app| {
- app.send_prompt_content_background(prompt).map_err(|e| e.to_string())
- });
- async move { result }
- }
+    fn send_prompt(
+        &self,
+        prompt: Vec<UserPromptContent>,
+    ) -> impl std::future::Future<Output = Result<(), String>> + Send {
+        let result = self.with_app(|app| {
+            app.send_prompt_content_background(prompt)
+                .map_err(|e| e.to_string())
+        });
+        async move { result }
+    }
 
- fn get_state(&self) -> impl std::future::Future<Output = Result<UiSnapshot, String>> + Send {
- let result = self.with_app(|app| {
- app.poll_prompt_progress();
- Ok(app.lightweight_ui_snapshot())
- });
- async move { result }
- }
+    fn get_state(&self) -> impl std::future::Future<Output = Result<UiSnapshot, String>> + Send {
+        let result = self.with_app(|app| {
+            app.poll_prompt_progress();
+            Ok(app.lightweight_ui_snapshot())
+        });
+        async move { result }
+    }
 
- fn resolve_permission(
- &self,
- request_id: String,
- option_id: Option<String>,
- guidance: Option<String>,
- input_response: Option<PermissionInputResponse>,
- ) -> impl std::future::Future<Output = Result<(), String>> + Send {
- let result = self.with_app(|app| {
- app.resolve_tool_permission(&request_id, option_id, guidance, input_response)
- });
- async move { result }
- }
+    fn resolve_permission(
+        &self,
+        request_id: String,
+        option_id: Option<String>,
+        guidance: Option<String>,
+        input_response: Option<PermissionInputResponse>,
+    ) -> impl std::future::Future<Output = Result<(), String>> + Send {
+        let result = self.with_app(|app| {
+            app.resolve_tool_permission(&request_id, option_id, guidance, input_response)
+        });
+        async move { result }
+    }
 
- fn cancel(&self) -> impl std::future::Future<Output = Result<(), String>> + Send {
- let result = self.with_app(|app| app.cancel_prompt());
- async move { result }
- }
+    fn cancel(&self) -> impl std::future::Future<Output = Result<(), String>> + Send {
+        let result = self.with_app(|app| app.cancel_prompt());
+        async move { result }
+    }
 
- fn stop_tool(
- &self,
- tool_call_id: String,
- ) -> impl std::future::Future<Output = Result<(), String>> + Send {
- let result = self.with_app(|app| app.stop_tool(&tool_call_id));
- async move { result }
- }
+    fn stop_tool(
+        &self,
+        tool_call_id: String,
+    ) -> impl std::future::Future<Output = Result<(), String>> + Send {
+        let result = self.with_app(|app| app.stop_tool(&tool_call_id));
+        async move { result }
+    }
 
- fn subscribe_updates(&self) -> tokio::sync::broadcast::Receiver<AppUpdate> {
- let app = self.app.lock().expect("Application mutex poisoned");
- app.subscribe_updates()
- }
+    fn subscribe_updates(&self) -> tokio::sync::broadcast::Receiver<AppUpdate> {
+        let app = self.app.lock().expect("Application mutex poisoned");
+        app.subscribe_updates()
+    }
 }

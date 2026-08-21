@@ -11,15 +11,15 @@ use acp_core::ClientEvent;
 use serde_json::Value;
 use uuid::Uuid;
 use workspace_model::{
-    AgentPlanEntry, AgentPlanEntryPriority, AgentPlanEntryStatus, DiffHunk, DiffLine,
-    DiffLineKind, MessageRole, PermissionInputOption, PermissionInputQuestion,
-    PermissionInputRequest, PermissionOption, TerminalOutput, UsageEvent,
+    AgentPlanEntry, AgentPlanEntryPriority, AgentPlanEntryStatus, DiffHunk, DiffLine, DiffLineKind,
+    MessageRole, PermissionInputOption, PermissionInputQuestion, PermissionInputRequest,
+    PermissionOption, TerminalOutput, UsageEvent,
 };
 
 use crate::frame::{
     AssistantChunkData, AssistantMessageData, ContentBlock, HostFrame, MuxFrame, SessionEvent,
-    StreamChunk, ToolCallData, ToolCallView, ToolEventView, ToolResultData, ToolResultView,
-    TodoItem, TokenUsage, TurnEndReason,
+    StreamChunk, TodoItem, TokenUsage, ToolCallData, ToolCallView, ToolEventView, ToolResultData,
+    ToolResultView, TurnEndReason,
 };
 use crate::host::{PendingApprovalKind, SessionSink};
 
@@ -31,7 +31,9 @@ pub struct MappedEvents {
 
 impl MappedEvents {
     fn single(event: ClientEvent) -> Self {
-        Self { events: vec![event] }
+        Self {
+            events: vec![event],
+        }
     }
     fn many(events: Vec<ClientEvent>) -> Self {
         Self { events }
@@ -50,14 +52,17 @@ pub fn map_mux_frame(frame: &MuxFrame, sink: &SessionSink) -> MappedEvents {
         MuxFrame::SessionEvent { event, view, .. } => {
             let mut events = map_session_event(event, view.as_ref(), sink);
             // Advance last_seq after mapping so re-baseline resumes from the gap.
-            sink.last_seq.store(event.seq, std::sync::atomic::Ordering::Release);
+            sink.last_seq
+                .store(event.seq, std::sync::atomic::Ordering::Release);
             MappedEvents::many(events.drain(..).collect())
         }
         MuxFrame::SessionSubscribed { last_seq, .. } => {
             // Seed last_seq from the subscription baseline (lastSeq = last
             // delivered seq; the next event is lastSeq + 1).
-            sink.last_seq
-                .store((*last_seq).max(0) as u64, std::sync::atomic::Ordering::Release);
+            sink.last_seq.store(
+                (*last_seq).max(0) as u64,
+                std::sync::atomic::Ordering::Release,
+            );
             MappedEvents::default()
         }
         MuxFrame::ApprovalRequested {
@@ -117,7 +122,7 @@ pub fn map_mux_frame(frame: &MuxFrame, sink: &SessionSink) -> MappedEvents {
             MappedEvents::single(ClientEvent::ToolPermissionRequest {
                 id: request_id,
                 name: "user_question".to_string(),
-                options: Vec::new(),
+                options: question_options(),
                 details: questions
                     .first()
                     .and_then(|q| q.detail.clone())
@@ -160,11 +165,11 @@ pub fn map_mux_frame(frame: &MuxFrame, sink: &SessionSink) -> MappedEvents {
 /// Map a `HostFrame` (demuxed by `sessionId` where present).
 pub fn map_host_frame(frame: &HostFrame) -> MappedEvents {
     match frame {
-        HostFrame::HostAgentError { message, .. } => MappedEvents::single(
-            ClientEvent::Interrupted {
+        HostFrame::HostAgentError { message, .. } => {
+            MappedEvents::single(ClientEvent::Interrupted {
                 reason: format!("harness agent error: {message}"),
-            },
-        ),
+            })
+        }
         HostFrame::HostSessionStatus { running: false, .. } => {
             // A session that stopped running without a turn/end (host-side
             // failure) surfaces as Interrupted so the UI can react.
@@ -242,7 +247,10 @@ pub fn map_session_event(
                         ToolCallView::Generic(g) => g.kind.clone().unwrap_or_default(),
                         ToolCallView::Other => String::new(),
                     };
-                    let summary = view.title().map(|t| t.to_string()).unwrap_or_else(|| name.clone());
+                    let summary = view
+                        .title()
+                        .map(|t| t.to_string())
+                        .unwrap_or_else(|| name.clone());
                     (kind, summary)
                 }
                 _ => (String::new(), name.clone()),
@@ -286,12 +294,11 @@ pub fn map_session_event(
                 }
             }
 
-            let (outcome, terminal_output, raw_output) =
-                match (data.as_ref(), view) {
-                    (Some(d), Some(ToolEventView::Result { view })) => render_result(d, view),
-                    (Some(d), None) => (result_outcome(d), None, result_text(d)),
-                    _ => ("completed".to_string(), None, None),
-                };
+            let (outcome, terminal_output, raw_output) = match (data.as_ref(), view) {
+                (Some(d), Some(ToolEventView::Result { view })) => render_result(d, view),
+                (Some(d), None) => (result_outcome(d), None, result_text(d)),
+                _ => ("completed".to_string(), None, None),
+            };
 
             if data.as_ref().is_some_and(|d| d.error.is_some()) {
                 out.push(ClientEvent::ToolFailed {
@@ -330,19 +337,35 @@ pub fn map_session_event(
             let data: Option<TurnEndData> = event.data();
             let stop_reason = data
                 .as_ref()
-                .map(|d| d.reason.kind.clone())
-                .unwrap_or_else(|| "completed".to_string());
-            vec![ClientEvent::TurnFinished { stop_reason }]
+                .map(|d| turn_end_kind_to_stop_reason(&d.reason.kind))
+                .unwrap_or_else(|| "end_turn".to_string());
+            // For an upstream LLM failure (kind `error`), surface the real
+            // `LlmFailure` (message / code / HTTP status) as detail so the
+            // UI refusal notice can name the actual cause (e.g. `429`).
+            let detail = data.as_ref().and_then(|d| {
+                if d.reason.kind == "error" {
+                    d.reason.rest.get("error").and_then(|v| {
+                        serde_json::from_value::<LlmFailure>(v.clone())
+                            .ok()
+                            .as_ref()
+                            .and_then(llm_failure_detail)
+                    })
+                } else {
+                    None
+                }
+            });
+            vec![ClientEvent::TurnFinished {
+                stop_reason,
+                detail,
+            }]
         }
         "request/header" => {
-            // The full header/config is rich; in v1 we emit a hydrated
-            // SessionConfigState placeholder so the UI knows config is live.
-            vec![ClientEvent::SessionConfigUpdated {
-                state: workspace_model::SessionConfigState {
-                    hydrated: true,
-                    controls: Vec::new(),
-                },
-            }]
+            // The full header/config is rich; in v1 the model selector is
+            // published from `session.models` by `emit_model_control`. Emitting
+            // an empty `SessionConfigUpdated` here would wipe the model control
+            // (the reducer replaces `session_config` wholesale), so drop the
+            // frame to keep the dropdown populated.
+            Vec::new()
         }
         // turn/start, step/start, step/end, user/message, request/context,
         // session/end-seed: log-only or surface metadata not represented in
@@ -362,6 +385,70 @@ struct TurnEndData {
     reason: TurnEndReason,
 }
 
+/// The `error` payload on a `turn/end` of kind `error` — mirrors dsh's
+/// `LlmFailure` (`@deepseek-ai/dsh-llm/types`): `{ message, code, status?,
+/// providerRetryAfterMs?, requestId? }`. Only the human-facing fields are
+/// narrowed; the rest stay opaque.
+#[derive(serde::Deserialize)]
+struct LlmFailure {
+    #[serde(default)]
+    message: Option<String>,
+    #[serde(default)]
+    code: Option<String>,
+    #[serde(default)]
+    status: Option<serde_json::Number>,
+}
+
+/// Build a short, user-facing detail string from a harness `LlmFailure`.
+/// Includes the HTTP status (e.g. `429`) and message when present, so the
+/// Kodex refusal notice can surface the real upstream cause instead of the
+/// generic wording. Returns `None` only when the payload carried no usable
+/// text at all.
+fn llm_failure_detail(failure: &LlmFailure) -> Option<String> {
+    let message = failure
+        .message
+        .as_deref()
+        .map(str::trim)
+        .filter(|m| !m.is_empty());
+    let code = failure
+        .code
+        .as_deref()
+        .map(str::trim)
+        .filter(|c| !c.is_empty());
+    let status = failure
+        .status
+        .as_ref()
+        .and_then(serde_json::Number::as_u64)
+        .map(|s| s.to_string());
+    match (status.as_deref(), code.as_deref(), message) {
+        (Some(s), Some(c), Some(m)) => Some(format!("HTTP {s} ({c}): {m}")),
+        (Some(s), Some(c), None) => Some(format!("HTTP {s} ({c})")),
+        (Some(s), None, Some(m)) => Some(format!("HTTP {s}: {m}")),
+        (Some(s), None, None) => Some(format!("HTTP {s}")),
+        (None, Some(c), Some(m)) => Some(format!("{c}: {m}")),
+        (None, Some(c), None) => Some(c.to_string()),
+        (None, None, Some(m)) => Some(m.to_string()),
+        (None, None, None) => None,
+    }
+}
+
+/// Map a dsh `turn/end` reason kind to Kodex's `TurnFinished` stop reason
+/// vocabulary. Mirrors dsh's own `turnEndToStopReason`: `completed`→`end_turn`,
+/// `max-tokens`→`max_tokens`, `interrupted`→`cancelled`, `aborted`/`blocked`→
+/// `end_turn`. `error` (an upstream LLM failure) maps to `refusal` so the UI
+/// surfaces the friendly "上游请求失败/被拒绝/限流" notice instead of a raw
+/// `error` stop reason. The real `LlmFailure` (message / code / HTTP status)
+/// is carried alongside as `TurnFinished.detail` by the `turn/end` handler.
+fn turn_end_kind_to_stop_reason(kind: &str) -> String {
+    match kind {
+        "completed" => "end_turn".to_string(),
+        "max-tokens" => "max_tokens".to_string(),
+        "interrupted" => "cancelled".to_string(),
+        "error" => "refusal".to_string(),
+        _ => "end_turn".to_string(),
+    }
+}
+
 fn approval_options() -> Vec<PermissionOption> {
     vec![
         PermissionOption {
@@ -372,6 +459,25 @@ fn approval_options() -> Vec<PermissionOption> {
         PermissionOption {
             id: "rejected".to_string(),
             label: "Reject".to_string(),
+            kind: "reject_once".to_string(),
+        },
+    ]
+}
+
+/// Options for a `question/requested` input form. The workbench's question
+/// panel locates the submit/cancel affordances by id (`submit`/`cancel`); the
+/// ids are UI markers only — `build_harness_approval_result` builds the answer
+/// from `input_response` and ignores the option id.
+fn question_options() -> Vec<PermissionOption> {
+    vec![
+        PermissionOption {
+            id: "submit".to_string(),
+            label: "Submit".to_string(),
+            kind: "allow_once".to_string(),
+        },
+        PermissionOption {
+            id: "cancel".to_string(),
+            label: "Cancel".to_string(),
             kind: "reject_once".to_string(),
         },
     ]
@@ -519,6 +625,24 @@ mod tests {
     }
 
     #[test]
+    fn maps_request_header_does_not_emit_session_config() {
+        // `request/header` must not emit an empty `SessionConfigUpdated`,
+        // which would wipe the model control published by `emit_model_control`.
+        let (sink, _rx) = test_sink();
+        let frame = mux(session_event(
+            "request/header",
+            12,
+            serde_json::json!({ "header": {}, "reason": "initial" }),
+        ));
+        let mapped = map_mux_frame(&frame, &sink);
+        assert!(
+            mapped.events.is_empty(),
+            "request/header must not emit events: {:?}",
+            mapped.events
+        );
+    }
+
+    #[test]
     fn maps_assistant_chunk_text() {
         let (sink, _rx) = test_sink();
         let frame = mux(session_event(
@@ -546,7 +670,10 @@ mod tests {
             serde_json::json!({ "turn": 1, "step": 1, "chunk": { "type": "reasoning-delta", "index": 0, "text": "think..." } }),
         ));
         let mapped = map_mux_frame(&frame, &sink);
-        assert_eq!(mapped.events, vec![ClientEvent::ThinkingActivity { active: true }]);
+        assert_eq!(
+            mapped.events,
+            vec![ClientEvent::ThinkingActivity { active: true }]
+        );
     }
 
     #[test]
@@ -686,7 +813,50 @@ mod tests {
         assert_eq!(
             mapped.events,
             vec![ClientEvent::TurnFinished {
-                stop_reason: "completed".to_string(),
+                stop_reason: "end_turn".to_string(),
+                detail: None,
+            }]
+        );
+    }
+
+    #[test]
+    fn maps_turn_end_error_to_refusal() {
+        // dsh reports upstream LLM failures as `kind: "error"`; the bridge
+        // maps it to `refusal` and carries the real `LlmFailure` message as
+        // detail so the UI notice can name the actual upstream cause instead
+        // of only the generic refusal wording.
+        let (sink, _rx) = test_sink();
+        let frame = mux(session_event(
+            "turn/end",
+            8,
+            serde_json::json!({ "turn": 1, "reason": { "kind": "error", "error": { "message": "rate limited", "code": "RATE_LIMIT", "status": 429 } } }),
+        ));
+        let mapped = map_mux_frame(&frame, &sink);
+        assert_eq!(
+            mapped.events,
+            vec![ClientEvent::TurnFinished {
+                stop_reason: "refusal".to_string(),
+                detail: Some("HTTP 429 (RATE_LIMIT): rate limited".to_string()),
+            }]
+        );
+    }
+
+    #[test]
+    fn maps_turn_end_error_detail_without_status() {
+        // A failure payload carrying only a message still produces a usable
+        // detail string (no HTTP status / code prefix).
+        let (sink, _rx) = test_sink();
+        let frame = mux(session_event(
+            "turn/end",
+            9,
+            serde_json::json!({ "turn": 1, "reason": { "kind": "error", "error": { "message": "boom" } } }),
+        ));
+        let mapped = map_mux_frame(&frame, &sink);
+        assert_eq!(
+            mapped.events,
+            vec![ClientEvent::TurnFinished {
+                stop_reason: "refusal".to_string(),
+                detail: Some("boom".to_string()),
             }]
         );
     }
@@ -741,9 +911,13 @@ mod tests {
         assert!(matches!(
             &mapped.events[0],
             ClientEvent::ToolPermissionRequest {
-                id, name, input: Some(PermissionInputRequest { questions }), ..
+                id, name, options, input: Some(PermissionInputRequest { questions }), ..
             } if id == "q1" && name == "user_question" && questions.len() == 1
                 && questions[0].options.len() == 2
+                // The workbench's question panel enables 提交回答 only when it
+                // finds a `submit` option; without one the form is unsubmittable.
+                && options.iter().any(|option| option.id == "submit")
+                && options.iter().any(|option| option.id == "cancel")
         ));
     }
 
@@ -853,24 +1027,40 @@ mod tests {
         // reconstructs the expected ClientEvent sequence.
         let (sink, _rx) = test_sink();
         let history = serde_json::json!([
-            session_event("assistant/message", 1, serde_json::json!({
-                "turn": 1, "step": 1,
-                "message": {
-                    "role": "assistant",
-                    "content": [{ "type": "text", "text": "Working on it" }]
-                }
-            })),
-            session_event("tool/call", 2, serde_json::json!({
-                "turn": 1, "step": 1, "callId": "call-1", "name": "bash", "arguments": "{\"command\":\"ls\"}"
-            })),
-            session_event("tool/result", 3, serde_json::json!({
-                "turn": 1, "step": 1,
-                "message": {
-                    "role": "user",
-                    "content": [{ "type": "tool-result", "toolCallId": "call-1", "content": [{ "type": "text", "text": "done" }] }]
-                }
-            })),
-            session_event("turn/end", 4, serde_json::json!({ "turn": 1, "reason": { "kind": "completed" } })),
+            session_event(
+                "assistant/message",
+                1,
+                serde_json::json!({
+                    "turn": 1, "step": 1,
+                    "message": {
+                        "role": "assistant",
+                        "content": [{ "type": "text", "text": "Working on it" }]
+                    }
+                })
+            ),
+            session_event(
+                "tool/call",
+                2,
+                serde_json::json!({
+                    "turn": 1, "step": 1, "callId": "call-1", "name": "bash", "arguments": "{\"command\":\"ls\"}"
+                })
+            ),
+            session_event(
+                "tool/result",
+                3,
+                serde_json::json!({
+                    "turn": 1, "step": 1,
+                    "message": {
+                        "role": "user",
+                        "content": [{ "type": "tool-result", "toolCallId": "call-1", "content": [{ "type": "text", "text": "done" }] }]
+                    }
+                })
+            ),
+            session_event(
+                "turn/end",
+                4,
+                serde_json::json!({ "turn": 1, "reason": { "kind": "completed" } })
+            ),
         ]);
         let frames: Vec<MuxFrame> = history
             .as_array()
@@ -884,7 +1074,9 @@ mod tests {
             events.extend(map_mux_frame(frame, &sink).events);
         }
         // assistant message → tool started → tool completed → turn finished
-        assert!(matches!(&events[0], ClientEvent::MessageChunk { role: MessageRole::Assistant, content } if content == "Working on it"));
+        assert!(
+            matches!(&events[0], ClientEvent::MessageChunk { role: MessageRole::Assistant, content } if content == "Working on it")
+        );
         assert!(matches!(&events[1], ClientEvent::ToolStarted { id, .. } if id == "call-1"));
         assert!(matches!(&events[2], ClientEvent::ToolCompleted { id, .. } if id == "call-1"));
         assert!(matches!(&events[3], ClientEvent::TurnFinished { .. }));

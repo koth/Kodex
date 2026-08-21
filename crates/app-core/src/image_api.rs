@@ -20,7 +20,7 @@
 
 use acp_core::codex_api_proxy_base_url;
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -62,8 +62,9 @@ impl ImageApi {
             );
         }
 
-        let path = crate::attachment_cache::local_path_from_uri(image_path)
-            .ok_or_else(|| format!("view_image could not resolve a local path from `{image_path}`"))?;
+        let path = crate::attachment_cache::local_path_from_uri(image_path).ok_or_else(|| {
+            format!("view_image could not resolve a local path from `{image_path}`")
+        })?;
         let bytes = std::fs::read(&path)
             .map_err(|error| format!("failed to read image {path:?}: {error}"))?;
         let mime = mime_for_path(&path);
@@ -104,7 +105,10 @@ impl ImageApi {
             acp_core::register_codex_api_proxy_provider_key(provider, api_key);
         }
 
-        let url = format!("{}/providers/{provider}/responses", codex_api_proxy_base_url());
+        let url = format!(
+            "{}/providers/{provider}/responses",
+            codex_api_proxy_base_url()
+        );
         let client = reqwest::Client::new();
         let response = client
             .post(&url)
@@ -215,8 +219,9 @@ impl ImageApi {
         let (model, base_url, api_key) =
             generate_endpoints(generate, self.config.generate_api_key.as_deref())?;
 
-        let source = crate::attachment_cache::local_path_from_uri(image_path)
-            .ok_or_else(|| format!("edit_image could not resolve a local path from `{image_path}`"))?;
+        let source = crate::attachment_cache::local_path_from_uri(image_path).ok_or_else(|| {
+            format!("edit_image could not resolve a local path from `{image_path}`")
+        })?;
         let image_bytes = std::fs::read(&source)
             .map_err(|error| format!("failed to read source image {source:?}: {error}"))?;
         let image_mime = mime_for_path(&source);
@@ -236,12 +241,26 @@ impl ImageApi {
                 .await?
             }
             workspace_model::ImageGenerateProtocol::ChatCompletions => {
-                edit_chat_completions(&base_url, &api_key, &model, &prompt, &image_bytes, image_mime)
-                    .await?
+                edit_chat_completions(
+                    &base_url,
+                    &api_key,
+                    &model,
+                    &prompt,
+                    &image_bytes,
+                    image_mime,
+                )
+                .await?
             }
             workspace_model::ImageGenerateProtocol::Gemini => {
-                edit_gemini(&base_url, &api_key, &model, &prompt, &image_bytes, image_mime)
-                    .await?
+                edit_gemini(
+                    &base_url,
+                    &api_key,
+                    &model,
+                    &prompt,
+                    &image_bytes,
+                    image_mime,
+                )
+                .await?
             }
         };
         let image = images
@@ -301,7 +320,8 @@ fn generate_endpoints(
     let base_url = generate.base_url.trim().trim_end_matches('/').to_string();
     if model.is_empty() || base_url.is_empty() {
         return Err(
-            "image.generate.model/base_url is not configured; cannot run generate_image".to_string(),
+            "image.generate.model/base_url is not configured; cannot run generate_image"
+                .to_string(),
         );
     }
     let api_key = api_key
@@ -792,7 +812,8 @@ fn error_message(body: &Value) -> String {
 /// Persist generated image bytes to `{dir}/{uuid}.{ext}` and return the
 /// `file://` URI plus the absolute saved path.
 fn persist_image(dir: &Path, bytes: &[u8], mime: &str) -> Result<PersistedImage, String> {
-    std::fs::create_dir_all(dir).map_err(|error| format!("failed to create {}: {error}", dir.display()))?;
+    std::fs::create_dir_all(dir)
+        .map_err(|error| format!("failed to create {}: {error}", dir.display()))?;
     let ext = extension_for_mime(mime);
     let path = dir.join(format!("{}.{}", uuid::Uuid::new_v4(), ext));
     std::fs::write(&path, bytes)
@@ -813,7 +834,10 @@ fn extract_responses_output_text(response: &Value) -> Option<String> {
     for item in output {
         let content = item.get("content").and_then(Value::as_array)?;
         for part in content {
-            if matches!(part.get("type").and_then(Value::as_str), Some("output_text")) {
+            if matches!(
+                part.get("type").and_then(Value::as_str),
+                Some("output_text")
+            ) {
                 if let Some(text) = part.get("text").and_then(Value::as_str) {
                     if !text.trim().is_empty() {
                         texts.push(text.to_string());
@@ -941,7 +965,12 @@ mod tests {
     #[test]
     fn extract_responses_output_text_returns_none_when_empty() {
         assert!(extract_responses_output_text(&json!({"output": []})).is_none());
-        assert!(extract_responses_output_text(&json!({"output": [{"content": [{"type": "output_text", "text": "  "}]}]})).is_none());
+        assert!(
+            extract_responses_output_text(
+                &json!({"output": [{"content": [{"type": "output_text", "text": "  "}]}]})
+            )
+            .is_none()
+        );
     }
 
     #[test]
@@ -987,7 +1016,10 @@ mod tests {
 
     #[test]
     fn mime_sniff_matches_magic_bytes() {
-        assert_eq!(mime_from_bytes(&[0x89, 0x50, 0x4E, 0x47, 0x0D]), "image/png");
+        assert_eq!(
+            mime_from_bytes(&[0x89, 0x50, 0x4E, 0x47, 0x0D]),
+            "image/png"
+        );
         assert_eq!(mime_from_bytes(&[0xFF, 0xD8, 0xFF, 0xE0]), "image/jpeg");
         assert_eq!(mime_from_bytes(b"GIF89a"), "image/gif");
         let webp = [b'R', b'I', b'F', b'F', 0, 0, 0, 0, b'W', b'E', b'B', b'P'];
@@ -1033,7 +1065,9 @@ mod tests {
             .enable_all()
             .build()
             .unwrap();
-        let err = runtime.block_on(api.generate_image(&arguments)).unwrap_err();
+        let err = runtime
+            .block_on(api.generate_image(&arguments))
+            .unwrap_err();
         assert!(err.contains("not configured"), "{err}");
     }
 
@@ -1159,8 +1193,7 @@ mod tests {
         assert!(generate_endpoints(&generate, None).is_err()); // missing base_url
         generate.base_url = "https://api.test/v1".into();
         assert!(generate_endpoints(&generate, None).is_err()); // missing key
-        let (model, base, key) =
-            generate_endpoints(&generate, Some("sk-test")).unwrap();
+        let (model, base, key) = generate_endpoints(&generate, Some("sk-test")).unwrap();
         assert_eq!(model, "m");
         assert_eq!(base, "https://api.test/v1");
         assert_eq!(key, "sk-test");

@@ -46,7 +46,10 @@ fn extract_generated_image_markdown(raw: &str) -> Option<String> {
         .map(|arr| arr.iter().map(|v| (v, "生成的图片")).collect())
         .unwrap_or_else(|| vec![(&inner, "编辑后的图片")]);
 
-    if candidates.iter().all(|(entry, _)| entry.get("saved_path").is_none()) {
+    if candidates
+        .iter()
+        .all(|(entry, _)| entry.get("saved_path").is_none())
+    {
         return None;
     }
 
@@ -309,9 +312,7 @@ impl Application {
             &event,
             ClientEvent::TurnFinished { .. } | ClientEvent::Interrupted { .. }
         );
-        if (flush_for_assistant_chunk || flush_for_turn_end)
-            && self.flush_pending_steers()
-        {
+        if (flush_for_assistant_chunk || flush_for_turn_end) && self.flush_pending_steers() {
             // The flushed User messages now sit at the end of the timeline,
             // so the following assistant chunk coalesces into a brand-new
             // Assistant message instead of appending to the prior one.
@@ -596,7 +597,10 @@ impl Application {
                     }]
                 })
                 .unwrap_or_default(),
-            ClientEvent::TurnFinished { stop_reason } => {
+            ClientEvent::TurnFinished {
+                stop_reason,
+                detail,
+            } => {
                 let mut events = Vec::new();
                 if let Some(content) = self.inline_think_filter.flush() {
                     events.push(ClientEvent::MessageChunk {
@@ -604,7 +608,10 @@ impl Application {
                         content,
                     });
                 }
-                events.push(ClientEvent::TurnFinished { stop_reason });
+                events.push(ClientEvent::TurnFinished {
+                    stop_reason,
+                    detail,
+                });
                 events
             }
             ClientEvent::Interrupted { reason } => {
@@ -644,7 +651,8 @@ mod tests {
         let inner_edit = format!(
             "{{\"saved_path\":{saved_path:?},\"mime_type\":\"image/png\",\"source\":\"in\"}}"
         );
-        let raw_edit = serde_json::json!({ "content": [{ "type": "text", "text": inner_edit }] }).to_string();
+        let raw_edit =
+            serde_json::json!({ "content": [{ "type": "text", "text": inner_edit }] }).to_string();
         let md_edit = extract_generated_image_markdown(&raw_edit).expect("markdown built");
         assert!(md_edit.starts_with("![编辑后的图片](data:image/png;base64,"));
 

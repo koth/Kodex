@@ -156,7 +156,11 @@ fn fnv1a64_hex(bytes: &[u8]) -> String {
     format!("{hash:016x}")
 }
 
-pub(crate) fn resolve_workspace_path(root: &Path, path: &str, must_exist: bool) -> Result<PathBuf, String> {
+pub(crate) fn resolve_workspace_path(
+    root: &Path,
+    path: &str,
+    must_exist: bool,
+) -> Result<PathBuf, String> {
     if path.trim().is_empty() {
         return Err("Path is empty".into());
     }

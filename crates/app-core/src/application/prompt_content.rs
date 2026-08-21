@@ -51,9 +51,7 @@ pub(super) fn degrade_prompt_for_image_fallback(
     let mut kept: Vec<UserPromptContent> = Vec::with_capacity(prompt.len());
     for content in prompt.drain(..) {
         if let UserPromptContent::Image {
-            display_url,
-            name,
-            ..
+            display_url, name, ..
         } = content
         {
             if let Some(url) = display_url {
@@ -297,7 +295,11 @@ mod tests {
             &unconfigured_config(),
             Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         );
-        assert!(prompt.iter().all(|c| !matches!(c, UserPromptContent::Image { .. })));
+        assert!(
+            prompt
+                .iter()
+                .all(|c| !matches!(c, UserPromptContent::Image { .. }))
+        );
         let text = prompt_text(&prompt).expect("text remains");
         assert!(text.contains("这张图里是什么"));
         assert!(text.contains("view_image"));
@@ -334,7 +336,11 @@ mod tests {
             &unconfigured_config(),
             Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         );
-        assert!(prompt.iter().all(|c| !matches!(c, UserPromptContent::Image { .. })));
+        assert!(
+            prompt
+                .iter()
+                .all(|c| !matches!(c, UserPromptContent::Image { .. }))
+        );
         let text = prompt_text(&prompt).expect("text remains");
         assert!(!text.contains("view_image"));
     }

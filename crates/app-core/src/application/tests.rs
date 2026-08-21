@@ -10,14 +10,12 @@ use super::diff_utils::{
 use super::inline_think::InlineThinkFilter;
 use super::titles::is_placeholder_session_title;
 use super::{
-    Application, InFlightPrompt, ModelSelection, current_timestamp,
-    humanize_acp_disconnect_reason,
-    sanitize_acp_error_text,
+    Application, InFlightPrompt, ModelSelection, current_timestamp, humanize_acp_disconnect_reason,
+    normalize_tracked_path, sanitize_acp_error_text, turn_finished_notice,
     update_signal::AppUpdate,
-    normalize_tracked_path, turn_finished_notice,
 };
-use acp_core::{ClientEvent, PromptTask, RemoteSshSessionConfig, diff_to_hunks};
 use crate::{AppCoreRemoteControl, RemoteControl};
+use acp_core::{ClientEvent, PromptTask, RemoteSshSessionConfig, diff_to_hunks};
 use std::{
     collections::HashMap,
     fs,
@@ -38,8 +36,8 @@ use workspace_model::{
 
 mod change_set_tests;
 mod diff_tests;
-mod prompt_tests;
 mod image_switch_tests;
+mod prompt_tests;
 
 fn init_test_git_repo(path: &std::path::Path) -> git2::Repository {
     let repo = git2::Repository::init(path).unwrap();
@@ -97,23 +95,21 @@ fn mock_agent_command() -> String {
             .status()
             .expect("failed to invoke cargo build for mock-acp-agent");
         assert!(status.success(), "cargo build -p mock-acp-agent failed");
-        let target_dir = std::env::var("CARGO_TARGET_DIR")
-            .unwrap_or_else(|_| {
-                std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                    .parent()
-                    .and_then(|path| path.parent())
-                    .expect("workspace root")
-                    .join("target")
-                    .to_string_lossy()
-                    .into_owned()
-            });
+        let target_dir = std::env::var("CARGO_TARGET_DIR").unwrap_or_else(|_| {
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .parent()
+                .and_then(|path| path.parent())
+                .expect("workspace root")
+                .join("target")
+                .to_string_lossy()
+                .into_owned()
+        });
         let exe = if cfg!(windows) {
             "mock-acp-agent.exe"
         } else {
             "mock-acp-agent"
         };
-        let binary =
-            std::path::Path::new(&target_dir).join("debug").join(exe);
+        let binary = std::path::Path::new(&target_dir).join("debug").join(exe);
         assert!(
             binary.exists(),
             "mock-acp-agent binary not found at {}",
@@ -293,6 +289,10 @@ fn active_agent_label_prefers_current_command_over_stale_persisted_label() {
         super::active_agent_label_for_command("codex-acp", Some("Codex".into())),
         "Codex"
     );
+    assert_eq!(
+        super::active_agent_label_for_command("dsh", Some("DeepSeek Harness".into())),
+        "DeepSeek Harness"
+    );
 }
 
 #[test]
@@ -302,6 +302,7 @@ fn restored_session_agent_command_prefers_recent_session_agent() {
     let recent_codebuddy = session_list_item("recent-codebuddy", Some("CodeBuddy"));
     let unlabelled = session_list_item("legacy-unlabelled", None);
     let stale = session_list_item("stale-agent", Some("goose"));
+    let recent_harness = session_list_item("recent-harness", Some("DeepSeek Harness"));
 
     let restored = super::agent_command_for_restored_session(
         Some(&recent_codebuddy),
@@ -359,6 +360,16 @@ fn restored_session_agent_command_prefers_recent_session_agent() {
         ),
         "claude-agent-acp",
         "unknown legacy labels should not override the requested default"
+    );
+    assert!(
+        super::agent_command_for_restored_session(
+            Some(&recent_harness),
+            "claude-agent-acp".into(),
+            &app_paths,
+            false,
+        )
+        .eq_ignore_ascii_case(if cfg!(windows) { "dsh.exe" } else { "dsh" }),
+        "recent DeepSeek Harness session should restore with dsh"
     );
 }
 
@@ -459,12 +470,8 @@ fn reject_review_file_change_reverts_modified_file_to_baseline() {
     commit_paths(&repo, &["main.rs"]);
 
     let app_paths = crate::paths::AppPaths::from_root(dir.path().join("home").join(".kodex"));
-    let mut app = Application::bootstrap_with_app_paths(
-        dir.path(),
-        mock_agent_command(),
-        app_paths,
-    )
-    .unwrap();
+    let mut app =
+        Application::bootstrap_with_app_paths(dir.path(), mock_agent_command(), app_paths).unwrap();
 
     fs::write(dir.path().join("main.rs"), "one\ntwo\n").unwrap();
     app.refresh_repository();
@@ -788,8 +795,10 @@ fn persist_session_model_mode_stores_provider_qualified_model_value() {
     wait_for_control(&mut app, SessionConfigCategory::Model);
 
     app.ui.session.model = "claude-opus-4.8".into();
-    app.authoritative_model_selection =
-        Some(ModelSelection::new("claude-opus-4.8", Some("timiai".into())));
+    app.authoritative_model_selection = Some(ModelSelection::new(
+        "claude-opus-4.8",
+        Some("timiai".into()),
+    ));
     app.persist_session_model_mode();
 
     let session_id = app.ui.session.id.to_string();
@@ -807,7 +816,10 @@ fn persist_session_model_mode_stores_provider_qualified_model_value() {
         super::config::display_model_from_persisted(&stored_model),
         "claude-opus-4.8"
     );
-    assert_eq!(super::config::provider_from_model_value(&stored_model), Some("timiai"));
+    assert_eq!(
+        super::config::provider_from_model_value(&stored_model),
+        Some("timiai")
+    );
 }
 
 #[test]
@@ -973,8 +985,7 @@ fn restore_pending_model_keeps_qualified_provider_against_bare_agent_choices() {
         .find(|control| control.category == SessionConfigCategory::Model)
         .expect("model control should exist");
     assert_eq!(
-        model_control.current_value_id,
-        "kodex-provider/byok/timiai/shared-model",
+        model_control.current_value_id, "kodex-provider/byok/timiai/shared-model",
         "qualified provider must survive a bare-choice agent config update"
     );
 
@@ -1002,10 +1013,16 @@ fn byok_custom_source_provider_round_trips_through_qualified_model_value() {
 
     // The generic "byok" wrapper is never a valid provider to embed: qualifying
     // with it would produce the malformed `kodex-provider/byok/<model>`.
-    assert_eq!(provider_qualified_model_value("glm-5.2", Some("byok")), "glm-5.2");
+    assert_eq!(
+        provider_qualified_model_value("glm-5.2", Some("byok")),
+        "glm-5.2"
+    );
     // A malformed persisted value (no source segment) is unrecoverable, not
     // the generic "byok", so the skip-guess restore path stays engaged.
-    assert_eq!(provider_from_model_value("kodex-provider/byok/glm-5.2"), None);
+    assert_eq!(
+        provider_from_model_value("kodex-provider/byok/glm-5.2"),
+        None
+    );
 }
 
 #[test]
@@ -1082,8 +1099,7 @@ fn restore_pending_model_keeps_custom_byok_source_provider_against_bare_choices(
         .find(|control| control.category == SessionConfigCategory::Model)
         .expect("model control should exist");
     assert_eq!(
-        model_control.current_value_id,
-        "kodex-provider/byok/custom_quest/glm-5.2",
+        model_control.current_value_id, "kodex-provider/byok/custom_quest/glm-5.2",
         "custom_* source provider must survive a bare-choice agent config update"
     );
 
@@ -1821,7 +1837,10 @@ fn broadcast_emits_permission_requested_for_tool_permission_event() {
             saw_permission = true;
         }
     }
-    assert!(saw_permission, "PermissionRequested signal should be broadcast");
+    assert!(
+        saw_permission,
+        "PermissionRequested signal should be broadcast"
+    );
 }
 
 /// In-process loopback: validates the `RemoteControl` gateway end-to-end
@@ -1884,7 +1903,10 @@ fn loopback_remote_control_drives_gateway() {
             saw_permission = true;
         }
     }
-    assert!(saw_permission, "loopback should surface PermissionRequested");
+    assert!(
+        saw_permission,
+        "loopback should surface PermissionRequested"
+    );
 }
 
 /// Remote-mode permission gating: in full-access mode, a destructive

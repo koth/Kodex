@@ -301,17 +301,13 @@ impl Application {
         if matches!(record.change_type, FileChangeType::Created) {
             let abs_path =
                 crate::editor_files::resolve_workspace_path(&self.ui.workspace.root, path, true)?;
-            std::fs::remove_file(&abs_path)
-                .map_err(|error| format!("无法删除文件: {error}"))?;
+            std::fs::remove_file(&abs_path).map_err(|error| format!("无法删除文件: {error}"))?;
         } else {
             let old_text = record
                 .old_text
                 .ok_or_else(|| "无法确定撤销基线".to_string())?;
-            let abs_path = crate::editor_files::resolve_workspace_path(
-                &self.ui.workspace.root,
-                path,
-                false,
-            )?;
+            let abs_path =
+                crate::editor_files::resolve_workspace_path(&self.ui.workspace.root, path, false)?;
             std::fs::write(&abs_path, old_text)
                 .map_err(|error| format!("无法还原文件: {error}"))?;
         }
@@ -326,8 +322,7 @@ impl Application {
         let normalized_relative = normalize_path_for_storage(path, &self.ui.workspace.root);
         let matches = |change: &SessionFileChange| {
             let change_normalized = normalize_tracked_path(&change.path);
-            let change_relative =
-                normalize_path_for_storage(&change.path, &self.ui.workspace.root);
+            let change_relative = normalize_path_for_storage(&change.path, &self.ui.workspace.root);
             change_normalized == normalized
                 || change_normalized == normalized_relative
                 || change_relative == normalized

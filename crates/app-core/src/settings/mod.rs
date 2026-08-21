@@ -8,11 +8,10 @@ pub use agent_cli::{
     command_for_agent, command_for_agent_label, command_for_agent_label_with_paths,
     command_for_agent_with_paths, default_agent_for_new_work, detect_agent,
     detect_agent_with_paths, ensure_agent_ready_for_command, is_claude_agent_acp_command,
-    is_codex_acp_command, is_deepseek_harness_command, remote_agent_env_for_command,
-    remote_codex_home,
-    remote_codex_proxy_config, remote_linux_command_for_agent,
-    remote_linux_command_for_agent_label, resolve_agent_command_with_settings,
-    search_paths,
+    is_codex_acp_command, is_deepseek_harness_agent, is_deepseek_harness_command,
+    remote_agent_env_for_command, remote_codex_home, remote_codex_proxy_config,
+    remote_linux_command_for_agent, remote_linux_command_for_agent_label,
+    resolve_agent_command_with_settings, search_paths,
 };
 
 use agent_cli::{agent_statuses, binary_name};
@@ -108,7 +107,9 @@ pub fn codebuddy_port(paths: &AppPaths) -> u16 {
 /// Read the persisted codebuddy proxy API key.
 pub fn codebuddy_secret(paths: &AppPaths) -> Option<String> {
     let mut secrets = load_provider_secrets(paths);
-    secrets.remove(CODEBUDDY_SECRET_KEY).filter(|s| !s.trim().is_empty())
+    secrets
+        .remove(CODEBUDDY_SECRET_KEY)
+        .filter(|s| !s.trim().is_empty())
 }
 
 /// True when the codebuddy proxy has both a port and an API key configured.
@@ -125,7 +126,10 @@ pub fn codebuddy_default_model(_paths: &AppPaths) -> String {
 /// Defaults to `internal` when unset.
 pub fn codebuddy_internet_environment(paths: &AppPaths) -> String {
     let secrets = load_provider_secrets(paths);
-    match secrets.get(CODEBUDDY_INTERNET_ENV_KEY).map(|v| v.trim().to_string()) {
+    match secrets
+        .get(CODEBUDDY_INTERNET_ENV_KEY)
+        .map(|v| v.trim().to_string())
+    {
         Some(v) if v == "ioa" => "ioa".to_string(),
         _ => "internal".to_string(),
     }
@@ -146,7 +150,10 @@ pub fn codebuddy_debug(paths: &AppPaths) -> bool {
 /// Look up a raw catalog entry by provider id (no normalization side effects).
 fn provider_catalog_entry(paths: &AppPaths, provider: &str) -> Option<ProviderModelsEntry> {
     let provider = normalize_codex_provider(provider).ok()?;
-    load_provider_models_catalog(paths).providers.get(&provider).cloned()
+    load_provider_models_catalog(paths)
+        .providers
+        .get(&provider)
+        .cloned()
 }
 const CUSTOM_PROVIDER_ID: &str = "custom";
 const CUSTOM_PROVIDER_NAME: &str = "Custom Provider";
@@ -1451,9 +1458,18 @@ pub fn build_dsh_settings_config(paths: &AppPaths) -> Result<DshSettingsConfig, 
         }
     }
     let default_model = dsh_default_model(paths, &routes);
+    // Point dsh's `web-search-deepseek` plugin at the env var Kodex injects
+    // for the DeepSeek BYOK provider; the plugin defaults to `DEEPSEEK_API_KEY`,
+    // which nothing in the spawned process provides.
+    let web_search_api_key_env = routes
+        .iter()
+        .find(|route| route.id == DEEPSEEK_PROVIDER_ID)
+        .map(|route| route.api_key_env.clone());
     Ok(DshSettingsConfig {
+        deepseek_byok_configured: web_search_api_key_env.is_some(),
         providers: routes,
         default_model,
+        web_search_api_key_env,
     })
 }
 
@@ -1482,24 +1498,23 @@ fn dsh_provider_route(paths: &AppPaths, provider: &str) -> Option<DshProviderRou
         return None;
     }
 
-    let (base_url, api) = if let Some(definition) =
-        profile_definition(AgentProviderFamily::Codex, provider)
-    {
-        (
-            dsh_upstream_base_url(definition.base_url?),
-            dsh_api_for_proxy_kind(definition.proxy_kind),
-        )
-    } else {
-        // Custom provider: base_url/protocol come from the saved catalog entry.
-        let entry = custom_provider_entries(paths)
-            .into_iter()
-            .find(|(id, _)| id == provider)?
-            .1;
-        (
-            dsh_upstream_base_url(entry.base_url.as_deref()?),
-            dsh_api_for_protocol(entry.protocol),
-        )
-    };
+    let (base_url, api) =
+        if let Some(definition) = profile_definition(AgentProviderFamily::Codex, provider) {
+            (
+                dsh_upstream_base_url(definition.base_url?),
+                dsh_api_for_proxy_kind(definition.proxy_kind),
+            )
+        } else {
+            // Custom provider: base_url/protocol come from the saved catalog entry.
+            let entry = custom_provider_entries(paths)
+                .into_iter()
+                .find(|(id, _)| id == provider)?
+                .1;
+            (
+                dsh_upstream_base_url(entry.base_url.as_deref()?),
+                dsh_api_for_protocol(entry.protocol),
+            )
+        };
 
     let models = effective_catalog_models_for_provider(paths, provider)
         .into_iter()
@@ -1507,11 +1522,28 @@ fn dsh_provider_route(paths: &AppPaths, provider: &str) -> Option<DshProviderRou
             id: entry.slug.clone(),
             name: entry.display_name.unwrap_or(entry.slug),
             context_window: entry.context_window.unwrap_or(DEFAULT_MODEL_CONTEXT_WINDOW),
-            max_tokens: entry
-                .max_output_tokens
-                .unwrap_or(DEFAULT_MODEL_MAX_OUTPUT_TOKENS),
         })
         .collect();
+
+    // Route openai-completions providers through the local codex_api_proxy so
+    // the proxy can normalize parameters the upstream rejects (notably
+    // `max_completion_tokens` → `max_tokens` for zai/litellm-fronted glm
+    // models). The harness's pi-ai adapter sends a bare model slug, so the
+    // proxy resolves the upstream from its provider_configs map; pinning the
+    // provider in the path (`/providers/<provider>`) disambiguates providers
+    // that share a model id (e.g. timiai/glm-5.2 vs custom_ollama/glm-5.2).
+    // Responses/anthropic-messages protocols keep their direct upstream URL:
+    // the proxy's /responses entry requires a session-id header the harness
+    // does not send, and those protocols do not emit max_completion_tokens.
+    let base_url = if api == "openai-completions" {
+        format!(
+            "{}/providers/{}",
+            acp_core::codex_api_proxy_base_url(),
+            provider
+        )
+    } else {
+        base_url
+    };
 
     Some(DshProviderRoute {
         id: provider.to_string(),
@@ -1537,11 +1569,24 @@ fn dsh_upstream_base_url(base_url: &str) -> String {
 
 fn dsh_api_for_proxy_kind(kind: AgentProviderProxyKind) -> String {
     match kind {
-        AgentProviderProxyKind::Responses => "openai-responses".to_string(),
+        // dsh calls the upstream directly — there is no local codex_api_proxy
+        // in its path. So the route's `api` must be the protocol the UPSTREAM
+        // speaks, not the proxy entry point `proxy_kind` describes. Every
+        // built-in Kodex provider's upstream is chat/completions or
+        // anthropic/messages; none is a native OpenAI Responses endpoint.
+        //
+        // `Responses` (timiai) only means "reach the local proxy's /responses
+        // entry"; its upstream is chat/completions
+        // (`codex_api_proxy` forwards timiai to `…/llmproxy/chat/completions`).
+        // Marking it `openai-responses` made pi-ai send `max_output_tokens`,
+        // which the gateway translated to `max_tokens` and then injected its
+        // own default on top — the duplicated-`max_tokens` upstream error.
+        AgentProviderProxyKind::Responses
+        | AgentProviderProxyKind::CompletionToResponses
+        | AgentProviderProxyKind::CodexDefault => "openai-completions".to_string(),
         AgentProviderProxyKind::ClaudeNative | AgentProviderProxyKind::CompletionToClaude => {
             "anthropic-messages".to_string()
         }
-        _ => "openai-completions".to_string(),
     }
 }
 
@@ -1559,15 +1604,14 @@ fn dsh_api_for_protocol(protocol: Option<CustomProviderProtocol>) -> String {
 fn dsh_default_model(paths: &AppPaths, routes: &[DshProviderRoute]) -> DshDefaultModel {
     let current = codex_current_provider(paths);
     if let Some(route) = routes.iter().find(|route| route.id == current) {
-        let model = if let Some(definition) =
-            profile_definition(AgentProviderFamily::Codex, &current)
-        {
-            definition.default_model.map(str::to_string)
-        } else {
-            None
-        }
-        .or_else(|| route.models.first().map(|model| model.id.clone()))
-        .unwrap_or_default();
+        let model =
+            if let Some(definition) = profile_definition(AgentProviderFamily::Codex, &current) {
+                definition.default_model.map(str::to_string)
+            } else {
+                None
+            }
+            .or_else(|| route.models.first().map(|model| model.id.clone()))
+            .unwrap_or_default();
         return DshDefaultModel {
             provider: current,
             model,
@@ -1694,35 +1738,39 @@ fn provider_profile(
         .then(|| custom_provider_entry(paths, definition.id))
         .flatten();
     let custom_protocol = custom_entry.as_ref().and_then(|entry| entry.protocol);
-    let model_entries: Vec<workspace_model::ModelCatalogEntry> = if definition.id == BYOK_PROVIDER_ID {
-        match definition.family {
-            AgentProviderFamily::Codex => configured_codex_byok_models(paths)
-                .into_iter()
-                .map(workspace_model::ModelCatalogEntry::from_slug)
-                .collect(),
-            AgentProviderFamily::Claude => configured_claude_byok_models(paths)
-                .into_iter()
-                .map(workspace_model::ModelCatalogEntry::from_slug)
-                .collect(),
-        }
-    } else if definition.id == CUSTOM_PROVIDER_ID {
-        // The custom provider has no static catalog; its model list is
-        // user-configured in provider-models.json. Surface those models so the
-        // settings page and composer show them instead of an empty list.
-        custom_entry
-            .as_ref()
-            .map(|entry| entry.models.clone())
-            .unwrap_or_default()
-    } else if BYOK_SOURCE_PROVIDER_IDS.contains(&definition.id) {
-        effective_catalog_models_for_provider(paths, definition.id)
-    } else {
-        definition
-            .models
-            .iter()
-            .map(|model| workspace_model::ModelCatalogEntry::from_slug(*model))
-            .collect()
-    };
-    let models: Vec<String> = model_entries.iter().map(|entry| entry.slug.clone()).collect();
+    let model_entries: Vec<workspace_model::ModelCatalogEntry> =
+        if definition.id == BYOK_PROVIDER_ID {
+            match definition.family {
+                AgentProviderFamily::Codex => configured_codex_byok_models(paths)
+                    .into_iter()
+                    .map(workspace_model::ModelCatalogEntry::from_slug)
+                    .collect(),
+                AgentProviderFamily::Claude => configured_claude_byok_models(paths)
+                    .into_iter()
+                    .map(workspace_model::ModelCatalogEntry::from_slug)
+                    .collect(),
+            }
+        } else if definition.id == CUSTOM_PROVIDER_ID {
+            // The custom provider has no static catalog; its model list is
+            // user-configured in provider-models.json. Surface those models so the
+            // settings page and composer show them instead of an empty list.
+            custom_entry
+                .as_ref()
+                .map(|entry| entry.models.clone())
+                .unwrap_or_default()
+        } else if BYOK_SOURCE_PROVIDER_IDS.contains(&definition.id) {
+            effective_catalog_models_for_provider(paths, definition.id)
+        } else {
+            definition
+                .models
+                .iter()
+                .map(|model| workspace_model::ModelCatalogEntry::from_slug(*model))
+                .collect()
+        };
+    let models: Vec<String> = model_entries
+        .iter()
+        .map(|entry| entry.slug.clone())
+        .collect();
     let is_codebuddy = definition.id == CODEBUDDY_PROVIDER_ID;
     let managed_proxy_kind = if is_codebuddy {
         workspace_model::ManagedProxyKind::Codebuddy
@@ -1938,7 +1986,6 @@ fn profile_definition(
         .iter()
         .find(|definition| definition.id == profile_id)
 }
-
 
 pub fn select_agent_provider_profile(
     paths: &AppPaths,
@@ -2304,10 +2351,7 @@ pub fn save_codebuddy_config(
         "ioa" => "ioa",
         _ => "internal",
     };
-    secrets.insert(
-        CODEBUDDY_INTERNET_ENV_KEY.to_string(),
-        env.to_string(),
-    );
+    secrets.insert(CODEBUDDY_INTERNET_ENV_KEY.to_string(), env.to_string());
     secrets.insert(
         CODEBUDDY_DEBUG_KEY.to_string(),
         if debug { "true" } else { "false" }.to_string(),
@@ -2485,11 +2529,8 @@ fn write_codex_byok_channel_config(paths: &AppPaths) -> Result<()> {
     // model's window would cap a later session-level switch. Letting Codex
     // read each model's `context_window` from `model_catalog_json` makes the
     // window follow the active model. Strip any stale value too.
-    let active_entry = lookup_model_attributes_for_active(
-        paths,
-        &active_upstream_model,
-        &active_model_provider,
-    );
+    let active_entry =
+        lookup_model_attributes_for_active(paths, &active_upstream_model, &active_model_provider);
     let active_resolved = resolve_model_attributes(
         active_entry.as_ref(),
         &active_upstream_model,
@@ -2565,8 +2606,7 @@ pub fn write_codex_acp_provider_config(
     } else {
         (
             workspace_model::ModelCatalogEntry::from_slug(default_model_for_provider_with_paths(
-                paths,
-                &provider,
+                paths, &provider,
             )),
             provider.clone(),
         )
@@ -2581,11 +2621,8 @@ pub fn write_codex_acp_provider_config(
     doc["model"] = value(config_model.as_str());
     doc["model_provider"] = value(active_provider);
     doc["preferred_auth_method"] = value(CODEX_AUTH_METHOD_API_KEY);
-    let default_entry = lookup_model_attributes_for_active(
-        paths,
-        &default_model,
-        &default_model_provider,
-    );
+    let default_entry =
+        lookup_model_attributes_for_active(paths, &default_model, &default_model_provider);
     let default_resolved = resolve_model_attributes(
         default_entry.as_ref(),
         &default_model,
@@ -2682,9 +2719,7 @@ fn save_codex_byok_source_secret(paths: &AppPaths, provider: &str, api_key: &str
         );
         doc["model_max_output_tokens"] = value(active_resolved.max_output_tokens);
         if doc.get("model_reasoning_effort").is_none() {
-            doc["model_reasoning_effort"] = value(
-                active_resolved.reasoning_effort.as_codex_str(),
-            );
+            doc["model_reasoning_effort"] = value(active_resolved.reasoning_effort.as_codex_str());
         }
         if doc.get("model_catalog_json").is_none() {
             doc["model_catalog_json"] = value(
@@ -2752,7 +2787,10 @@ fn byok_source_provider_ids(paths: &AppPaths) -> Vec<String> {
     providers
 }
 
-fn custom_catalog_models_for_provider(paths: &AppPaths, provider: &str) -> Option<Vec<workspace_model::ModelCatalogEntry>> {
+fn custom_catalog_models_for_provider(
+    paths: &AppPaths,
+    provider: &str,
+) -> Option<Vec<workspace_model::ModelCatalogEntry>> {
     let provider = normalize_codex_provider(provider).ok()?;
     let catalog = load_provider_models_catalog(paths);
     let models = catalog.providers.get(&provider)?.models.clone();
@@ -2875,14 +2913,33 @@ fn codex_provider_keys(paths: &AppPaths) -> Vec<(String, String)> {
 }
 
 fn codex_model_provider_map_env(paths: &AppPaths) -> Option<(String, String)> {
-    let catalog_provider = codex_selected_catalog_provider(paths);
-    if catalog_provider == CODEX_DEFAULT_PROVIDER_ID {
+    let active = codex_selected_catalog_provider(paths);
+    if active == CODEX_DEFAULT_PROVIDER_ID {
         return None;
     }
-    let entries = catalog_models_for_provider_with_paths(paths, &catalog_provider)
-        .into_iter()
-        .collect::<Vec<_>>();
-    model_provider_map_env_from_entries(paths, &entries, catalog_provider == BYOK_PROVIDER_ID)
+    // Index every configured source provider (not only the currently selected
+    // one) so the local codex_api_proxy can route any of them — including the
+    // dsh harness, which speaks to whichever provider a session selects and
+    // needs the proxy to know that provider's upstream base_url + api_key.
+    let mut entries: Vec<(workspace_model::ModelCatalogEntry, String)> = Vec::new();
+    for provider in byok_source_provider_ids(paths) {
+        // Custom/byok providers need a configured secret to be routable
+        // through the proxy; a built-in catalog provider (timiai, deepseek,
+        // ...) is always indexed so legacy configs that reference it without
+        // a stored secret still surface their model routes — mirroring the
+        // previous single-provider behavior that never checked a secret.
+        let is_builtin = profile_definition(AgentProviderFamily::Codex, &provider).is_some();
+        if !is_builtin && byok_source_secret(paths, AgentProviderFamily::Codex, &provider).is_none()
+        {
+            continue;
+        }
+        entries.extend(
+            effective_catalog_models_for_provider(paths, &provider)
+                .into_iter()
+                .map(|entry| (entry, provider.clone())),
+        );
+    }
+    model_provider_map_env_from_entries(paths, &entries)
 }
 
 fn claude_model_provider_map_env(paths: &AppPaths) -> Option<(String, String)> {
@@ -2897,13 +2954,12 @@ fn claude_model_provider_map_env(paths: &AppPaths) -> Option<(String, String)> {
                 .map(|entry| (entry, provider.clone())),
         );
     }
-    model_provider_map_env_from_entries(paths, &entries, true)
+    model_provider_map_env_from_entries(paths, &entries)
 }
 
 fn model_provider_map_env_from_entries(
     paths: &AppPaths,
     entries: &[(workspace_model::ModelCatalogEntry, String)],
-    encode_provider_models: bool,
 ) -> Option<(String, String)> {
     if entries.is_empty() {
         return None;
@@ -2912,12 +2968,17 @@ fn model_provider_map_env_from_entries(
         .iter()
         .map(|(model_entry, provider)| {
             let model = model_entry.slug.as_str();
-            let model_id = if encode_provider_models {
+            // Encode BYOK/custom source providers with their fully-qualified
+            // `kodex-provider/byok/<provider>/<model>` slug (codex-acp and the
+            // proxy index routes by that key). Built-in catalog providers keep
+            // the bare provider-scoped slug.
+            let encode = codex_is_byok_source(provider);
+            let model_id = if encode {
                 byok_encoded_model_slug(&model, provider)
             } else {
                 model_slug_for_provider(&model, provider).to_string()
             };
-            let display_name = if encode_provider_models {
+            let display_name = if encode {
                 byok_display_model_name(&model, provider)
             } else {
                 model_entry
@@ -2987,6 +3048,25 @@ fn sync_codex_api_proxy_model_provider_map(provider_map: Option<&str>) {
 fn sync_codex_api_proxy_model_provider_map_for_paths(paths: &AppPaths) {
     let provider_map = codex_model_provider_map_env(paths);
     sync_codex_api_proxy_model_provider_map(provider_map.as_ref().map(|(_, value)| value.as_str()));
+}
+
+/// Ensure the local `codex_api_proxy` is running and knows every configured
+/// source provider (upstream base_url + api_key + model routes) before the
+/// dsh harness routes its chat/completions traffic through it.
+///
+/// The dsh harness calls providers by their bare model slug, so the proxy
+/// must resolve provider→upstream via its `provider_configs` / `model_providers`
+/// maps. `ensure_codex_api_proxy` registers each provider's api_key;
+/// `sync_codex_api_proxy_model_provider_map_for_paths` populates the route
+/// maps from the full BYOK catalog (every source provider, not just the
+/// currently selected one).
+pub fn ensure_dsh_proxy_routing(paths: &AppPaths) {
+    for source_provider in byok_source_provider_ids(paths) {
+        if let Some(key) = byok_source_secret(paths, AgentProviderFamily::Codex, &source_provider) {
+            acp_core::ensure_codex_api_proxy(&source_provider, &key);
+        }
+    }
+    sync_codex_api_proxy_model_provider_map_for_paths(paths);
 }
 
 fn codex_active_provider_key(path: &Path) -> Option<(String, String)> {
@@ -3091,7 +3171,10 @@ fn ensure_codex_acp_env_key(path: &Path) -> Result<()> {
                     &active_upstream_model,
                     &active_model_provider,
                 );
-                (resolved.max_output_tokens, resolved.reasoning_effort.as_codex_str().to_string())
+                (
+                    resolved.max_output_tokens,
+                    resolved.reasoning_effort.as_codex_str().to_string(),
+                )
             })
             .unwrap_or_else(|| {
                 (
@@ -3194,16 +3277,17 @@ fn ensure_codex_acp_env_key(path: &Path) -> Result<()> {
         .parent()
         .map(AppPaths::from_root)
         .map(|paths| {
-            let entry =
-                lookup_model_attributes_for_active(&paths, &active_model, &provider);
-            let resolved =
-                resolve_model_attributes(entry.as_ref(), &active_model, &provider);
+            let entry = lookup_model_attributes_for_active(&paths, &active_model, &provider);
+            let resolved = resolve_model_attributes(entry.as_ref(), &active_model, &provider);
             (
                 resolved.max_output_tokens,
                 resolved.reasoning_effort.as_codex_str().to_string(),
             )
         })
-        .unwrap_or((expected_max_output_tokens, CODEX_REASONING_EFFORT_NONE.to_string()));
+        .unwrap_or((
+            expected_max_output_tokens,
+            CODEX_REASONING_EFFORT_NONE.to_string(),
+        ));
     if doc
         .get("model_max_output_tokens")
         .and_then(|item| item.as_integer())
@@ -3333,8 +3417,7 @@ fn clear_codex_provider_config(paths: &AppPaths, provider: &str) -> Result<()> {
             &default_model_provider,
         );
         doc["model_max_output_tokens"] = value(default_resolved.max_output_tokens);
-        doc["model_reasoning_effort"] =
-            value(default_resolved.reasoning_effort.as_codex_str());
+        doc["model_reasoning_effort"] = value(default_resolved.reasoning_effort.as_codex_str());
         changed = true;
     }
 
@@ -4012,9 +4095,7 @@ pub(crate) fn resolve_model_attributes(
     let mut resolved = ResolvedModelAttributes {
         context_window: model_context_window_for_provider(upstream_model, provider),
         max_output_tokens: model_max_output_tokens_for_provider(upstream_model, provider),
-        supports_image_input: crate::image_capability::model_supports_image_input(
-            upstream_model,
-        ),
+        supports_image_input: crate::image_capability::model_supports_image_input(upstream_model),
         reasoning_effort: workspace_model::ReasoningEffort::None,
     };
     if let Some(entry) = entry {

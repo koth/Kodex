@@ -367,8 +367,13 @@ impl Application {
         let workspace_root = self.session_config_workspace_root(None);
         let (mut mcp_servers, web_tools_mcp) =
             prepare_web_tools_mcp(&self.app_paths, agent_command, false)?;
-        let (image_servers, image_mcp, image_capabilities) =
-            prepare_image_mcp(&self.app_paths, agent_command, model, &workspace_root, false)?;
+        let (image_servers, image_mcp, image_capabilities) = prepare_image_mcp(
+            &self.app_paths,
+            agent_command,
+            model,
+            &workspace_root,
+            false,
+        )?;
         mcp_servers.extend(image_servers);
         Ok(PreparedSessionRuntime {
             workspace_root,
@@ -494,13 +499,12 @@ impl Application {
             item.attention_state = SessionAttentionState::NeedsAttention;
         }
 
-        item.runtime_status = if self.in_flight_prompt.is_some()
-            || self.pending_image_degradation.is_some()
-        {
-            SessionRuntimeStatus::BackgroundRunning
-        } else {
-            SessionRuntimeStatus::BackgroundIdle
-        };
+        item.runtime_status =
+            if self.in_flight_prompt.is_some() || self.pending_image_degradation.is_some() {
+                SessionRuntimeStatus::BackgroundRunning
+            } else {
+                SessionRuntimeStatus::BackgroundIdle
+            };
     }
 
     pub fn session_switch(&mut self, id: &str) -> Result<(), String> {
@@ -518,13 +522,12 @@ impl Application {
 
         let background_runtime = self.install_runtime_as_visible(target_runtime);
         self.runtime_registry.insert(background_runtime);
-        self.ui.session.status = if self.in_flight_prompt.is_some()
-            || self.pending_image_degradation.is_some()
-        {
-            SessionStatus::Streaming
-        } else {
-            self.ui.session.status.clone()
-        };
+        self.ui.session.status =
+            if self.in_flight_prompt.is_some() || self.pending_image_degradation.is_some() {
+                SessionStatus::Streaming
+            } else {
+                self.ui.session.status.clone()
+            };
         self.poll_current_runtime_progress();
         self.bump_revision();
         Ok(())
@@ -616,7 +619,8 @@ impl Application {
         let resume_id_for_handle = resume_id.clone();
         let has_resume_id = resume_id_for_handle.is_some();
         let agent_command = self.agent_command.clone();
-        let prepared_runtime = self.prepare_session_runtime(&agent_command, &self.ui.session.model)?;
+        let prepared_runtime =
+            self.prepare_session_runtime(&agent_command, &self.ui.session.model)?;
         let mut session = SessionHandle::start(SessionConfig {
             workspace_root: prepared_runtime.workspace_root,
             app_data_root: self.app_paths.root().display().to_string(),

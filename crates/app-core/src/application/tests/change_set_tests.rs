@@ -20,14 +20,14 @@ fn multiple_files_with_nonzero_changes_keep_change_set_after_turn() {
         role: MessageRole::User,
         body: "edit two files".into(),
         created_at: "2026-05-13T00:00:00Z".into(),
-    ..Default::default()
+        ..Default::default()
     });
     app.ui.messages.push(ChatMessage {
         id: assistant_id,
         role: MessageRole::Assistant,
         body: "done".into(),
         created_at: "2026-05-13T00:00:01Z".into(),
-    ..Default::default()
+        ..Default::default()
     });
     app.ui.timeline.push(TimelineItem::Message(user_id));
     app.ui.timeline.push(TimelineItem::Message(assistant_id));
@@ -82,14 +82,14 @@ fn codex_acp_apply_patch_two_files_persist_turn_change_set() {
         role: MessageRole::User,
         body: "edit two files".into(),
         created_at: "2026-05-13T00:00:00Z".into(),
-    ..Default::default()
+        ..Default::default()
     });
     app.ui.messages.push(ChatMessage {
         id: assistant_id,
         role: MessageRole::Assistant,
         body: "done".into(),
         created_at: "2026-05-13T00:00:01Z".into(),
-    ..Default::default()
+        ..Default::default()
     });
     app.ui.timeline.push(TimelineItem::Message(user_id));
     app.ui.timeline.push(TimelineItem::Message(assistant_id));
@@ -160,14 +160,14 @@ fn current_turn_without_file_changes_does_not_inherit_recent_review_changes() {
         role: MessageRole::User,
         body: "How do I start the frontend?".into(),
         created_at: "2026-05-13T00:00:00Z".into(),
-    ..Default::default()
+        ..Default::default()
     });
     app.ui.messages.push(ChatMessage {
         id: assistant_id,
         role: MessageRole::Assistant,
         body: "Use npm run dev.".into(),
         created_at: "2026-05-13T00:00:01Z".into(),
-    ..Default::default()
+        ..Default::default()
     });
     app.ui.timeline.push(TimelineItem::Message(user_id));
     app.ui.timeline.push(TimelineItem::Message(assistant_id));
@@ -214,14 +214,14 @@ fn new_prompt_first_change_does_not_inherit_previous_review_changes() {
         role: MessageRole::User,
         body: "first turn".into(),
         created_at: "2026-05-13T00:00:00Z".into(),
-    ..Default::default()
+        ..Default::default()
     });
     app.ui.messages.push(ChatMessage {
         id: first_assistant,
         role: MessageRole::Assistant,
         body: "first done".into(),
         created_at: "2026-05-13T00:00:01Z".into(),
-    ..Default::default()
+        ..Default::default()
     });
     app.ui.timeline.push(TimelineItem::Message(first_user));
     app.ui.timeline.push(TimelineItem::Message(first_assistant));
@@ -300,14 +300,14 @@ fn current_turn_changes_preserve_first_base_and_final_target() {
         role: MessageRole::User,
         body: "update file".into(),
         created_at: "2026-05-13T00:00:00Z".into(),
-    ..Default::default()
+        ..Default::default()
     });
     app.ui.messages.push(ChatMessage {
         id: assistant_id,
         role: MessageRole::Assistant,
         body: "done".into(),
         created_at: "2026-05-13T00:00:01Z".into(),
-    ..Default::default()
+        ..Default::default()
     });
     app.ui.timeline.push(TimelineItem::Message(user_id));
     app.ui.timeline.push(TimelineItem::Message(assistant_id));
@@ -486,14 +486,14 @@ fn manual_and_agent_changes_for_same_path_stay_separate() {
         role: MessageRole::User,
         body: "agent edit".into(),
         created_at: "2026-05-13T00:00:00Z".into(),
-    ..Default::default()
+        ..Default::default()
     });
     app.ui.messages.push(ChatMessage {
         id: assistant_id,
         role: MessageRole::Assistant,
         body: "done".into(),
         created_at: "2026-05-13T00:00:01Z".into(),
-    ..Default::default()
+        ..Default::default()
     });
     app.ui.timeline.push(TimelineItem::Message(user_id));
     app.ui.timeline.push(TimelineItem::Message(assistant_id));
@@ -552,7 +552,7 @@ fn interrupted_turn_change_set_remains_user_owned_when_no_assistant_message_exis
         role: MessageRole::User,
         body: "change then stop".into(),
         created_at: "2026-05-13T00:00:00Z".into(),
-    ..Default::default()
+        ..Default::default()
     });
     app.ui.timeline.push(TimelineItem::Message(user_id));
     app.current_turn_user_message_id = Some(user_id);
@@ -601,7 +601,7 @@ fn historical_agent_turn_change_sets_keep_their_own_snapshots() {
             role,
             body: body.into(),
             created_at: "2026-05-13T00:00:00Z".into(),
-        ..Default::default()
+            ..Default::default()
         });
         app.ui.timeline.push(TimelineItem::Message(id));
     }
@@ -625,7 +625,7 @@ fn historical_agent_turn_change_sets_keep_their_own_snapshots() {
             role,
             body: body.into(),
             created_at: "2026-05-13T00:00:00Z".into(),
-        ..Default::default()
+            ..Default::default()
         });
         app.ui.timeline.push(TimelineItem::Message(id));
     }
@@ -941,9 +941,7 @@ fn cancel_prompt_finalizes_pending_change_set() {
         .unwrap();
     let cur_set = after
         .iter()
-        .find(|s| {
-            s.message_id == Some(cur_assistant)
-        })
+        .find(|s| s.message_id == Some(cur_assistant))
         .expect("cancelled turn's change set should be finalized with the assistant message id");
     assert_eq!(cur_set.status, ChangeSetStatus::Complete);
 

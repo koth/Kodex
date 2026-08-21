@@ -197,7 +197,9 @@ pub enum PromptMode {
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum PromptContentPart {
-    Text { text: String },
+    Text {
+        text: String,
+    },
     Image {
         #[serde(rename = "mediaType")]
         media_type: String,
@@ -379,10 +381,7 @@ mod tests {
         let resp: ServerResponse = serde_json::from_value(raw).unwrap();
         assert_eq!(resp.rpcId, "rpc-1");
         assert!(resp.result.is_ok());
-        assert_eq!(
-            resp.result.ok_value().unwrap()["sessionId"],
-            "s-1"
-        );
+        assert_eq!(resp.result.ok_value().unwrap()["sessionId"], "s-1");
     }
 
     #[test]

@@ -67,7 +67,8 @@ impl Application {
         }
 
         self.ensure_local_workspace_for("local git commands")?;
-        GitService::stage_status_paths(&self.ui.workspace.root, paths).map_err(|e| e.to_string())?;
+        GitService::stage_status_paths(&self.ui.workspace.root, paths)
+            .map_err(|e| e.to_string())?;
         self.refresh_repository();
         Ok(())
     }
@@ -122,17 +123,14 @@ impl Application {
         Ok(result)
     }
 
-/// Generate a commit-message draft by spinning up a throwaway sub-agent
+    /// Generate a commit-message draft by spinning up a throwaway sub-agent
     /// session with the current model settings. The agent is given read-only
     /// permission, so only inspection commands run — it inspects the staged
     /// changes itself and returns just the message. The temporary session is
     /// used once and shut down; it never touches the visible conversation.
     /// `progress` receives human-readable status updates as the agent works.
     /// Blocking — call off the UI thread.
-    pub fn generate_commit_message(
-        &self,
-        progress: &dyn Fn(&str),
-    ) -> Result<String, String> {
+    pub fn generate_commit_message(&self, progress: &dyn Fn(&str)) -> Result<String, String> {
         if self.is_remote_workspace() {
             return Err("远程工作区暂不支持 AI 生成提交信息".to_string());
         }
@@ -143,10 +141,7 @@ impl Application {
             app_data_root: self.app_paths.root().display().to_string(),
             model,
             agent_command: self.agent_command.clone(),
-            agent_env: crate::settings::agent_env_for_command(
-                &self.agent_command,
-                &self.app_paths,
-            ),
+            agent_env: crate::settings::agent_env_for_command(&self.agent_command, &self.app_paths),
             resume_session_id: None,
             log_id: make_log_id(),
             acp_port: self.acp_port,
@@ -249,7 +244,11 @@ impl Application {
                     if started_at.elapsed() > GENERATE_TIMEOUT {
                         crate::startup_perf::mark(
                             "commit-gen/timeout",
-                            format!("no response after {}s, collected_len={}", GENERATE_TIMEOUT.as_secs(), text.len()),
+                            format!(
+                                "no response after {}s, collected_len={}",
+                                GENERATE_TIMEOUT.as_secs(),
+                                text.len()
+                            ),
                         );
                         run_error = Some(format!(
                             "生成超时（{} 秒无响应），请检查 AI 服务后重试",
@@ -266,7 +265,10 @@ impl Application {
                                         content,
                                     } => {
                                         text.push_str(content);
-                                        crate::startup_perf::mark("commit-gen/chunk", format!("len={}", text.len()));
+                                        crate::startup_perf::mark(
+                                            "commit-gen/chunk",
+                                            format!("len={}", text.len()),
+                                        );
                                     }
                                     ClientEvent::ToolStarted { name, summary, .. } => {
                                         text.clear();
@@ -290,7 +292,10 @@ impl Application {
                                         }
                                     }
                                     ClientEvent::Interrupted { reason } => {
-                                        crate::startup_perf::mark("commit-gen/interrupted", reason.clone());
+                                        crate::startup_perf::mark(
+                                            "commit-gen/interrupted",
+                                            reason.clone(),
+                                        );
                                         run_error = Some(reason.clone());
                                     }
                                     _ => {}
@@ -306,7 +311,10 @@ impl Application {
                     if last_heartbeat.elapsed() >= HEARTBEAT_INTERVAL {
                         heartbeat_count += 1;
                         let dots = ".".repeat((heartbeat_count % 3 + 1) as usize);
-                        progress(&format!("仍在等待 AI 响应{dots}（已等待 {} 秒）", started_at.elapsed().as_secs()));
+                        progress(&format!(
+                            "仍在等待 AI 响应{dots}（已等待 {} 秒）",
+                            started_at.elapsed().as_secs()
+                        ));
                         last_heartbeat = std::time::Instant::now();
                     }
                     std::thread::sleep(POLL_INTERVAL);
@@ -361,7 +369,9 @@ fn is_write_tool(name: &str) -> bool {
         "rewrite_file",
         "write_to_file",
     ];
-    WRITE_TOOLS.iter().any(|tool| lower == *tool || lower.contains(tool))
+    WRITE_TOOLS
+        .iter()
+        .any(|tool| lower == *tool || lower.contains(tool))
 }
 
 fn sanitize_generated_commit_message(raw: &str) -> String {
@@ -478,8 +488,8 @@ fn looks_like_commit_subject(line: &str) -> bool {
         return false;
     }
     const TYPES: &[&str] = &[
-        "feat", "fix", "refactor", "docs", "test", "chore", "style", "perf",
-        "build", "ci", "revert",
+        "feat", "fix", "refactor", "docs", "test", "chore", "style", "perf", "build", "ci",
+        "revert",
     ];
     let lower = line.to_ascii_lowercase();
     for ty in TYPES {
@@ -489,13 +499,12 @@ fn looks_like_commit_subject(line: &str) -> bool {
         let rest = &lower[ty.len()..];
         // type: / type!: / type(scope): / type(scope)!:
         if rest.starts_with(':') || rest.starts_with("!:") {
-            let desc = rest
-                .trim_start_matches('!')
-                .trim_start_matches(':')
-                .trim();
+            let desc = rest.trim_start_matches('!').trim_start_matches(':').trim();
             return !desc.is_empty();
         }
-        if let Some(after_scope) = rest.strip_prefix('(').and_then(|s| s.find(')').map(|i| &s[i + 1..]))
+        if let Some(after_scope) = rest
+            .strip_prefix('(')
+            .and_then(|s| s.find(')').map(|i| &s[i + 1..]))
         {
             if after_scope.starts_with(':') || after_scope.starts_with("!:") {
                 let desc = after_scope
@@ -534,8 +543,6 @@ fn extract_from_commit_subject(text: &str) -> Option<String> {
     Some(lines[subject_idx..].join("\n").trim().to_string())
 }
 
-
-
 #[cfg(test)]
 mod generate_commit_message_tests {
     use super::sanitize_generated_commit_message;
@@ -552,7 +559,8 @@ mod generate_commit_message_tests {
 
     #[test]
     fn strips_code_fences_and_labels() {
-        let raw = "```\nCommit message:\nfix: repair dialog layout\n\n- switch input to textarea\n```\n";
+        let raw =
+            "```\nCommit message:\nfix: repair dialog layout\n\n- switch input to textarea\n```\n";
         let message = sanitize_generated_commit_message(raw);
         assert_eq!(
             message,
@@ -590,7 +598,10 @@ refactor: unified steel-blue accent across all themes with token-driven CSS\n\
     fn strips_preamble_and_keeps_scoped_subject() {
         let raw = "Looking at the staged diff now.\n\nfeat(ui): polish commit dialog\n\n- widen textarea\n";
         let message = sanitize_generated_commit_message(raw);
-        assert_eq!(message, "feat(ui): polish commit dialog\n\n- widen textarea");
+        assert_eq!(
+            message,
+            "feat(ui): polish commit dialog\n\n- widen textarea"
+        );
     }
 
     #[test]
