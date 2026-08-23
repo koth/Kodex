@@ -30,6 +30,10 @@ export interface EncryptedEnvelope {
   to_device_id: string;
   nonce: number[];
   ciphertext: number[];
+  /** Present when this frame is one fragment of a larger encrypted payload. */
+  chunk_id?: string;
+  chunk_index?: number;
+  chunk_total?: number;
 }
 
 // --- Control requests (internally tagged by `op`, snake_case) ---

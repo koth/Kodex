@@ -558,6 +558,26 @@ impl AppState {
         Ok(app.lightweight_ui_update(cursor))
     }
 
+    /// Same as [`Self::poll_active_and_get_update`] but trims Full snapshots
+    /// with [`app_core::Application::remote_ui_snapshot`] so event pushes to
+    /// the mobile relay stay small enough for a phone WebSocket frame.
+    pub fn poll_active_and_get_remote_update(
+        &self,
+        cursor: &mut UiPatchCursor,
+    ) -> Result<Option<UiSnapshotUpdate>, String> {
+        let mut guard = self.workspaces.lock().map_err(|e| e.to_string())?;
+        let active_key = guard.active_workspace.clone().ok_or("No workspace open")?;
+        poll_connected_workspaces(&mut guard);
+        let app = match guard.workspaces.get_mut(&active_key) {
+            Some(WorkspaceEntry::Connected(app)) => app,
+            _ => return Err("No connected workspace open".into()),
+        };
+        Ok(app.lightweight_ui_update(cursor).map(|update| match update {
+            UiSnapshotUpdate::Full(_) => UiSnapshotUpdate::Full(app.remote_ui_snapshot()),
+            other => other,
+        }))
+    }
+
     /// Subscribe to update signals from the active workspace's `Application`.
     /// Returns `Ok(None)` when no connected workspace is active. The returned
     /// receiver is detached from the registry mutex and continues to work

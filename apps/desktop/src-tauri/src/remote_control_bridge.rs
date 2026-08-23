@@ -240,7 +240,7 @@ impl EventSource for AppUpdateEventSource {
                     if let Ok(Some(update)) = self
                         .app
                         .state::<AppState>()
-                        .poll_active_and_get_update(&mut self.cursor)
+                        .poll_active_and_get_remote_update(&mut self.cursor)
                     {
                         let frame = match update {
                             UiSnapshotUpdate::Full(snapshot) => {

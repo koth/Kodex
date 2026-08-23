@@ -836,6 +836,8 @@ fn write_tool_detection_does_not_match_editor_paths() {
     ));
     assert!(is_file_write_tool_identity("edit", "docs/architecture.md"));
     assert!(is_file_write_tool_identity("tool", "mcp__codebuddy__write"));
+    // dsh's edit tool: kind is the inferred "edit", name is "str_replace".
+    assert!(is_file_write_tool_identity("edit", "str_replace"));
 }
 
 #[test]

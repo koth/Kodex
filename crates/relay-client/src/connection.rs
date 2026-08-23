@@ -11,12 +11,28 @@
 use anyhow::{Context, Result};
 use futures::{SinkExt, StreamExt};
 use relay_protocol::{EncryptedEnvelope, Envelope, Message};
+use std::collections::HashMap;
 use std::time::Duration;
 use tokio_tungstenite::tungstenite::Message as WsMessage;
 use tokio_tungstenite::WebSocketStream;
 use tokio_tungstenite::Connector;
+use uuid::Uuid;
 
 use crate::crypto::{SessionKey, decrypt, encrypt};
+
+/// Single encrypted frames above this serialized size are split into
+/// multiple chunk frames so mobile WebSockets never receive a multi-MB frame.
+const CHUNK_SINGLE_FRAME_BYTES: usize = 256 * 1024;
+/// Target ciphertext bytes per chunk (kept well under relay/mobile limits).
+const CHUNK_PAYLOAD_BYTES: usize = 128 * 1024;
+
+/// In-progress reassembly buffer for a chunked encrypted payload.
+struct ChunkBuffer {
+    total: u32,
+    received: Vec<Option<Vec<u8>>>,
+    nonce: Vec<u8>,
+    to_device_id: String,
+}
 
 /// Abstract duplex text-frame transport. The real client uses a TLS
 /// WebSocket; tests use a plain-WS mock. Carries raw JSON text so the
@@ -83,6 +99,8 @@ pub struct RelayConnection<T: RelayTransport> {
     /// Optional diagnostic sink for E2E failures (the desktop shell writes
     /// these to its driver log).
     error_log: Option<std::sync::Arc<dyn Fn(&str) + Send + Sync>>,
+    /// In-progress chunk reassembly keyed by `chunk_id`.
+    chunks: HashMap<String, ChunkBuffer>,
 }
 
 impl<T: RelayTransport> RelayConnection<T> {
@@ -93,6 +111,7 @@ impl<T: RelayTransport> RelayConnection<T> {
             session_key: None,
             peer_device_id: None,
             error_log: None,
+            chunks: HashMap::new(),
         }
     }
 
@@ -138,15 +157,23 @@ impl<T: RelayTransport> RelayConnection<T> {
 
     /// Send an envelope: encrypt to `EncryptedEnvelope` when a session key
     /// is installed, otherwise send plain `Envelope` JSON (auth phase).
+    /// Large encrypted payloads are transparently split into multiple chunk
+    /// frames and reassembled by the peer.
     pub async fn send_envelope(&mut self, envelope: &Envelope) -> Result<()> {
-        let frame = match (&self.session_key, &self.peer_device_id) {
+        match (&self.session_key, &self.peer_device_id) {
             (Some(key), Some(peer)) => {
                 let enc = encrypt(key, peer, envelope)?;
-                serde_json::to_string(&enc)?
+                let frames = split_encrypted_envelope(&enc)?;
+                for frame in frames {
+                    self.transport.send_text(frame).await?;
+                }
             }
-            _ => serde_json::to_string(envelope)?,
-        };
-        self.transport.send_text(frame).await
+            _ => {
+                let frame = serde_json::to_string(envelope)?;
+                self.transport.send_text(frame).await?;
+            }
+        }
+        Ok(())
     }
 
     /// Receive the next envelope: decrypt an `EncryptedEnvelope` when a
@@ -163,55 +190,108 @@ impl<T: RelayTransport> RelayConnection<T> {
             let Some(frame) = self.transport.recv_text().await? else {
                 return Ok(None);
             };
-            let envelope = match &self.session_key {
-                Some(key) => {
-                    // Plaintext frames never carry `to_device_id` at top
-                    // level; encrypted envelopes always do. Route on shape.
-                    if !frame.contains("\"to_device_id\"") {
-                        match serde_json::from_str(&frame) {
-                            Ok(env) => env,
-                            Err(e) => {
-                                eprintln!("[remote-control] recv_envelope: dropping undecodable plaintext frame: {e}");
-                                continue;
-                            }
-                        }
-                    } else {
-                        let enc: EncryptedEnvelope = serde_json::from_str(&frame)
-                            .context("decode encrypted envelope")?;
-                        match decrypt(key, &enc) {
-                            Ok(env) => env,
-                            Err(e) => {
-                                // Decrypt failure = the peer re-paired with a
-                                // fresh key and this connection's key is
-                                // stale. Drop the key so the next envelope
-                                // is treated as plaintext and the caller's
-                                // reconnect can re-pair cleanly.
-                                eprintln!("[remote-control] recv_envelope: decrypt failed ({e}); dropping stale session key");
-                                if let Some(logger) = &self.error_log {
-                                    logger(&format!(
-                                        "decrypt failed to={} nonce_len={} ct_len={}: {e}",
-                                        enc.to_device_id,
-                                        enc.nonce.len(),
-                                        enc.ciphertext.len(),
-                                    ));
-                                }
-                                self.session_key = None;
-                                self.peer_device_id = None;
-                                return Err(anyhow::anyhow!("decrypt failed: {e}"));
-                            }
-                        }
-                    }
-                }
-                None => {
-                    if frame.contains("\"to_device_id\"") {
-                        eprintln!("[remote-control] recv_envelope: skipping encrypted frame before key installed");
+
+            // Plaintext frames never carry `to_device_id` at top level;
+            // encrypted envelopes always do. Route on shape.
+            if !frame.contains("\"to_device_id\"") {
+                match serde_json::from_str(&frame) {
+                    Ok(env) => return Ok(Some(env)),
+                    Err(e) => {
+                        eprintln!("[remote-control] recv_envelope: dropping undecodable plaintext frame: {e}");
                         continue;
                     }
-                    serde_json::from_str(&frame).context("decode plain envelope")?
                 }
+            }
+
+            let enc: EncryptedEnvelope =
+                serde_json::from_str(&frame).context("decode encrypted envelope")?;
+
+            // Fragment of a larger encrypted payload: buffer it and keep
+            // reading until the whole set arrives.
+            let full = if enc.chunk_id.is_some() {
+                match self.reassemble_chunk(enc) {
+                    Some(full) => full,
+                    None => continue,
+                }
+            } else {
+                enc
             };
-            return Ok(Some(envelope));
+
+            let Some(key) = self.session_key.as_ref() else {
+                eprintln!("[remote-control] recv_envelope: skipping encrypted frame before key installed");
+                continue;
+            };
+            match decrypt(key, &full) {
+                Ok(env) => return Ok(Some(env)),
+                Err(e) => {
+                    // Decrypt failure = the peer re-paired with a fresh key
+                    // and this connection's key is stale. Drop the key so the
+                    // next envelope is treated as plaintext and the caller's
+                    // reconnect can re-pair cleanly.
+                    eprintln!("[remote-control] recv_envelope: decrypt failed ({e}); dropping stale session key");
+                    if let Some(logger) = &self.error_log {
+                        logger(&format!(
+                            "decrypt failed to={} nonce_len={} ct_len={}: {e}",
+                            full.to_device_id,
+                            full.nonce.len(),
+                            full.ciphertext.len(),
+                        ));
+                    }
+                    self.session_key = None;
+                    self.peer_device_id = None;
+                    return Err(anyhow::anyhow!("decrypt failed: {e}"));
+                }
+            }
         }
+    }
+
+    /// Buffer a chunked `EncryptedEnvelope` fragment. Returns the fully
+    /// reassembled envelope (chunk metadata stripped) once every fragment of
+    /// the same `chunk_id` has arrived, or `None` while still incomplete.
+    fn reassemble_chunk(&mut self, enc: EncryptedEnvelope) -> Option<EncryptedEnvelope> {
+        let chunk_id = enc.chunk_id.as_deref()?.to_string();
+        let index = enc.chunk_index? as usize;
+        let total = enc.chunk_total? as usize;
+        if total == 0 || index >= total {
+            self.chunks.remove(&chunk_id);
+            return None;
+        }
+
+        let entry = self
+            .chunks
+            .entry(chunk_id.clone())
+            .or_insert_with(|| ChunkBuffer {
+                total: total as u32,
+                received: (0..total).map(|_| None).collect(),
+                nonce: enc.nonce.clone(),
+                to_device_id: enc.to_device_id.clone(),
+            });
+        if entry.total as usize != total || entry.nonce != enc.nonce {
+            // Mismatched fragment set; abandon this id.
+            self.chunks.remove(&chunk_id);
+            return None;
+        }
+        entry.received[index] = Some(enc.ciphertext);
+
+        if entry.received.iter().any(|part| part.is_none()) {
+            return None;
+        }
+        let mut ciphertext = Vec::new();
+        for part in entry.received.drain(..) {
+            if let Some(part) = part {
+                ciphertext.extend_from_slice(&part);
+            }
+        }
+        let full = EncryptedEnvelope {
+            to_device_id: entry.to_device_id.clone(),
+            nonce: entry.nonce.clone(),
+            ciphertext,
+            chunk_id: None,
+            chunk_index: None,
+            chunk_total: None,
+        };
+        self.chunks.remove(&chunk_id);
+        Some(full)
     }
 
     /// Send a pre-serialized plaintext frame (heartbeat). Bypasses E2E
@@ -258,6 +338,34 @@ impl<T: RelayTransport> RelayConnection<T> {
     pub async fn close(&mut self) {
         self.transport.close().await;
     }
+}
+
+/// Split an `EncryptedEnvelope` into one or more serialized chunk frames.
+/// A single frame is returned when it is small enough; otherwise the
+/// ciphertext is divided into `CHUNK_PAYLOAD_BYTES` pieces and each piece is
+/// wrapped in an `EncryptedEnvelope` carrying the same `nonce` plus chunk
+/// metadata, so the receiver can concatenate and decrypt once.
+fn split_encrypted_envelope(enc: &EncryptedEnvelope) -> Result<Vec<String>> {
+    let single = serde_json::to_string(enc)?;
+    if single.len() <= CHUNK_SINGLE_FRAME_BYTES {
+        return Ok(vec![single]);
+    }
+
+    let chunk_id = Uuid::new_v4().to_string();
+    let total = enc.ciphertext.chunks(CHUNK_PAYLOAD_BYTES).count() as u32;
+    let mut frames = Vec::with_capacity(total as usize);
+    for (index, piece) in enc.ciphertext.chunks(CHUNK_PAYLOAD_BYTES).enumerate() {
+        let chunk = EncryptedEnvelope {
+            to_device_id: enc.to_device_id.clone(),
+            nonce: enc.nonce.clone(),
+            ciphertext: piece.to_vec(),
+            chunk_id: Some(chunk_id.clone()),
+            chunk_index: Some(index as u32),
+            chunk_total: Some(total),
+        };
+        frames.push(serde_json::to_string(&chunk)?);
+    }
+    Ok(frames)
 }
 
 /// Spawn a mock relay that parses each inbound `Envelope` (plain) and calls

@@ -706,6 +706,67 @@ async fn session_restore_replays_history_before_started() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn session_resume_does_not_send_agent_preset() {
+    // Regression: a dsh preset is fixed at session creation. Resuming with a
+    // (possibly different) preset in `session.create` makes the harness reject
+    // the resume with `agent-preset-conflict` — the resume must omit the
+    // preset entirely so the session's own preset is respected.
+    let mut c = default_config();
+    c.mux = scripts_with(vec![mux_subscribed("s-1", 0)]);
+    let mock = MockHarness::start(c).await;
+    let registry = Arc::new(HarnessHostRegistry::new());
+
+    let (tx, _rx) = mpsc::channel::<ClientEvent>();
+    let (command_tx, command_rx) = mpsc::channel();
+    let config = acp_core::SessionConfig {
+        workspace_root: "/tmp".into(),
+        app_data_root: "/tmp".into(),
+        model: "deepseek-v4-pro".into(),
+        agent_command: "dsh".into(),
+        agent_env: Vec::new(),
+        resume_session_id: Some("s-1".into()),
+        log_id: "t".into(),
+        acp_port: 0,
+        remote_ssh: None,
+        mcp_servers: Vec::new(),
+        harness_endpoint: Some(mock.endpoint()),
+        // A stale preset (e.g. the current global default) must be dropped.
+        agent_preset: Some("standard".into()),
+    };
+    let wr = registry.clone();
+    let worker = std::thread::spawn(move || {
+        dsh_bridge::run_harness_session(
+            wr,
+            config,
+            tx,
+            command_rx,
+            PermissionBroker::default(),
+            acp_core::ShutdownSignal::default(),
+        )
+    });
+
+    // Wait for the session.create call to arrive at the mock host.
+    let start = std::time::Instant::now();
+    while start.elapsed() < Duration::from_secs(5) {
+        if !mock.creates().is_empty() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let creates = mock.creates();
+    assert_eq!(creates.len(), 1, "expected exactly one session.create");
+    assert_eq!(creates[0].get("sessionId").and_then(Value::as_str), Some("s-1"));
+    assert!(
+        creates[0].get("agentPreset").is_none(),
+        "resume must not send agentPreset; got {:?}",
+        creates[0]
+    );
+
+    let _ = command_tx.send(acp_core::RuntimeCommand::Shutdown);
+    let _ = worker.join();
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn question_answer_multiple_questions_partial_payload() {
     // Reproduce the real-world hang: dsh asks TWO questions, Kodex answers
     // only ONE — dsh's matchesQuestions requires answers.length ==

@@ -50,10 +50,24 @@ pub fn run_harness_session(
     // with the same id+cwd returns the same session. Without the id, dsh
     // mints a fresh blank session and every later prompt lands in it with no
     // prior context.
+    //
+    // A preset is only sent for a NEW session. The harness fixes the preset at
+    // creation and rejects a conflicting preset on resume with
+    // `agent-preset-conflict`, so a resume must not carry one — the session's
+    // own preset is respected automatically.
+    let agent_preset = if config
+        .resume_session_id
+        .as_ref()
+        .is_some_and(|id| !id.is_empty())
+    {
+        None
+    } else {
+        config.agent_preset.clone().filter(|p| !p.is_empty())
+    };
     let create_payload = SessionCreatePayload {
         cwd: Some(config.workspace_root.clone()),
         session_id: config.resume_session_id.clone().filter(|id| !id.is_empty()),
-        agent_preset: config.agent_preset.clone().filter(|p| !p.is_empty()),
+        agent_preset,
         ..Default::default()
     };
     let workspace_root = config.workspace_root.clone();

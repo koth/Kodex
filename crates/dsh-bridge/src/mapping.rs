@@ -272,12 +272,20 @@ pub fn map_session_event(
                 Some(d) => (d.name, d.call_id, d.arguments.clone()),
                 None => (String::new(), String::new(), String::new()),
             };
+            let raw_input_value = serde_json::from_str::<Value>(&raw_input).ok();
             let (kind, summary) = match view {
                 Some(ToolEventView::Call { view }) => {
                     let kind = match view {
                         ToolCallView::Terminal(_) => "execute".to_string(),
                         ToolCallView::Diff(_) => "edit".to_string(),
-                        ToolCallView::Generic(g) => g.kind.clone().unwrap_or_default(),
+                        // dsh renders file tools (view / str_replace / search...)
+                        // with the generic card, which carries no `kind`. Infer
+                        // the semantic kind from the tool name so the UI routes
+                        // them to the read/edit surfaces instead of Shell.
+                        ToolCallView::Generic(g) => g
+                            .kind
+                            .clone()
+                            .unwrap_or_else(|| infer_tool_kind(&name, raw_input_value.as_ref())),
                         ToolCallView::Other => String::new(),
                     };
                     let summary = view
@@ -286,9 +294,11 @@ pub fn map_session_event(
                         .unwrap_or_else(|| name.clone());
                     (kind, summary)
                 }
-                _ => (String::new(), name.clone()),
+                _ => (
+                    infer_tool_kind(&name, raw_input_value.as_ref()),
+                    name.clone(),
+                ),
             };
-            let raw_input_value = serde_json::from_str::<Value>(&raw_input).ok();
             vec![ClientEvent::ToolStarted {
                 id: call_id,
                 parent_id: None,
@@ -569,6 +579,49 @@ fn todo_to_plan_entry(todo: TodoItem) -> AgentPlanEntry {
     }
 }
 
+/// Infer the semantic tool kind (`read` / `edit` / `execute` / `search`) from
+/// the dsh tool name when the generic call view carries no explicit `kind`.
+/// The workbench routes on `kind`: `read`/`search` render as exploration
+/// cards, `edit` renders the diff/变更 surface, `execute` renders the shell
+/// surface. Unknown tools stay empty so they keep the generic presentation.
+fn infer_tool_kind(name: &str, raw_input: Option<&Value>) -> String {
+    let lower = name.trim().to_lowercase();
+    let normalized = lower.replace(['_', '-'], " ");
+    let matches_any = |needles: &[&str]| {
+        needles.iter().any(|needle| {
+            normalized == *needle
+                || normalized.starts_with(&format!("{needle} "))
+                || normalized.ends_with(&format!(" {needle}"))
+                || normalized.contains(&format!(" {needle} "))
+        })
+    };
+
+    // Edit tools: replace/patch/write-shaped names, or any tool whose input
+    // carries an old/new text pair (str_replace-style arguments).
+    if matches_any(&["edit", "str replace", "replace", "patch", "apply patch", "write", "create"])
+    {
+        return "edit".to_string();
+    }
+    if let Some(input) = raw_input {
+        let has_old = input.get("old_string").is_some() || input.get("oldString").is_some();
+        let has_new = input.get("new_string").is_some() || input.get("newString").is_some();
+        if has_old && has_new {
+            return "edit".to_string();
+        }
+    }
+
+    if matches_any(&["view", "read", "open", "cat", "get file"]) {
+        return "read".to_string();
+    }
+    if matches_any(&["search", "grep", "glob", "find", "list", "ls", "query"]) {
+        return "search".to_string();
+    }
+    if matches_any(&["bash", "shell", "exec", "run", "terminal", "command", "cmd"]) {
+        return "execute".to_string();
+    }
+    String::new()
+}
+
 fn render_result(
     data: &ToolResultData,
     view: &ToolResultView,
@@ -591,7 +644,14 @@ fn render_result(
             // carries the model-facing result text as raw_output.
             ("completed".to_string(), None, result_text(data))
         }
-        ToolResultView::Search(v) | ToolResultView::Read(v) | ToolResultView::Web(v) => {
+        ToolResultView::Read(v) => {
+            // Read cards carry `{ path, lines: [{ number, text }] }` — render
+            // them as numbered file content so the exploration card shows the
+            // actual file instead of raw JSON.
+            let rendered = render_read_view(v);
+            (result_outcome(data), None, rendered.or_else(|| result_text(data)))
+        }
+        ToolResultView::Search(v) | ToolResultView::Web(v) => {
             // Unrepresentable structured views → raw_output JSON (recoverable).
             (
                 result_outcome(data),
@@ -628,6 +688,30 @@ fn result_text(data: &ToolResultData) -> Option<String> {
     } else {
         Some(texts.join("\n"))
     }
+}
+
+/// Render a `read` result view (`{ path, lines: [{ number, text }] }`) as
+/// numbered file content. Returns None when the shape is not recognized.
+fn render_read_view(view: &Value) -> Option<String> {
+    let path = view.get("path").and_then(Value::as_str);
+    let lines = view.get("lines").and_then(Value::as_array)?;
+    let mut out = String::new();
+    if let Some(path) = path {
+        out.push_str(path);
+        out.push('\n');
+    }
+    let width = lines
+        .last()
+        .and_then(|line| line.get("number"))
+        .and_then(Value::as_u64)
+        .map(|n| n.to_string().len())
+        .unwrap_or(1);
+    for line in lines {
+        let number = line.get("number").and_then(Value::as_u64).unwrap_or(0);
+        let text = line.get("text").and_then(Value::as_str).unwrap_or_default();
+        out.push_str(&format!("{number:>width$} | {text}\n", width = width));
+    }
+    if out.is_empty() { None } else { Some(out) }
 }
 
 fn usage_event(usage: &TokenUsage) -> ClientEvent {
@@ -904,6 +988,73 @@ mod tests {
                 id, name, kind, summary, raw_input, ..
             } if id == "call-1" && name == "bash" && kind == "execute" && summary == "ls"
                 && raw_input.as_deref() == Some("{\"command\":\"ls\"}")
+        ));
+    }
+
+    #[test]
+    fn generic_card_view_tool_is_classified_as_read() {
+        // dsh renders `view` (file read) with the generic card, which carries
+        // no `kind`. Without inference the UI routes it to the Shell surface.
+        let (sink, _rx) = test_sink();
+        let frame = mux(serde_json::json!({
+            "type": "session/event",
+            "sessionId": "s-1",
+            "event": {
+                "type": "tool/call",
+                "seq": 3,
+                "time": 0.0,
+                "data": { "turn": 1, "step": 1, "callId": "call-v", "name": "view", "arguments": "{\"path\":\"/a/b.rs\"}" }
+            },
+            "view": { "for": "call", "view": { "card": "generic", "title": "view /a/b.rs" } }
+        }));
+        let mapped = map_mux_frame(&frame, &sink);
+        assert!(matches!(
+            &mapped.events[0],
+            ClientEvent::ToolStarted { id, kind, summary, .. }
+                if id == "call-v" && kind == "read" && summary == "view /a/b.rs"
+        ));
+    }
+
+    #[test]
+    fn generic_card_str_replace_tool_is_classified_as_edit() {
+        // `str_replace` edits must land on the edit/diff surface so the
+        // changes panel picks up the verified file change.
+        let (sink, _rx) = test_sink();
+        let frame = mux(serde_json::json!({
+            "type": "session/event",
+            "sessionId": "s-1",
+            "event": {
+                "type": "tool/call",
+                "seq": 3,
+                "time": 0.0,
+                "data": { "turn": 1, "step": 1, "callId": "call-e", "name": "str_replace", "arguments": "{\"path\":\"/a/b.rs\",\"old_string\":\"x\",\"new_string\":\"y\"}" }
+            },
+            "view": { "for": "call", "view": { "card": "generic", "title": "str_replace /a/b.rs" } }
+        }));
+        let mapped = map_mux_frame(&frame, &sink);
+        assert!(matches!(
+            &mapped.events[0],
+            ClientEvent::ToolStarted { id, kind, .. } if id == "call-e" && kind == "edit"
+        ));
+    }
+
+    #[test]
+    fn missing_view_still_infers_kind_from_tool_name() {
+        let (sink, _rx) = test_sink();
+        let frame = mux(serde_json::json!({
+            "type": "session/event",
+            "sessionId": "s-1",
+            "event": {
+                "type": "tool/call",
+                "seq": 3,
+                "time": 0.0,
+                "data": { "turn": 1, "step": 1, "callId": "call-r", "name": "read_file", "arguments": "{\"path\":\"/a/b.rs\"}" }
+            }
+        }));
+        let mapped = map_mux_frame(&frame, &sink);
+        assert!(matches!(
+            &mapped.events[0],
+            ClientEvent::ToolStarted { id, kind, .. } if id == "call-r" && kind == "read"
         ));
     }
 
@@ -1354,7 +1505,7 @@ mod tests {
     }
 
     #[test]
-    fn unrepresentable_view_serializes_to_raw_output_json() {
+    fn read_result_view_renders_numbered_file_content() {
         let (sink, _rx) = test_sink();
         let frame = mux(serde_json::json!({
             "type": "session/event",
@@ -1374,9 +1525,40 @@ mod tests {
             "view": { "for": "result", "view": { "card": "read", "path": "a.rs", "lines": [{ "number": 1, "text": "fn main() {}" }] } }
         }));
         let mapped = map_mux_frame(&frame, &sink);
+        match &mapped.events[0] {
+            ClientEvent::ToolCompleted { raw_output: Some(raw), .. } => {
+                assert!(raw.contains("a.rs"), "path header missing: {raw}");
+                assert!(raw.contains("1 | fn main() {}"), "numbered line missing: {raw}");
+                assert!(!raw.contains("\"lines\""), "must not be raw JSON: {raw}");
+            }
+            other => panic!("expected ToolCompleted with raw_output, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn unrepresentable_view_serializes_to_raw_output_json() {
+        let (sink, _rx) = test_sink();
+        let frame = mux(serde_json::json!({
+            "type": "session/event",
+            "sessionId": "s-1",
+            "event": {
+                "type": "tool/result",
+                "seq": 11,
+                "time": 0.0,
+                "data": {
+                    "turn": 1, "step": 1,
+                    "message": {
+                        "role": "user",
+                        "content": [{ "type": "tool-result", "toolCallId": "call-11", "content": [] }]
+                    }
+                }
+            },
+            "view": { "for": "result", "view": { "card": "search", "query": "foo", "hits": [] } }
+        }));
+        let mapped = map_mux_frame(&frame, &sink);
         assert!(matches!(
             &mapped.events[0],
-            ClientEvent::ToolCompleted { raw_output: Some(raw), .. } if raw.contains("a.rs") && raw.contains("fn main")
+            ClientEvent::ToolCompleted { raw_output: Some(raw), .. } if raw.contains("foo")
         ));
     }
 

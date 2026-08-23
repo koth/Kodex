@@ -343,6 +343,16 @@ impl Application {
         model: &str,
         preset_override: Option<String>,
     ) -> Result<PreparedSessionRuntime, String> {
+        self.prepare_session_runtime_for_resume(agent_command, model, preset_override, false)
+    }
+
+    fn prepare_session_runtime_for_resume(
+        &self,
+        agent_command: &str,
+        model: &str,
+        preset_override: Option<String>,
+        resuming_existing_session: bool,
+    ) -> Result<PreparedSessionRuntime, String> {
         if self.is_remote_workspace() {
             return self.prepare_remote_session_runtime(agent_command);
         }
@@ -362,10 +372,18 @@ impl Application {
             let workspace_root = self.session_config_workspace_root(None);
             // Per-session preset override wins over the global `dsh_default_preset`
             // setting; fall back to the configured default when none is supplied.
+            // When RESUMING an existing harness session no preset is requested:
+            // the preset is fixed at session creation, so sending one (e.g. the
+            // current global default) can conflict with the session's actual
+            // preset and dsh rejects the resume with `agent-preset-conflict`.
             let agent_preset = preset_override
                 .filter(|preset| !preset.trim().is_empty())
                 .or_else(|| {
-                    crate::settings::load_app_settings(&self.app_paths).dsh_default_preset
+                    if resuming_existing_session {
+                        None
+                    } else {
+                        crate::settings::load_app_settings(&self.app_paths).dsh_default_preset
+                    }
                 });
             // Attach the `kodex-image` fallback when image settings are enabled
             // so text-only harness models (e.g. DeepSeek) accept image
@@ -661,8 +679,12 @@ impl Application {
         let resume_id_for_handle = resume_id.clone();
         let has_resume_id = resume_id_for_handle.is_some();
         let agent_command = self.agent_command.clone();
-        let prepared_runtime =
-            self.prepare_session_runtime(&agent_command, &self.ui.session.model, None)?;
+        let prepared_runtime = self.prepare_session_runtime_for_resume(
+            &agent_command,
+            &self.ui.session.model,
+            None,
+            has_resume_id,
+        )?;
         let mut session = SessionHandle::start(SessionConfig {
             workspace_root: prepared_runtime.workspace_root,
             app_data_root: self.app_paths.root().display().to_string(),
@@ -794,10 +816,14 @@ impl Application {
         } else {
             self.agent_command.clone()
         };
-        let prepared_runtime = self.prepare_session_runtime(&session_agent_command, &model, None)?;
-
         let resume_acp_id = self.resume_acp_session_id_for_stored_session(id);
         let has_resume_id = resume_acp_id.is_some();
+        let prepared_runtime = self.prepare_session_runtime_for_resume(
+            &session_agent_command,
+            &model,
+            None,
+            has_resume_id,
+        )?;
         let agent_cli_label =
             active_agent_label_for_command(&session_agent_command, stored_agent_cli);
         let mut session = SessionHandle::start(SessionConfig {
