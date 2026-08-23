@@ -26,6 +26,7 @@ fn config_for(endpoint: String) -> SessionConfig {
         remote_ssh: None,
         mcp_servers: Vec::new(),
         harness_endpoint: Some(endpoint),
+        agent_preset: None,
     }
 }
 
@@ -108,6 +109,175 @@ async fn lifecycle_hydrate_and_set_model() {
     // The mock's session.selectModel response always succeeds; we only need
     // the call to have happened with decoded values (asserted by the absence of
     // Interrupted above, since a 400/422 would surface as selectModel failed).
+
+    let _ = command_tx.send(RuntimeCommand::Shutdown);
+    let _ = worker.join();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn set_mode_on_started_session_reports_notice_not_interrupt() {
+    // A session that has already started a turn cannot switch preset: dsh
+    // answers `agent-preset-locked`. The bridge must surface that as a system
+    // notice, NOT `Interrupted` (which would mark the session dead/disconnected).
+    let mut config_mock = default_config();
+    config_mock.preset_locked = true;
+    let mock = MockHarness::start(config_mock).await;
+    let registry = Arc::new(HarnessHostRegistry::new());
+
+    let (tx, rx) = mpsc::channel::<ClientEvent>();
+    let (command_tx, command_rx) = mpsc::channel();
+    let config = config_for(mock.endpoint());
+
+    let worker_registry = registry.clone();
+    let worker = thread::spawn(move || {
+        dsh_bridge::run_harness_session(
+            worker_registry,
+            config,
+            tx,
+            command_rx,
+            PermissionBroker::default(),
+            ShutdownSignal::default(),
+        )
+    });
+
+    // Wait for hydration before sending SetMode.
+    let start = std::time::Instant::now();
+    while start.elapsed() < Duration::from_secs(5) {
+        match rx.recv_timeout(Duration::from_millis(100)) {
+            Ok(ClientEvent::SessionConfigUpdated { state }) if state.hydrated => break,
+            Ok(_) => {}
+            Err(mpsc::RecvTimeoutError::Timeout) => continue,
+            Err(mpsc::RecvTimeoutError::Disconnected) => break,
+        }
+    }
+
+    let (mode_reply_tx, mode_reply_rx) = mpsc::channel();
+    command_tx
+        .send(RuntimeCommand::SetMode {
+            mode_id: "standard".into(),
+            reply_tx: mode_reply_tx,
+        })
+        .unwrap();
+    let mode_events = mode_reply_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("SetMode reply timed out")
+        .expect("SetMode reply channel closed");
+    assert!(
+        !mode_events
+            .iter()
+            .any(|e| matches!(e, ClientEvent::Interrupted { .. })),
+        "locked preset switch must not interrupt the session: {mode_events:?}"
+    );
+    assert!(
+        mode_events.iter().any(|e| matches!(
+            e,
+            ClientEvent::MessageChunk {
+                role: workspace_model::MessageRole::System,
+                ..
+            }
+        )),
+        "locked preset switch must emit a system notice: {mode_events:?}"
+    );
+
+    let _ = command_tx.send(RuntimeCommand::Shutdown);
+    let _ = worker.join();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn lifecycle_hydrate_includes_preset_mode_control_and_set_mode() {
+    let mock = MockHarness::start(default_config()).await;
+    let registry = Arc::new(HarnessHostRegistry::new());
+
+    let (tx, rx) = mpsc::channel::<ClientEvent>();
+    let (command_tx, command_rx) = mpsc::channel();
+    let config = config_for(mock.endpoint());
+
+    let worker_registry = registry.clone();
+    let worker = thread::spawn(move || {
+        dsh_bridge::run_harness_session(
+            worker_registry,
+            config,
+            tx,
+            command_rx,
+            PermissionBroker::default(),
+            ShutdownSignal::default(),
+        )
+    });
+
+    // 1. Config hydration must include a Mode (agent-preset) control with the
+    // four shipped presets, defaulted to `code`.
+    let mut mode_control = None;
+    let start = std::time::Instant::now();
+    while start.elapsed() < Duration::from_secs(5) {
+        match rx.recv_timeout(Duration::from_millis(100)) {
+            Ok(ClientEvent::SessionConfigUpdated { state }) => {
+                mode_control = state
+                    .controls
+                    .iter()
+                    .find(|c| c.category == workspace_model::SessionConfigCategory::Mode)
+                    .cloned();
+                if mode_control.is_some() {
+                    break;
+                }
+            }
+            Ok(_) => {}
+            Err(mpsc::RecvTimeoutError::Timeout) => continue,
+            Err(mpsc::RecvTimeoutError::Disconnected) => break,
+        }
+    }
+    let mode_control = mode_control.expect("no Mode control published");
+    assert_eq!(mode_control.current_value_id, "code");
+    assert!(
+        mode_control
+            .choices
+            .iter()
+            .any(|c| c.id == "standard"),
+        "preset choices missing `standard`: {:?}",
+        mode_control.choices
+    );
+    assert!(
+        mode_control.choices.iter().any(|c| c.id == "minimal"),
+        "preset choices missing `minimal`"
+    );
+    assert!(
+        mode_control.choices.iter().any(|c| c.id == "cordis"),
+        "preset choices missing `cordis`"
+    );
+
+    // 2. SetMode → agentPreset.select, then re-published config shows the new
+    // selection.
+    let (mode_reply_tx, mode_reply_rx) = mpsc::channel();
+    command_tx
+        .send(RuntimeCommand::SetMode {
+            mode_id: "standard".into(),
+            reply_tx: mode_reply_tx,
+        })
+        .unwrap();
+    let mode_events = mode_reply_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("SetMode reply timed out")
+        .expect("SetMode reply channel closed");
+    assert!(
+        !mode_events
+            .iter()
+            .any(|e| matches!(e, ClientEvent::Interrupted { .. })),
+        "SetMode returned Interrupted: {mode_events:?}"
+    );
+    let updated_mode = mode_events
+        .iter()
+        .find_map(|e| match e {
+            ClientEvent::SessionConfigUpdated { state } => state
+                .controls
+                .iter()
+                .find(|c| c.category == workspace_model::SessionConfigCategory::Mode)
+                .cloned(),
+            _ => None,
+        })
+        .expect("SetMode did not republish Mode control");
+    assert_eq!(updated_mode.current_value_id, "standard");
+
+    // 3. The mock recorded the agentPreset.select call with the chosen id.
+    assert_eq!(mock.preset_selects(), vec!["standard".to_string()]);
 
     let _ = command_tx.send(RuntimeCommand::Shutdown);
     let _ = worker.join();

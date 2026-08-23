@@ -598,6 +598,7 @@ fn test_app_with_agent_command(dir: &tempfile::TempDir, agent_command: String) -
         dir.path(),
         agent_command,
         crate::paths::AppPaths::from_root(dir.path().join("home").join(".kodex")),
+        None,
     )
     .unwrap()
 }

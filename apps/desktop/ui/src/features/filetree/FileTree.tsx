@@ -353,7 +353,11 @@ export function FileTree({
 
   const handleContextMenu = useCallback((entry: FileEntry, x: number, y: number) => {
     const width = 190;
-    const height = entry.kind === "File" && composerReferenceEnabled && onAddComposerReference ? 148 : entry.kind === "File" ? 118 : 82;
+    // rename + reveal always; "发送到上下文" when reference add is enabled;
+    // "删除文件" only for files.
+    const hasReference = composerReferenceEnabled && onAddComposerReference;
+    const itemCount = 2 + (hasReference ? 1 : 0) + (entry.kind === "File" ? 1 : 0);
+    const height = itemCount <= 2 ? 82 : itemCount === 3 ? 118 : 148;
     setContextMenu({
       entry,
       x: Math.min(x, window.innerWidth - width - 8),
@@ -443,7 +447,7 @@ export function FileTree({
   }, []);
 
   const handleAddReference = useCallback((entry: FileEntry) => {
-    if (entry.kind !== "File" || !composerReferenceEnabled || !onAddComposerReference) return;
+    if (!composerReferenceEnabled || !onAddComposerReference) return;
     setContextMenu(null);
     onAddComposerReference(entry.path);
   }, [composerReferenceEnabled, onAddComposerReference]);
@@ -552,7 +556,7 @@ export function FileTree({
           <button type="button" role="menuitem" onClick={() => handleReveal(contextMenu.entry)}>
             {contextMenu.entry.kind === "Directory" ? "在文件浏览器中打开" : "打开所在位置"}
           </button>
-          {contextMenu.entry.kind === "File" && composerReferenceEnabled && onAddComposerReference && (
+          {composerReferenceEnabled && onAddComposerReference && (
             <button
               type="button"
               role="menuitem"

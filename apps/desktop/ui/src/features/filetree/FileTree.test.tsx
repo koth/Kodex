@@ -107,6 +107,26 @@ describe("FileTree", () => {
     expect(onAddReference).toHaveBeenCalledWith("notes.md");
   });
 
+  it("sends a directory to context from the context menu", async () => {
+    const onAddReference = vi.fn();
+    render(
+      <FileTree
+        workspaceRoot="/repo"
+        onFileOpen={vi.fn()}
+        onAddComposerReference={onAddReference}
+        composerReferenceEnabled
+      />,
+    );
+
+    fireEvent.contextMenu(await screen.findByText("src"), {
+      clientX: 12,
+      clientY: 12,
+    });
+    fireEvent.click(screen.getByRole("menuitem", { name: "发送到上下文" }));
+
+    expect(onAddReference).toHaveBeenCalledWith("src");
+  });
+
   it("uses inline search chrome without the panel header", async () => {
     render(<FileTree workspaceRoot="/repo" onFileOpen={vi.fn()} variant="inline" />);
 

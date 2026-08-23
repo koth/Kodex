@@ -409,6 +409,15 @@ export class AppController {
         this.reconnectAttempt += 1;
         this.connState.transition("connecting");
         if (this.reconnectAttempt >= 8) {
+          // Repeated resume failures usually mean the persisted binding is
+          // stale (e.g. the PC or phone identity rotated). Drop the stale
+          // binding so the user is prompted to re-scan a fresh QR instead
+          // of looping forever on a dead identity.
+          await this.unbindAndClear();
+          diagnostics.log(
+            "services",
+            "auto resume exhausted; cleared stale binding; re-scan required",
+          );
           this.connState.transition("disconnected");
           return false;
         }

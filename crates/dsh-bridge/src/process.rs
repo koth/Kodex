@@ -63,6 +63,11 @@ impl DshChild {
             self.kill_on_drop_job = Some(job);
         }
     }
+
+    /// No-op off Windows: job objects are a Windows-only mechanism; teardown
+    /// on Unix kills the child directly via [`kill_child`].
+    #[cfg(not(windows))]
+    pub fn enable_kill_on_drop_job(&mut self) {}
 }
 
 /// Kill a spawned child: first close stdin (grace), then kill. Idempotent.

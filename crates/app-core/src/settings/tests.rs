@@ -247,6 +247,7 @@ fn settings_round_trip() {
             provider: WEB_TOOLS_PROVIDER_BRAVE.to_string(),
         },
         image: ImageSettings::default(),
+        dsh_default_preset: None,
     };
 
     save_app_settings(&paths, &settings).unwrap();
@@ -347,6 +348,7 @@ fn legacy_goose_selection_migrates_to_codebuddy_when_codex_is_missing() {
         claude: ClaudeProviderSettings::default(),
         web_tools: WebToolsSettings::default(),
         image: ImageSettings::default(),
+        dsh_default_preset: None,
     };
 
     save_app_settings(&paths, &settings).unwrap();
@@ -387,6 +389,7 @@ model_provider = "timiai"
         claude: ClaudeProviderSettings::default(),
         web_tools: WebToolsSettings::default(),
         image: ImageSettings::default(),
+        dsh_default_preset: None,
     };
 
     save_app_settings(&paths, &settings).unwrap();
@@ -656,6 +659,7 @@ fn codebuddy_secret_appears_in_byok_model_catalog_with_correct_label() {
             claude: ClaudeProviderSettings::default(),
             web_tools: WebToolsSettings::default(),
             image: ImageSettings::default(),
+            dsh_default_preset: None,
         },
     )
     .unwrap();
@@ -764,6 +768,7 @@ fn codebuddy_emit_model_provider_map_pins_local_proxy_base_url_chat_completions(
             claude: ClaudeProviderSettings::default(),
             web_tools: WebToolsSettings::default(),
             image: ImageSettings::default(),
+            dsh_default_preset: None,
         },
     )
     .unwrap();
@@ -1002,6 +1007,7 @@ fn selected_codex_acp_resolves_with_codex_home_env() {
             claude: ClaudeProviderSettings::default(),
             web_tools: WebToolsSettings::default(),
             image: ImageSettings::default(),
+            dsh_default_preset: None,
         },
     )
     .unwrap();
@@ -1115,6 +1121,7 @@ fn remote_codex_proxy_config_strips_local_only_paths() {
             claude: ClaudeProviderSettings::default(),
             web_tools: WebToolsSettings::default(),
             image: ImageSettings::default(),
+            dsh_default_preset: None,
         },
     )
     .unwrap();
@@ -1171,6 +1178,7 @@ fn remote_codex_model_catalog_content_includes_byok_provider_models() {
             claude: ClaudeProviderSettings::default(),
             web_tools: WebToolsSettings::default(),
             image: ImageSettings::default(),
+            dsh_default_preset: None,
         },
     )
     .unwrap();
@@ -1210,6 +1218,7 @@ fn remote_codex_byok_env_starts_local_proxy_before_scrubbing_keys() {
             claude: ClaudeProviderSettings::default(),
             web_tools: WebToolsSettings::default(),
             image: ImageSettings::default(),
+            dsh_default_preset: None,
         },
     )
     .unwrap();
@@ -2114,6 +2123,7 @@ fn codex_byok_session_launch_repairs_legacy_source_provider_catalog() {
             claude: ClaudeProviderSettings::default(),
             web_tools: WebToolsSettings::default(),
             image: ImageSettings::default(),
+            dsh_default_preset: None,
         },
     )
     .unwrap();
@@ -2203,6 +2213,7 @@ fn codex_byok_session_launch_repairs_misencoded_kimi_model_provider() {
             claude: ClaudeProviderSettings::default(),
             web_tools: WebToolsSettings::default(),
             image: ImageSettings::default(),
+            dsh_default_preset: None,
         },
     )
     .unwrap();
@@ -2735,6 +2746,7 @@ fn env_override_wins_over_persisted_selection() {
             claude: ClaudeProviderSettings::default(),
             web_tools: WebToolsSettings::default(),
             image: ImageSettings::default(),
+            dsh_default_preset: None,
         },
     )
     .unwrap();

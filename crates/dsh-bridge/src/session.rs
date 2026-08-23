@@ -53,8 +53,10 @@ pub fn run_harness_session(
     let create_payload = SessionCreatePayload {
         cwd: Some(config.workspace_root.clone()),
         session_id: config.resume_session_id.clone().filter(|id| !id.is_empty()),
+        agent_preset: config.agent_preset.clone().filter(|p| !p.is_empty()),
         ..Default::default()
     };
+    let workspace_root = config.workspace_root.clone();
     let create_value = host
         .runtime()
         .block_on(client.session_create(Uuid::new_v4().to_string(), &create_payload))?;
@@ -66,6 +68,14 @@ pub fn run_harness_session(
         permission_broker.clone(),
     ));
     sink.set_session_id(session_id.clone());
+    // Shared "a prompt turn is in flight" flag. The session thread sets it when
+    // a queued prompt is accepted and checks it before queueing the next one;
+    // the sink clears it when the turn's `TurnFinished`/`Interrupted` is
+    // forwarded to app-core. Without this, the guard would never be cleared
+    // (turn completion flows through the sink on the host runtime, not through
+    // this command loop) and the next prompt would be silently dropped.
+    let inflight = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    sink.set_inflight_flag(inflight.clone());
     host.router().register(session_id.clone(), sink.clone());
 
     // If resuming, replay history before the live stream delivers events. The
@@ -86,24 +96,37 @@ pub fn run_harness_session(
         session_id: session_id.clone(),
     });
 
-    // Publish the model selector: fetch `session.models` and translate it into
-    // a `SessionConfigUpdated` carrying a Model control so the composer's
-    // model dropdown renders instead of spinning.
-    emit_model_control(&client, &host, &session_id, &tx_events);
+    // Publish the config selectors: fetch `session.models` and `agentPreset.list`
+    // and translate them into a `SessionConfigUpdated` carrying the Model and
+    // Mode (agent-preset) controls so the composer dropdowns render.
+    emit_config_controls(
+        &client,
+        &host,
+        &session_id,
+        create_value.agent_preset.as_deref(),
+        &tx_events,
+    );
     // Declare prompt capabilities. The harness `session/prompt` RPC accepts
     // `mode: "steer"` (an in-flight prompt can be steered mid-turn), so kodex
-    // advertises `session_steer`. Image and embedded-context stay disabled
-    // until the harness image-attachment path is wired through.
+    // advertises `session_steer`. Workspace file/directory references are
+    // carried as text mentions (`@path`) since the harness prompt wire is
+    // text-only, so `embedded_context` is enabled and `prompt_part_to_wire`
+    // translates `WorkspaceFile` parts into mention text. Image attachments
+    // stay disabled until the harness image-attachment path is wired through.
     let _ = tx_events.send(ClientEvent::PromptCapabilitiesUpdated {
         capabilities: workspace_model::PromptInputCapabilities {
             session_steer: true,
+            embedded_context: true,
             ..Default::default()
         },
     });
 
     // Drive the command channel on this thread. Events flow through the sink
-    // on the host's runtime; we only handle commands here.
-    let mut inflight_prompt: Option<String> = None;
+    // on the host's runtime; we only handle commands here. The shared
+    // `inflight` flag is cleared by the sink when a turn completes
+    // (`TurnFinished`/`Interrupted`), so the guard below stays accurate even
+    // though turn completion never re-enters this loop.
+    use std::sync::atomic::Ordering as AtomicOrdering;
 
     for command in rx_commands.iter() {
         if shutdown_signal.is_requested() {
@@ -118,10 +141,9 @@ pub fn run_harness_session(
                 // A steer prompt is delivered to the in-flight turn via the
                 // harness `session/prompt` `mode: "steer"` RPC — it does NOT
                 // start a new turn, so it is allowed while a prompt is in
-                // flight and must not replace `inflight_prompt`. A queued
-                // prompt starts a fresh turn and is rejected while one is
-                // running.
-                if inflight_prompt.is_some() && !is_steer {
+                // flight and must not set the inflight flag. A queued prompt
+                // starts a fresh turn and is rejected while one is running.
+                if inflight.load(AtomicOrdering::Acquire) && !is_steer {
                     if let Some(tx) = accepted_tx {
                         let _ = tx.send(Err(anyhow::anyhow!(
                             "a prompt is already in flight for this session"
@@ -135,7 +157,7 @@ pub fn run_harness_session(
                     PromptMode::Queue
                 };
                 let parts: Vec<PromptContentPart> =
-                    prompt.into_iter().map(prompt_part_to_wire).collect();
+                    prompt.into_iter().map(|p| prompt_part_to_wire(p, &workspace_root)).collect();
                 let payload = SessionPromptPayload {
                     session_id: session_id.clone(),
                     mode,
@@ -148,17 +170,19 @@ pub fn run_harness_session(
                     .block_on(client.session_prompt(rpc_id.clone(), &payload));
                 match result {
                     Ok(_) => {
-                        // A steer does not start a new turn; keep the existing
-                        // inflight prompt id so the running turn's completion
-                        // still clears it.
+                        // A steer does not start a new turn; leave the inflight
+                        // flag as-is so the running turn's completion still
+                        // clears it.
                         if !is_steer {
-                            inflight_prompt = Some(rpc_id);
+                            inflight.store(true, AtomicOrdering::Release);
                         }
                         if let Some(tx) = accepted_tx {
                             let _ = tx.send(Ok(()));
                         }
                     }
                     Err(err) => {
+                        // The prompt never started, so no turn is in flight.
+                        inflight.store(false, AtomicOrdering::Release);
                         let _ = tx_events.send(ClientEvent::Interrupted {
                             reason: format!("session.prompt failed: {err}"),
                         });
@@ -175,7 +199,7 @@ pub fn run_harness_session(
                 let result = host
                     .runtime()
                     .block_on(client.session_cancel(Uuid::new_v4().to_string(), &payload));
-                inflight_prompt = None;
+                inflight.store(false, AtomicOrdering::Release);
                 if let Some(tx) = reply_tx {
                     let _ = tx.send(result.map(|_| ()));
                 }
@@ -187,12 +211,45 @@ pub fn run_harness_session(
             } => {
                 let pending = sink.pending_approvals();
                 let response = pending.build_response(&sink, &rpc_id, &result);
+                if let Some(response) = &response {
+                    tracing::debug!(
+                        target: "dsh-bridge::respond",
+                        rpc_id,
+                        payload = %serde_json::to_string(response).unwrap_or_default(),
+                        "sending respond"
+                    );
+                }
                 let send_result = match response {
                     Some(response) => host.runtime().block_on(client.respond(&response)),
                     None => Err(anyhow::anyhow!(
                         "no pending approval/question for id {rpc_id}"
                     )),
                 };
+                // A `bad-response` means dsh rejected the answer payload
+                // (validation mismatch) — the pending ask stays open on the
+                // host and the turn hangs. Surface it instead of swallowing.
+                let send_result = send_result.and_then(|receipt| {
+                    if !receipt.accepted() {
+                        let reason = match &receipt {
+                            crate::rpc_types::RpcReceipt::Rejected { reason, .. } => {
+                                reason.clone()
+                            }
+                            _ => "rejected".to_string(),
+                        };
+                        tracing::warn!(
+                            target: "dsh-bridge::respond",
+                            rpc_id,
+                            reason = %reason,
+                            "harness rejected respond (question/approval stays pending)"
+                        );
+                        let _ = sink.send(ClientEvent::MessageChunk {
+                            role: workspace_model::MessageRole::System,
+                            content: format!("回答未被接受（{reason}），请重试或取消当前轮次。"),
+                        });
+                        return Err(anyhow::anyhow!("harness respond rejected: {reason}"));
+                    }
+                    Ok(receipt)
+                });
                 // A not-pending receipt (late/duplicate) is a no-op, not an error.
                 let send_result = send_result.or_else(|err| {
                     if err.to_string().contains("not-pending") {
@@ -226,7 +283,7 @@ pub fn run_harness_session(
                         // Re-publish the model selector so the dropdown reflects
                         // the new selection.
                         let mut refreshed = Vec::new();
-                        emit_model_control_into(&client, &host, &session_id, &mut refreshed);
+                        emit_model_control_into(&client, &host, &session_id, None, &mut refreshed);
                         refreshed
                     }
                     Err(err) => vec![ClientEvent::Interrupted {
@@ -279,7 +336,7 @@ pub fn run_harness_session(
                     {
                         Ok(_) => {
                             let mut refreshed = Vec::new();
-                            emit_model_control_into(&client, &host, &session_id, &mut refreshed);
+                            emit_model_control_into(&client, &host, &session_id, None, &mut refreshed);
                             refreshed
                         }
                         Err(err) => vec![ClientEvent::Interrupted {
@@ -293,10 +350,76 @@ pub fn run_harness_session(
                     let _ = tx.send(Ok(events));
                 }
             }
-            // Mode changes are ACP-specific; the harness backend surfaces
-            // config via request/header events instead.
-            RuntimeCommand::SetMode { reply_tx, .. } => {
-                let _ = reply_tx.send(Ok(Vec::new()));
+            // Mode = dsh agent preset: `agentPreset.select` switches the
+            // composition for this session, then re-publish the config
+            // controls so the dropdown reflects the new selection.
+            RuntimeCommand::SetMode { mode_id, reply_tx } => {
+                // The harness only allows switching presets on a blank
+                // session; once a turn has started it rejects with
+                // `agent-preset-locked`. Detect that up front so we never
+                // mutate the shared permission broker on a doomed request
+                // (`SessionHandle::set_mode` only skips the broker update on
+                // RPC errors, but we want to fail before any RPC).
+                let history_payload = crate::rpc_types::SessionHistoryPayload {
+                    session_id: session_id.to_string(),
+                    before_seq: None,
+                    max_messages: Some(1),
+                };
+                let started = host
+                    .runtime()
+                    .block_on(client.session_history(
+                        Uuid::new_v4().to_string(),
+                        &history_payload,
+                    ))
+                    .map(|value| !value.events.is_empty())
+                    .unwrap_or(false);
+                if started {
+                    let _ = reply_tx.send(Err(anyhow::anyhow!(
+                        "该会话已开始，预设已固定。请新建会话并选择目标预设。"
+                    )));
+                    continue;
+                }
+                let payload = crate::rpc_types::AgentPresetSelectPayload {
+                    session_id: session_id.clone(),
+                    agent_preset: mode_id.clone(),
+                };
+                let events = match host
+                    .runtime()
+                    .block_on(client.agent_preset_select(Uuid::new_v4().to_string(), &payload))
+                {
+                    Ok(value) => {
+                        let mut refreshed = Vec::new();
+                        emit_model_control_into(
+                            &client,
+                            &host,
+                            &session_id,
+                            Some(value.agent_preset.as_str()),
+                            &mut refreshed,
+                        );
+                        refreshed
+                    }
+                    Err(err) => {
+                        // A preset switch is only valid on a blank session;
+                        // once a turn has started dsh answers
+                        // `agent-preset-locked`. Return an error so
+                        // `SessionHandle::set_mode` does not apply the new id
+                        // to the shared permission broker, and so the composer
+                        // surfaces the failure instead of pretending the
+                        // switch worked.
+                        if crate::rpc_types::rpc_error_code(&err).as_deref()
+                            == Some("agent-preset-locked")
+                        {
+                            let _ = reply_tx.send(Err(anyhow::anyhow!(
+                                "该会话已开始，预设已固定。请新建会话并选择目标预设。"
+                            )));
+                            continue;
+                        }
+                        vec![ClientEvent::Interrupted {
+                            reason: format!("agentPreset.select failed: {err}"),
+                        }]
+                    }
+                };
+                let _ = reply_tx.send(Ok(events));
             }
             RuntimeCommand::ResolveCodeBuddyInterruption { reply_tx, .. } => {
                 let _ = reply_tx.send(Err(anyhow::anyhow!(
@@ -327,6 +450,7 @@ async fn replay_history(
     let value = client
         .session_history(Uuid::new_v4().to_string(), &payload)
         .await?;
+    sink.set_replaying(true);
     for entry in value.events {
         if let Ok(event) = serde_json::from_value::<crate::frame::SessionEvent>(entry.event) {
             let view = entry
@@ -340,6 +464,7 @@ async fn replay_history(
                 .store(event.seq, std::sync::atomic::Ordering::Release);
         }
     }
+    sink.set_replaying(false);
     Ok(())
 }
 
@@ -352,51 +477,128 @@ fn emit_model_control(
     tx_events: &mpsc::Sender<ClientEvent>,
 ) {
     let mut events = Vec::new();
-    emit_model_control_into(client, host, session_id, &mut events);
+    emit_model_control_into(client, host, session_id, None, &mut events);
     for event in events {
         let _ = tx_events.send(event);
     }
 }
 
-/// Build the model-control `ClientEvent`s (does not send; caller drains).
+/// Emit both config controls (Model + agent-preset Mode) in one update.
+fn emit_config_controls(
+    client: &crate::transport::HttpClient,
+    host: &crate::host::HarnessHost,
+    session_id: &SessionId,
+    current_preset: Option<&str>,
+    tx_events: &mpsc::Sender<ClientEvent>,
+) {
+    let mut events = Vec::new();
+    emit_model_control_into(client, host, session_id, current_preset, &mut events);
+    for event in events {
+        let _ = tx_events.send(event);
+    }
+}
+
+/// Build the config-control `ClientEvent`s (does not send; caller drains).
+/// Fetches `session.models` (Model control) and `agentPreset.list` (Mode
+/// control) and merges them into a single `SessionConfigUpdated`.
 fn emit_model_control_into(
     client: &crate::transport::HttpClient,
     host: &crate::host::HarnessHost,
     session_id: &SessionId,
+    current_preset: Option<&str>,
     out: &mut Vec<ClientEvent>,
 ) {
     let payload = crate::rpc_types::SessionModelsPayload {
         session_id: session_id.to_string(),
     };
-    let Ok(value) = host
+    let model_control = match host
         .runtime()
         .block_on(client.session_models(Uuid::new_v4().to_string(), &payload))
-    else {
-        // No model catalog yet (e.g. no provider configured): emit a hydrated
-        // empty config so the UI settles instead of spinning forever.
-        out.push(ClientEvent::SessionConfigUpdated {
-            state: workspace_model::SessionConfigState {
-                hydrated: true,
-                controls: Vec::new(),
-            },
-        });
-        return;
+    {
+        Ok(value) => model_control_from_models(&value),
+        // No model catalog yet (e.g. no provider configured): fall through
+        // with no Model control so the UI settles instead of spinning forever.
+        Err(_) => None,
     };
-    if let Some(control) = model_control_from_models(&value) {
-        out.push(ClientEvent::SessionConfigUpdated {
-            state: workspace_model::SessionConfigState {
-                hydrated: true,
-                controls: vec![control],
-            },
-        });
-    } else {
-        out.push(ClientEvent::SessionConfigUpdated {
-            state: workspace_model::SessionConfigState {
-                hydrated: true,
-                controls: Vec::new(),
-            },
-        });
+    let preset_control = preset_control_from_list(client, host, current_preset);
+    let mut controls = Vec::new();
+    if let Some(control) = model_control {
+        controls.push(control);
     }
+    if let Some(control) = preset_control {
+        controls.push(control);
+    }
+    out.push(ClientEvent::SessionConfigUpdated {
+        state: workspace_model::SessionConfigState {
+            hydrated: true,
+            controls,
+        },
+    });
+}
+
+/// Build the agent-preset Mode control from `agentPreset.list`. Returns None
+/// when the deployment composes no presets (the control is hidden).
+fn preset_control_from_list(
+    client: &crate::transport::HttpClient,
+    host: &crate::host::HarnessHost,
+    current_preset: Option<&str>,
+) -> Option<workspace_model::SessionConfigControl> {
+    let value = host
+        .runtime()
+        .block_on(client.agent_preset_list(Uuid::new_v4().to_string()))
+        .ok()?;
+    if value.presets.is_empty() {
+        return None;
+    }
+    // Current selection: the session's own preset (from session.create) wins;
+    // otherwise fall back to the deployment default.
+    let current_id = current_preset
+        .map(|p| p.to_string())
+        .or_else(|| {
+            value
+                .presets
+                .iter()
+                .find(|p| p.is_default)
+                .map(|p| p.id.clone())
+        })
+        .unwrap_or_else(|| value.presets[0].id.clone());
+    let current_label = value
+        .presets
+        .iter()
+        .find(|p| p.id == current_id)
+        .map(|p| preset_label(p))
+        .unwrap_or_else(|| current_id.clone());
+    let choices = value
+        .presets
+        .iter()
+        .map(|p| workspace_model::SessionConfigChoice {
+            id: p.id.clone(),
+            label: preset_label(p),
+            description: p.description.clone(),
+            provider: None,
+            provider_label: None,
+        })
+        .collect();
+    Some(workspace_model::SessionConfigControl {
+        id: "mode".to_string(),
+        label: "Mode".to_string(),
+        description: Some(
+            "切换将开启新会话（dsh 预设仅在会话空白时可切换）".to_string(),
+        ),
+        category: workspace_model::SessionConfigCategory::Mode,
+        // LegacyMode routes the change through `RuntimeCommand::SetMode`,
+        // which this backend maps to `agentPreset.select`. (LocalMode would
+        // only update the local permission broker and never reach the host.)
+        source: workspace_model::SessionConfigSource::LegacyMode,
+        current_value_id: current_id,
+        current_value_label: current_label,
+        choices,
+        enabled: true,
+    })
+}
+
+fn preset_label(p: &crate::rpc_types::AgentPresetEntry) -> String {
+    p.name.clone().unwrap_or_else(|| p.id.clone())
 }
 
 /// Translate the dsh `session.models` response into a Model `SessionConfigControl`.
@@ -491,11 +693,47 @@ fn decode_model_value(value_id: &str, provider: Option<String>) -> Option<(Strin
     Some((value_id.to_string(), provider.unwrap_or_default()))
 }
 
-fn prompt_part_to_wire(part: UserPromptContent) -> PromptContentPart {
+fn prompt_part_to_wire(part: UserPromptContent, workspace_root: &str) -> PromptContentPart {
     match part {
         UserPromptContent::Text { text } => PromptContentPart::text(text),
-        // Other UserPromptContent variants (images, context) are not carried in
-        // v1; the harness prompt wire is text-only for now.
+        // Workspace file/directory references are translated to a text mention
+        // (`@path` / `@dir/`) — the harness prompt wire is text-only, so the
+        // reference is carried as a mention the agent can resolve itself.
+        UserPromptContent::WorkspaceFile {
+            path,
+            start_line,
+            end_line,
+        } => match acp_core::runtime::workspace_reference_to_mention_text(
+            workspace_root,
+            &path,
+            start_line,
+            end_line,
+        ) {
+            Ok(mention) => PromptContentPart::text(mention),
+            // Fall back to a bare mention if the path can't be resolved (e.g.
+            // removed between attach and send) rather than dropping it silently.
+            Err(_) => PromptContentPart::text(format!(
+                "@{}",
+                path.replace('\\', "/").trim_start_matches('/')
+            )),
+        },
+        // Image attachments are forwarded as image content parts so multimodal
+        // harness models can view them natively. Text-only models never reach
+        // this path: app-core degrades image blocks to view-model text
+        // descriptions (via the `kodex-image` fallback) before dispatching the
+        // prompt, so the bridge only sees `Text` parts for them.
+        UserPromptContent::Image {
+            data,
+            mime_type,
+            name,
+            ..
+        } => PromptContentPart::Image {
+            media_type: mime_type,
+            data,
+            name,
+        },
+        // Other UserPromptContent variants (opaque file blobs) are not carried
+        // in v1; the harness prompt wire is text/image-only for now.
         _ => PromptContentPart::text(String::new()),
     }
 }
@@ -503,4 +741,127 @@ fn prompt_part_to_wire(part: UserPromptContent) -> PromptContentPart {
 fn local_timezone() -> String {
     // Best-effort IANA timezone; the harness uses this for prompt timestamps.
     std::env::var("TZ").unwrap_or_else(|_| "UTC".to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    #[test]
+    fn text_part_passes_through() {
+        let part = prompt_part_to_wire(UserPromptContent::text("hello"), "/tmp");
+        match part {
+            PromptContentPart::Text { text } => assert_eq!(text, "hello"),
+            other => panic!("expected text, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn workspace_file_part_becomes_mention() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        fs::create_dir_all(root.join("src")).unwrap();
+        fs::write(root.join("src/lib.rs"), "fn main() {}\n").unwrap();
+
+        let part = prompt_part_to_wire(
+            UserPromptContent::workspace_file("src/lib.rs", Some(1), Some(1)),
+            root.to_str().unwrap(),
+        );
+        match part {
+            PromptContentPart::Text { text } => assert_eq!(text, "@src/lib.rs#L1"),
+            other => panic!("expected text mention, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn workspace_directory_part_becomes_dir_mention() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        fs::create_dir_all(root.join("src")).unwrap();
+
+        let part = prompt_part_to_wire(
+            UserPromptContent::workspace_file("src", None, None),
+            root.to_str().unwrap(),
+        );
+        match part {
+            PromptContentPart::Text { text } => assert_eq!(text, "@src/"),
+            other => panic!("expected dir mention, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn image_part_is_forwarded_as_image_content() {
+        let part = prompt_part_to_wire(
+            UserPromptContent::image("Zm9v", "image/png", Some("pic.png".to_string())),
+            "/tmp",
+        );
+        match part {
+            PromptContentPart::Image {
+                media_type,
+                data,
+                name,
+            } => {
+                assert_eq!(media_type, "image/png");
+                assert_eq!(data, "Zm9v");
+                assert_eq!(name.as_deref(), Some("pic.png"));
+            }
+            other => panic!("expected image part, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn sink_clears_inflight_flag_on_turn_finished() {
+        // Regression: a turn completes via the event stream (the session
+        // thread's command loop never sees TurnFinished), so the sink must
+        // clear the shared in-flight flag — otherwise the next queued prompt
+        // is silently dropped by the "one prompt per turn" guard.
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::mpsc;
+
+        let (tx, _rx) = mpsc::channel::<acp_core::ClientEvent>();
+        let sink = crate::host::SessionSink::new(tx, acp_core::PermissionBroker::default());
+        let flag = std::sync::Arc::new(AtomicBool::new(true));
+        sink.set_inflight_flag(flag.clone());
+        assert!(flag.load(Ordering::Acquire), "flag should start set");
+
+        // A mid-turn event must NOT clear the flag.
+        sink.send(acp_core::ClientEvent::MessageChunk {
+            role: workspace_model::MessageRole::Assistant,
+            content: "thinking".to_string(),
+        });
+        assert!(
+            flag.load(Ordering::Acquire),
+            "non-terminal event must not clear the in-flight flag"
+        );
+
+        // TurnFinished clears it.
+        sink.send(acp_core::ClientEvent::TurnFinished {
+            stop_reason: "end_turn".to_string(),
+            detail: None,
+        });
+        assert!(
+            !flag.load(Ordering::Acquire),
+            "TurnFinished must clear the in-flight flag so the next prompt is accepted"
+        );
+    }
+
+    #[test]
+    fn sink_clears_inflight_flag_on_interrupted() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::mpsc;
+
+        let (tx, _rx) = mpsc::channel::<acp_core::ClientEvent>();
+        let sink = crate::host::SessionSink::new(tx, acp_core::PermissionBroker::default());
+        let flag = std::sync::Arc::new(AtomicBool::new(true));
+        sink.set_inflight_flag(flag.clone());
+
+        sink.send(acp_core::ClientEvent::Interrupted {
+            reason: "boom".to_string(),
+        });
+        assert!(
+            !flag.load(Ordering::Acquire),
+            "Interrupted must clear the in-flight flag"
+        );
+    }
 }

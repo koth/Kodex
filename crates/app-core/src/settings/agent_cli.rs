@@ -2,10 +2,80 @@ use super::*;
 use crate::AppPaths;
 use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use toml_edit::{DocumentMut, Item, value};
 use workspace_model::{
     AgentCliId, AgentCliStatus, AgentProviderFamily, AppSettings, CodexConnectionMode,
 };
+
+/// npm package backing the DeepSeek Harness `dsh` CLI.
+pub const DSH_NPM_PACKAGE: &str = "@deepseek-ai/dsh";
+
+fn npm_program() -> &'static str {
+    if cfg!(windows) { "npm.cmd" } else { "npm" }
+}
+
+/// Read the installed `dsh` CLI version via `dsh --version`, parsing the first
+/// semver-looking token from stdout (e.g. `dsh 1.2.3` → `1.2.3`).
+fn dsh_current_version(binary_path: &Path) -> Option<String> {
+    let output = Command::new(binary_path).arg("--version").output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    parse_version_token(&stdout)
+}
+
+/// Extract the first semver-looking token (`1.2.3`, `v1.2.3`) from version
+/// output; returns the bare version without a leading `v`.
+fn parse_version_token(output: &str) -> Option<String> {
+    output
+        .split_whitespace()
+        .find(|token| {
+            let t = token.trim_start_matches('v');
+            t.chars().next().is_some_and(|c| c.is_ascii_digit()) && t.contains('.')
+        })
+        .map(|token| token.trim_start_matches('v').to_string())
+}
+
+/// Query the npm registry for the latest published `dsh` version.
+fn dsh_latest_version() -> Option<String> {
+    // Resolve npm to an absolute path and inject the augmented search PATH:
+    // GUI-launched apps (Finder/Dock) inherit a minimal PATH without
+    // /opt/homebrew/bin or version-manager dirs, so a bare `Command::new("npm")`
+    // fails to locate npm and the version check silently returns None.
+    let resolved = search_paths()
+        .iter()
+        .map(|dir| dir.join(npm_program()))
+        .find(|candidate| candidate.is_file())
+        .unwrap_or_else(|| PathBuf::from(npm_program()));
+    let mut command = Command::new(resolved);
+    if let Ok(joined) = std::env::join_paths(search_paths()) {
+        command.env("PATH", joined);
+    }
+    let output = command
+        .args(["view", DSH_NPM_PACKAGE, "version"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let version = stdout.trim();
+    (!version.is_empty()).then(|| version.to_string())
+}
+
+/// Check for a DeepSeek Harness update: returns `(current, latest)` versions.
+/// `current` comes from `dsh --version` (None when the CLI is missing or its
+/// version cannot be parsed); `latest` comes from the npm registry (None when
+/// the query fails or dsh is not installed).
+pub fn dsh_version_info() -> (Option<String>, Option<String>) {
+    let definition = definition(AgentCliId::DeepSeekHarness).expect("dsh agent id");
+    let detected_path = find_binary(definition.binary);
+    let current = detected_path.as_deref().and_then(dsh_current_version);
+    let latest = detected_path.is_some().then(|| dsh_latest_version()).flatten();
+    (current, latest)
+}
 
 #[derive(Debug, Clone, Copy)]
 pub(super) struct AgentCliDefinition {
@@ -64,10 +134,7 @@ pub fn default_agent_for_new_work(paths: &AppPaths) -> AgentCliId {
         {
             return AgentCliId::CodexAcp;
         }
-        if !detect_agent_with_paths(paths, AgentCliId::Codebuddy).installed {
-            return settings.selected_agent;
-        }
-        return AgentCliId::Codebuddy;
+        return settings.selected_agent;
     }
     settings.selected_agent
 }
@@ -140,6 +207,16 @@ pub fn command_for_agent_with_paths(agent: AgentCliId, paths: &AppPaths) -> Opti
 pub fn detect_agent(agent: AgentCliId) -> AgentCliStatus {
     let definition = definition(agent).expect("supported agent id");
     let detected_path = find_binary(definition.binary);
+    // DeepSeek Harness: surface the installed version so the settings page can
+    // show it. `latest_version` stays None here — it requires an npm registry
+    // round-trip, so it is only fetched on an explicit update check
+    // (`dsh_version_info`) rather than on every settings snapshot.
+    let (current_version, latest_version) =
+        if agent == AgentCliId::DeepSeekHarness {
+            (detected_path.as_deref().and_then(dsh_current_version), None)
+        } else {
+            (None, None)
+        };
     AgentCliStatus {
         id: definition.id,
         label: definition.label.to_string(),
@@ -147,6 +224,8 @@ pub fn detect_agent(agent: AgentCliId) -> AgentCliStatus {
         installed: detected_path.is_some(),
         detected_path,
         selected: false,
+        current_version,
+        latest_version,
     }
 }
 
@@ -161,6 +240,8 @@ pub fn detect_agent_with_paths(paths: &AppPaths, agent: AgentCliId) -> AgentCliS
             installed: detected_path.is_some(),
             detected_path,
             selected: false,
+            current_version: None,
+            latest_version: None,
         };
     }
     if agent != AgentCliId::CodexAcp {
@@ -177,12 +258,15 @@ pub fn detect_agent_with_paths(paths: &AppPaths, agent: AgentCliId) -> AgentCliS
         installed: detected_path.is_some(),
         detected_path,
         selected: false,
+        current_version: None,
+        latest_version: None,
     }
 }
 
 pub(super) fn agent_statuses(paths: &AppPaths, selected_agent: AgentCliId) -> Vec<AgentCliStatus> {
     AGENTS
         .iter()
+        .filter(|definition| definition.id != AgentCliId::Codebuddy)
         .map(|definition| {
             let mut status = detect_agent_with_paths(paths, definition.id);
             status.selected = definition.id == selected_agent;
@@ -723,4 +807,22 @@ fn find_binary(binary: &str) -> Option<PathBuf> {
 
 fn shell_quote_path(path: &Path) -> String {
     shell_words::quote(&path.to_string_lossy()).to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_version_token;
+
+    #[test]
+    fn parses_bare_and_prefixed_versions() {
+        assert_eq!(parse_version_token("1.2.3"), Some("1.2.3".to_string()));
+        assert_eq!(parse_version_token("dsh 1.2.3"), Some("1.2.3".to_string()));
+        assert_eq!(parse_version_token("dsh v0.4.0"), Some("0.4.0".to_string()));
+        assert_eq!(
+            parse_version_token("dsh, version 0.5.1-beta.2"),
+            Some("0.5.1-beta.2".to_string())
+        );
+        assert_eq!(parse_version_token("dsh"), None);
+        assert_eq!(parse_version_token(""), None);
+    }
 }

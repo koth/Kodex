@@ -51,6 +51,7 @@ export function applySnapshotPatch(snapshot: UiSnapshot, patch: UiSnapshotPatch)
     review_changes: patch.review_changes,
     turn_changes: patch.turn_changes ?? snapshot.turn_changes ?? [],
     thinking_status: patch.thinking_status,
+    thinking_text: patch.thinking_text ?? snapshot.thinking_text,
     // The backend always sends the full replacement list of pending steers
     // (empty once they have been moved into the timeline).
     pending_steers: patch.pending_steers ?? snapshot.pending_steers ?? [],
@@ -329,6 +330,7 @@ export function useWorkbenchSnapshot() {
             session: patch.session,
             session_config: patch.session_config ?? prev.session_config,
             thinking_status: patch.thinking_status ?? prev.thinking_status,
+            thinking_text: patch.thinking_text ?? prev.thinking_text,
             pending_steers: patch.pending_steers ?? prev.pending_steers,
           });
         }

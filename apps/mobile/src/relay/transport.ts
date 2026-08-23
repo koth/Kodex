@@ -1,5 +1,9 @@
 import type { Envelope, EncryptedEnvelope } from "../types/relay-protocol";
 
+/** Hard cap for a single inbound WS text frame (4 MiB). Frames above this
+ * are dropped defensively to avoid OOM/crash on memory-constrained phones. */
+const MAX_FRAME_BYTES = 4 * 1024 * 1024;
+
 // Abstract duplex text-frame transport. The real app uses a TLS WebSocket
 // (`WsTransport`); tests use an in-memory `ChannelTransport` (no networking).
 // Carries raw JSON text so the connection layer can choose plain `Envelope`
@@ -36,6 +40,16 @@ export class WsTransport implements RelayTransport {
         typeof ev.data === "string"
           ? ev.data
           : new TextDecoder().decode(ev.data as ArrayBuffer);
+      // Guard against multi-megabyte frames that can OOM React Native's WS
+      // stack before the receive loop can process them. The server should not
+      // send these after the snapshot-size fix; dropping defensively here keeps
+      // the connection (and app) alive instead of crashing on a giant frame.
+      if (data.length > MAX_FRAME_BYTES) {
+        console.warn(
+          `[ws] dropping oversized frame (${data.length} bytes > ${MAX_FRAME_BYTES})`,
+        );
+        return;
+      }
       const waiter = this.waiters.shift();
       if (waiter) waiter(data);
       else this.incoming.push(data);

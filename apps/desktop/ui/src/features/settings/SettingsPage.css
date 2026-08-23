@@ -884,8 +884,28 @@
   align-items: center;
 }
 
+.settings-agent-version {
+  margin-left: 10px;
+  font-size: 12px;
+  color: var(--text-secondary, currentColor);
+  opacity: 0.7;
+  font-variant-numeric: tabular-nums;
+}
+
 .settings-agent-runtime .settings-row-actions {
   margin-left: auto;
+}
+
+.settings-dsh-preset-field {
+  margin-top: 12px;
+  align-items: start;
+}
+
+.settings-dsh-preset-hint {
+  grid-column: 2;
+  margin: -6px 0 0;
+  font-size: 11px;
+  opacity: 0.6;
 }
 
 .settings-update-panel {

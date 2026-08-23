@@ -18,7 +18,13 @@ pub(crate) fn apply_event(ui: &mut UiSnapshot, event: ClientEvent) {
         ClientEvent::SessionStarted { .. } => {}
         ClientEvent::ThinkingActivity { active } => {
             if active {
+                // A fresh thinking run (transition into Active from a
+                // non-active state) starts a new reasoning segment — drop any
+                // text left over from the previous segment so the panel only
+                // ever shows the current one. Re-activating within a segment
+                // (repeated active:true deltas) keeps the text.
                 if ui.thinking_status != Some(ThinkingStatus::Active) {
+                    ui.thinking_text.clear();
                     ui.timeline.push(TimelineItem::Thinking);
                 }
                 ui.thinking_status = Some(ThinkingStatus::Active);
@@ -26,12 +32,16 @@ pub(crate) fn apply_event(ui: &mut UiSnapshot, event: ClientEvent) {
                 ui.thinking_status = Some(ThinkingStatus::Completed);
             }
         }
+        ClientEvent::ThinkingChunk { text } => {
+            ui.thinking_text.push_str(&text);
+        }
         ClientEvent::UsageUpdated { usage } => {
             apply_usage_update(ui, usage);
         }
         ClientEvent::TurnFinished { stop_reason, .. } => {
             finalize_open_tools(ui, &stop_reason);
             ui.thinking_status = None;
+            ui.thinking_text.clear();
             ui.agent_plan.clear();
             ui.session.status = SessionStatus::Idle;
             let section_title = if stop_reason == "end_turn" {
@@ -302,8 +312,16 @@ pub(crate) fn apply_event(ui: &mut UiSnapshot, event: ClientEvent) {
             value_id,
             value_label,
         } => {
-            apply_config_value_change(ui, &control_id, &value_id, value_label);
-            sync_session_summary_from_config(ui);
+            apply_config_value_change(ui, &control_id, &value_id, value_label.clone());
+            // Model changes flow through the config controls above; mode
+            // changes are applied here because `ui.session.mode` is not
+            // synced from LegacyMode controls (their authoritative update is
+            // this event).
+            if control_id == "mode" {
+                ui.session.mode = Some(
+                    value_label.unwrap_or_else(|| value_id.to_string()),
+                );
+            }
         }
         ClientEvent::PlanUpdated { entries } => {
             ui.agent_plan = entries;
@@ -508,6 +526,7 @@ pub(crate) fn apply_event(ui: &mut UiSnapshot, event: ClientEvent) {
         }
         ClientEvent::Interrupted { reason } => {
             ui.agent_plan.clear();
+            ui.thinking_text.clear();
             ui.session.status = workspace_model::SessionStatus::Interrupted;
             for tool in ui
                 .tools
@@ -1041,7 +1060,15 @@ fn sync_session_summary_from_config(ui: &mut UiSnapshot) {
             workspace_model::SessionConfigCategory::Model => {
                 ui.session.model = control.current_value_label.clone();
             }
-            workspace_model::SessionConfigCategory::Mode => {
+            // Only LocalMode (the local permission broker) is authoritative
+            // for `ui.session.mode`. LegacyMode controls carry agent-side
+            // presets (e.g. the dsh agent preset) whose selection is updated
+            // via `SessionConfigValueChanged` after the agent acknowledges the
+            // switch; syncing from the control here would clobber that
+            // selection whenever the controls are re-published.
+            workspace_model::SessionConfigCategory::Mode
+                if control.source == workspace_model::SessionConfigSource::LocalMode =>
+            {
                 ui.session.mode = Some(control.current_value_label.clone());
             }
             _ => {}
@@ -1477,11 +1504,13 @@ fn apply_usage_update(ui: &mut UiSnapshot, mut usage: UsageEvent) {
         ui.usage.context.window_tokens = Some(known_window.max(0) as u64);
     }
     // Estimate `used_tokens` when the agent does not report context occupancy
-    // (notably the dsh harness, whose TokenUsage has no used/window fields):
-    // approximate the current context load as the cumulative input + output +
-    // cache tokens seen this session. This is a rough proxy — it over-counts
-    // when context compaction drops history — but lets the UI render a context
-    // bar for agents that never report `used_tokens`.
+    // (the dsh harness's per-turn `TokenUsage` has no used/window fields, though
+    // its `contextPressure` session projection now feeds a `ContextSnapshot`
+    // event that sets `used_tokens` directly): approximate the current context
+    // load as the cumulative input + output + cache tokens seen this session.
+    // This is a rough proxy — it over-counts when context compaction drops
+    // history — but lets the UI render a context bar for agents that never
+    // report `used_tokens` (and before the first occupancy projection lands).
     if ui.usage.context.used_tokens.is_none() {
         let estimated = usage_token_breakdown_sum(&ui.usage.session_total);
         if estimated > 0 {
@@ -1756,6 +1785,7 @@ mod tests {
             review_changes: Vec::new(),
             turn_changes: Vec::new(),
             thinking_status: None,
+            thinking_text: String::new(),
             usage: Default::default(),
             pending_steers: Vec::new(),
             history_total: 0,
@@ -2659,5 +2689,81 @@ mod tests {
         assert_eq!(ts.as_bytes()[13], b':');
         assert_eq!(ts.as_bytes()[16], b':');
         assert!(ts.ends_with('Z'), "ts={ts}");
+    }
+
+    #[test]
+    fn thinking_chunk_accumulates_and_clears_on_turn_end() {
+        let mut ui = empty_ui();
+
+        apply_event(&mut ui, ClientEvent::ThinkingActivity { active: true });
+        apply_event(
+            &mut ui,
+            ClientEvent::ThinkingChunk {
+                text: "让我想想…".into(),
+            },
+        );
+        apply_event(
+            &mut ui,
+            ClientEvent::ThinkingChunk {
+                text: "需要先读文件".into(),
+            },
+        );
+        assert_eq!(ui.thinking_text, "让我想想…需要先读文件");
+        assert_eq!(ui.thinking_status, Some(ThinkingStatus::Active));
+
+        apply_event(
+            &mut ui,
+            ClientEvent::TurnFinished {
+                stop_reason: "end_turn".into(),
+                detail: None,
+            },
+        );
+        assert_eq!(ui.thinking_text, "");
+        assert_eq!(ui.thinking_status, None);
+    }
+
+    #[test]
+    fn thinking_chunk_cleared_on_interrupt() {
+        let mut ui = empty_ui();
+
+        apply_event(&mut ui, ClientEvent::ThinkingActivity { active: true });
+        apply_event(
+            &mut ui,
+            ClientEvent::ThinkingChunk {
+                text: "思考中".into(),
+            },
+        );
+        apply_event(
+            &mut ui,
+            ClientEvent::Interrupted {
+                reason: "cancelled".into(),
+            },
+        );
+        assert_eq!(ui.thinking_text, "");
+    }
+
+    #[test]
+    fn thinking_segment_restart_clears_prior_text() {
+        let mut ui = empty_ui();
+
+        // First segment.
+        apply_event(&mut ui, ClientEvent::ThinkingActivity { active: true });
+        apply_event(
+            &mut ui,
+            ClientEvent::ThinkingChunk { text: "第一段".into() },
+        );
+        // A repeated active:true within the same segment must NOT clear.
+        apply_event(&mut ui, ClientEvent::ThinkingActivity { active: true });
+        assert_eq!(ui.thinking_text, "第一段");
+
+        // Segment ends (completed), then a fresh segment starts — old text goes.
+        apply_event(&mut ui, ClientEvent::ThinkingActivity { active: false });
+        apply_event(&mut ui, ClientEvent::ThinkingActivity { active: true });
+        assert_eq!(ui.thinking_text, "");
+        apply_event(
+            &mut ui,
+            ClientEvent::ThinkingChunk { text: "第二段".into() },
+        );
+        assert_eq!(ui.thinking_text, "第二段");
     }
 }

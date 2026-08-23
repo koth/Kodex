@@ -399,6 +399,7 @@ impl Application {
             }
             ClientEvent::SessionStarted { .. }
             | ClientEvent::ThinkingActivity { .. }
+            | ClientEvent::ThinkingChunk { .. }
             | ClientEvent::ContextCompactionStarted { .. }
             | ClientEvent::ContextCompacted { .. }
             | ClientEvent::MessageChunk { .. }

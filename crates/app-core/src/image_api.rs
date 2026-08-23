@@ -32,6 +32,12 @@ use crate::image_mcp::ImageMcpConfig;
 /// Lives on the shared `ImageMcpService` so it persists across tool calls.
 pub(crate) type ViewCache = HashMap<String, String>;
 
+/// Stable `session-id` carried by `view_image` calls to the codex API proxy's
+/// `/responses` entry (which requires the header). Distinct from any ACP
+/// conversation session id so view retries never surface as the active
+/// conversation retrying.
+const IMAGE_VIEW_PROXY_SESSION_ID: &str = "kodex-image-view";
+
 pub struct ImageApi {
     config: ImageMcpConfig,
     view_cache: Arc<Mutex<ViewCache>>,
@@ -113,6 +119,14 @@ impl ImageApi {
         let response = client
             .post(&url)
             .header(reqwest::header::ACCEPT, "application/json")
+            // The proxy's `/responses` entry mandates a `session-id` header (it
+            // forwards it upstream as `X-Session-Id` so a provider can reuse a
+            // warm SDK session). `view_image` is an independent pipeline, not an
+            // ACP conversation, so it carries a dedicated stable id instead of
+            // the active conversation's session id — this keeps view retries
+            // out of the main conversation's proxy-retry registry and gives the
+            // view provider one warm session for all image descriptions.
+            .header("session-id", IMAGE_VIEW_PROXY_SESSION_ID)
             .json(&payload)
             .send()
             .await

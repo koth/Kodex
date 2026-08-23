@@ -7,6 +7,9 @@ struct PreparedSessionRuntime {
     remote_ssh: Option<RemoteSshSessionConfig>,
     mcp_servers: Vec<acp_core::McpServer>,
     harness_endpoint: Option<String>,
+    /// DeepSeek Harness default agent preset for a new session (from settings).
+    /// `None` for non-harness agents.
+    agent_preset: Option<String>,
     web_tools_mcp: Option<crate::web_tools_mcp::WebToolsMcpHandle>,
     image_mcp: Option<crate::image_mcp::ImageMcpHandle>,
     image_capabilities: workspace_model::ImageCapabilities,
@@ -104,6 +107,7 @@ pub(super) fn prepare_image_mcp(
 > {
     let is_codex = crate::settings::is_codex_acp_command(agent_command);
     let is_claude = crate::settings::is_claude_agent_acp_command(agent_command);
+    let is_harness = crate::settings::is_deepseek_harness_command(agent_command);
     // Even when the image MCP fallback is not attached, resolve `native_view`
     // from the model name so text-only models correctly gate image
     // attachments instead of being assumed capable (Bug 1).
@@ -117,7 +121,7 @@ pub(super) fn prepare_image_mcp(
         provider.as_deref(),
         agent_command,
     );
-    if remote_session || !(is_codex || is_claude) {
+    if remote_session || !(is_codex || is_claude || is_harness) {
         return Ok((Vec::new(), None, caps));
     }
     let settings = crate::settings::load_app_settings(app_paths);
@@ -337,28 +341,60 @@ impl Application {
         &self,
         agent_command: &str,
         model: &str,
+        preset_override: Option<String>,
     ) -> Result<PreparedSessionRuntime, String> {
         if self.is_remote_workspace() {
             return self.prepare_remote_session_runtime(agent_command);
         }
 
-        // DeepSeek Harness: no ACP subprocess, no codex/image/web-tools MCP.
+        // DeepSeek Harness: no ACP subprocess, no codex/web-tools MCP.
         // Kodex writes the dsh settings document, spawns `dsh web`, and the
         // returned endpoint selects the harness backend via
-        // `SessionConfig.harness_endpoint`.
+        // `SessionConfig.harness_endpoint`. The `kodex-image` MCP fallback is
+        // still attached (when image settings are enabled) so text-only harness
+        // models (e.g. DeepSeek) accept image attachments degraded through the
+        // view model — mirroring the codex text-only path. The MCP server is
+        // not added to `mcp_servers` because the harness ignores ACP MCP
+        // config; app-core uses the handle directly for prompt degradation.
         if crate::settings::is_deepseek_harness_command(agent_command) {
             let harness_endpoint =
                 crate::dsh_bringup::dsh_bringup().ensure_harness_endpoint(&self.app_paths)?;
+            let workspace_root = self.session_config_workspace_root(None);
+            // Per-session preset override wins over the global `dsh_default_preset`
+            // setting; fall back to the configured default when none is supplied.
+            let agent_preset = preset_override
+                .filter(|preset| !preset.trim().is_empty())
+                .or_else(|| {
+                    crate::settings::load_app_settings(&self.app_paths).dsh_default_preset
+                });
+            // Attach the `kodex-image` fallback when image settings are enabled
+            // so text-only harness models (e.g. DeepSeek) accept image
+            // attachments degraded through the view model — mirroring the
+            // codex text-only path. The MCP server entry is discarded: the
+            // harness ignores ACP MCP config, and app-core only needs the
+            // handle for prompt-level degradation. A misconfigured view
+            // provider must not block session creation, so fall back to "no
+            // image support" on error (matching the bootstrap path).
+            let (image_mcp, image_capabilities) =
+                match prepare_image_mcp(&self.app_paths, agent_command, model, &workspace_root, false)
+                {
+                    Ok((_image_servers, handle, caps)) => (handle, caps),
+                    Err(error) => {
+                        crate::startup_perf::mark("dsh/image_mcp_failed", error);
+                        (None, workspace_model::ImageCapabilities::default())
+                    }
+                };
             return Ok(PreparedSessionRuntime {
-                workspace_root: self.session_config_workspace_root(None),
+                workspace_root,
                 agent_env: Vec::new(),
                 acp_port: 0,
                 remote_ssh: None,
                 mcp_servers: Vec::new(),
                 harness_endpoint: Some(harness_endpoint),
+                agent_preset,
                 web_tools_mcp: None,
-                image_mcp: None,
-                image_capabilities: workspace_model::ImageCapabilities::assumed_native(),
+                image_mcp,
+                image_capabilities,
             });
         }
 
@@ -382,6 +418,7 @@ impl Application {
             remote_ssh: None,
             mcp_servers,
             harness_endpoint: None,
+            agent_preset: None,
             web_tools_mcp,
             image_mcp,
             image_capabilities,
@@ -421,6 +458,7 @@ impl Application {
             remote_ssh: Some(remote_ssh),
             mcp_servers: Vec::new(),
             harness_endpoint: None,
+            agent_preset: None,
             web_tools_mcp: None,
             image_mcp: None,
             image_capabilities: workspace_model::ImageCapabilities::assumed_native(),
@@ -533,7 +571,11 @@ impl Application {
         Ok(())
     }
 
-    pub fn session_create(&mut self, agent: Option<AgentCliId>) -> Result<(), String> {
+    pub fn session_create(
+        &mut self,
+        agent: Option<AgentCliId>,
+        preset: Option<String>,
+    ) -> Result<(), String> {
         // Reuse the current session when it has no activity yet: opening a
         // workspace bootstraps an empty placeholder session, so a fresh
         // "��建对话" from the sidebar would otherwise create a second empty
@@ -549,7 +591,7 @@ impl Application {
             self.bump_revision();
             return Ok(());
         }
-        let runtime = self.runtime_for_new_session(agent)?;
+        let runtime = self.runtime_for_new_session(agent, preset)?;
         let background_runtime = self.install_runtime_as_visible(runtime);
         self.runtime_registry.insert(background_runtime);
         self.bump_revision();
@@ -569,7 +611,7 @@ impl Application {
             if let Some(replacement_id) = replacement_id {
                 self.session_switch(&replacement_id)?;
             } else {
-                self.session_create(None)?;
+                self.session_create(None, None)?;
             }
         }
 
@@ -592,7 +634,7 @@ impl Application {
             if let Some(replacement_id) = replacement_id {
                 self.session_switch(&replacement_id)?;
             } else {
-                self.session_create(None)?;
+                self.session_create(None, None)?;
             }
         }
 
@@ -620,7 +662,7 @@ impl Application {
         let has_resume_id = resume_id_for_handle.is_some();
         let agent_command = self.agent_command.clone();
         let prepared_runtime =
-            self.prepare_session_runtime(&agent_command, &self.ui.session.model)?;
+            self.prepare_session_runtime(&agent_command, &self.ui.session.model, None)?;
         let mut session = SessionHandle::start(SessionConfig {
             workspace_root: prepared_runtime.workspace_root,
             app_data_root: self.app_paths.root().display().to_string(),
@@ -633,6 +675,7 @@ impl Application {
             remote_ssh: prepared_runtime.remote_ssh.clone(),
             mcp_servers: prepared_runtime.mcp_servers.clone(),
             harness_endpoint: prepared_runtime.harness_endpoint.clone(),
+            agent_preset: prepared_runtime.agent_preset.clone(),
         })
         .map_err(|e| e.to_string())?;
         if let Some(acp_id) = resume_id_for_handle {
@@ -751,7 +794,7 @@ impl Application {
         } else {
             self.agent_command.clone()
         };
-        let prepared_runtime = self.prepare_session_runtime(&session_agent_command, &model)?;
+        let prepared_runtime = self.prepare_session_runtime(&session_agent_command, &model, None)?;
 
         let resume_acp_id = self.resume_acp_session_id_for_stored_session(id);
         let has_resume_id = resume_acp_id.is_some();
@@ -769,6 +812,7 @@ impl Application {
             remote_ssh: prepared_runtime.remote_ssh.clone(),
             mcp_servers: prepared_runtime.mcp_servers.clone(),
             harness_endpoint: prepared_runtime.harness_endpoint.clone(),
+            agent_preset: prepared_runtime.agent_preset.clone(),
         })
         .map_err(|e| e.to_string())?;
         let _ = session.set_permission_mode(mode.as_deref().unwrap_or("Build"));
@@ -872,6 +916,7 @@ impl Application {
     fn runtime_for_new_session(
         &mut self,
         agent: Option<AgentCliId>,
+        preset: Option<String>,
     ) -> Result<SessionRuntime, String> {
         let new_id = uuid::Uuid::new_v4();
         let initial_model = AGENT_DEFAULT_MODEL_LABEL.to_string();
@@ -880,7 +925,7 @@ impl Application {
             .map_err(|e| e.to_string())?;
 
         let agent_command = self.prepare_agent_command_for_new_session(agent)?;
-        let prepared_runtime = self.prepare_session_runtime(&agent_command, &initial_model)?;
+        let prepared_runtime = self.prepare_session_runtime(&agent_command, &initial_model, preset)?;
 
         let agent_cli_label = crate::settings::agent_label_for_command(&agent_command);
         let mut session = SessionHandle::start(SessionConfig {
@@ -895,6 +940,7 @@ impl Application {
             remote_ssh: prepared_runtime.remote_ssh.clone(),
             mcp_servers: prepared_runtime.mcp_servers.clone(),
             harness_endpoint: prepared_runtime.harness_endpoint.clone(),
+            agent_preset: prepared_runtime.agent_preset.clone(),
         })
         .map_err(|e| e.to_string())?;
         let _ = session.set_permission_mode("Build");

@@ -577,7 +577,7 @@ function archivedSession(
   };
 }
 
-async function openAgentSettingsTab(label: "CodeBuddy" | "Codex" | "Claude") {
+async function openAgentSettingsTab(label: "Codex" | "Claude") {
   const tab = await screen.findByRole("tab", { name: label });
   fireEvent.click(tab);
 }
@@ -896,7 +896,6 @@ describe("SettingsPage LSP settings", () => {
     expect(tabs.map((tab) => tab.textContent)).toEqual([
       "Claude",
       "Codex",
-      "CodeBuddy",
       "DeepSeek Harness",
     ]);
   });

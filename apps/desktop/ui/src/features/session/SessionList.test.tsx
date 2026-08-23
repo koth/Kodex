@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { appConfirm } from "../../lib/confirm";
 import { SessionList } from "./SessionList";
 import { onRemoteOpenProgress, onSessionStatus } from "../../lib/events";
+import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import {
   sessionCreate,
   sessionArchive,
@@ -10,9 +11,11 @@ import {
   sessionSwitch,
   workspaceArchive,
   workspaceChatsRoot,
+  workspaceOpen,
   workspaceSetActive,
   settingsGetAgentSnapshot,
   settingsGetRemoteProfiles,
+  settingsListDshPresets,
   settingsValidateRemoteProfile,
   workspaceOpenRemoteProfile,
 } from "../../lib/tauri";
@@ -36,8 +39,10 @@ vi.mock("../../lib/tauri", async () => {
     sessionArchive: vi.fn(),
     sessionCancel: vi.fn(),
     workspaceArchive: vi.fn(),
+    workspaceOpen: vi.fn(),
     settingsGetAgentSnapshot: vi.fn(),
     settingsGetRemoteProfiles: vi.fn(),
+    settingsListDshPresets: vi.fn(),
     settingsValidateRemoteProfile: vi.fn(),
     workspaceChatsRoot: vi.fn(),
     workspaceSetActive: vi.fn(),
@@ -131,6 +136,14 @@ function agentSnapshot(
         installed: true,
         detected_path: "/Users/kothchen/.kodex/bin/claude-agent-acp",
         selected: true,
+      },
+      {
+        id: "deepseek-harness",
+        label: "DeepSeek Harness",
+        binary: "dsh",
+        installed: true,
+        detected_path: "/opt/homebrew/bin/dsh",
+        selected: false,
       },
     ],
     env_override: null,
@@ -242,6 +255,7 @@ describe("SessionList agent picker", () => {
     vi.mocked(sessionSwitch).mockResolvedValue(undefined);
     vi.mocked(sessionArchive).mockResolvedValue(undefined);
     vi.mocked(workspaceArchive).mockResolvedValue(null);
+    vi.mocked(workspaceOpen).mockResolvedValue({} as never);
     vi.mocked(appConfirm).mockResolvedValue(true);
     vi.mocked(workspaceChatsRoot).mockResolvedValue("");
     vi.mocked(workspaceSetActive).mockResolvedValue({} as never);
@@ -275,7 +289,166 @@ describe("SessionList agent picker", () => {
     expect(createButton).toBeEnabled();
     fireEvent.click(createButton);
 
-    await waitFor(() => expect(sessionCreate).toHaveBeenCalledWith("/Users/kothchen/code/Kodex", "claude-agent-acp"));
+    await waitFor(() => expect(sessionCreate).toHaveBeenCalledWith("/Users/kothchen/code/Kodex", "claude-agent-acp", null));
+  });
+
+  it("shows a preset dropdown for DeepSeek Harness and passes the selected preset", async () => {
+    vi.mocked(settingsListDshPresets).mockResolvedValue([
+      { id: "code", label: "Code", description: "写代码模式" },
+      { id: "standard", label: "Standard", description: null },
+    ]);
+
+    render(
+      <SessionList
+        activeSessionId=""
+        activeSessionTitle=""
+        activeWorkspaceRoot="/Users/kothchen/code/Kodex"
+        currentSessionStatus="Idle"
+        onOpenSettings={vi.fn()}
+        onSessionChanged={vi.fn()}
+        onWorkspaceChanged={vi.fn()}
+      />,
+    );
+
+    fireEvent.click(await screen.findByRole("button", { name: "在 Kodex 中新建会话" }));
+    const dialog = await screen.findByRole("dialog");
+    // Select the DeepSeek Harness agent radio.
+    fireEvent.click(within(dialog).getByRole("radio", { name: /DeepSeek Harness/ }));
+
+    // The preset dropdown appears once the roster loads.
+    await screen.findByText("跟随 dsh 默认");
+    const presetSelect = within(dialog).getByLabelText("Agent 预设") as HTMLSelectElement;
+    expect(within(presetSelect).getByRole("option", { name: /跟随 dsh 默认/ })).toBeInTheDocument();
+    expect(within(presetSelect).getByRole("option", { name: /Code/ })).toBeInTheDocument();
+
+    // Pick the "Standard" preset and create the session.
+    fireEvent.change(presetSelect, { target: { value: "standard" } });
+    fireEvent.click(screen.getByRole("button", { name: "创建会话" }));
+
+    await waitFor(() =>
+      expect(sessionCreate).toHaveBeenCalledWith("/Users/kothchen/code/Kodex", "deepseek-harness", "standard"),
+    );
+  });
+
+  it("passes a null preset for DeepSeek Harness when following the dsh default", async () => {
+    vi.mocked(settingsListDshPresets).mockResolvedValue([
+      { id: "code", label: "Code", description: null },
+    ]);
+
+    render(
+      <SessionList
+        activeSessionId=""
+        activeSessionTitle=""
+        activeWorkspaceRoot="/Users/kothchen/code/Kodex"
+        currentSessionStatus="Idle"
+        onOpenSettings={vi.fn()}
+        onSessionChanged={vi.fn()}
+        onWorkspaceChanged={vi.fn()}
+      />,
+    );
+
+    fireEvent.click(await screen.findByRole("button", { name: "在 Kodex 中新建会话" }));
+    const dialog = await screen.findByRole("dialog");
+    fireEvent.click(within(dialog).getByRole("radio", { name: /DeepSeek Harness/ }));
+    await screen.findByText("跟随 dsh 默认");
+    fireEvent.click(screen.getByRole("button", { name: "创建会话" }));
+
+    await waitFor(() =>
+      expect(sessionCreate).toHaveBeenCalledWith("/Users/kothchen/code/Kodex", "deepseek-harness", null),
+    );
+  });
+
+  it("resets the preset selection when the new-session modal is reopened", async () => {
+    vi.mocked(settingsListDshPresets).mockResolvedValue([
+      { id: "code", label: "Code", description: null },
+      { id: "minimal", label: "极简", description: null },
+    ]);
+
+    render(
+      <SessionList
+        activeSessionId=""
+        activeSessionTitle=""
+        activeWorkspaceRoot="/Users/kothchen/code/Kodex"
+        currentSessionStatus="Idle"
+        onOpenSettings={vi.fn()}
+        onSessionChanged={vi.fn()}
+        onWorkspaceChanged={vi.fn()}
+      />,
+    );
+
+    // First open: pick a non-default preset, then cancel the modal.
+    fireEvent.click(await screen.findByRole("button", { name: "在 Kodex 中新建会话" }));
+    let dialog = await screen.findByRole("dialog");
+    fireEvent.click(within(dialog).getByRole("radio", { name: /DeepSeek Harness/ }));
+    await screen.findByText("跟随 dsh 默认");
+    let presetSelect = within(dialog).getByLabelText("Agent 预设") as HTMLSelectElement;
+    fireEvent.change(presetSelect, { target: { value: "minimal" } });
+    expect(presetSelect.value).toBe("minimal");
+    fireEvent.click(within(dialog).getByRole("button", { name: "取消" }));
+
+    // Second open: the preset must be back to "follow dsh default".
+    fireEvent.click(await screen.findByRole("button", { name: "在 Kodex 中新建会话" }));
+    dialog = await screen.findByRole("dialog");
+    fireEvent.click(within(dialog).getByRole("radio", { name: /DeepSeek Harness/ }));
+    await screen.findByText("跟随 dsh 默认");
+    presetSelect = within(dialog).getByLabelText("Agent 预设") as HTMLSelectElement;
+    expect(presetSelect.value).toBe("");
+
+    fireEvent.click(within(dialog).getByRole("button", { name: "创建会话" }));
+    await waitFor(() =>
+      expect(sessionCreate).toHaveBeenCalledWith("/Users/kothchen/code/Kodex", "deepseek-harness", null),
+    );
+  });
+
+  it("shows a preset dropdown when creating a workspace with DeepSeek Harness", async () => {
+    vi.mocked(settingsListDshPresets).mockResolvedValue([
+      { id: "code", label: "Code", description: null },
+      { id: "standard", label: "Standard", description: null },
+    ]);
+    vi.mocked(openDialog).mockResolvedValue("/Users/kothchen/code/Other");
+
+    render(
+      <SessionList
+        activeSessionId=""
+        activeSessionTitle=""
+        activeWorkspaceRoot="/Users/kothchen/code/Kodex"
+        currentSessionStatus="Idle"
+        onOpenSettings={vi.fn()}
+        onSessionChanged={vi.fn()}
+        onWorkspaceChanged={vi.fn()}
+      />,
+    );
+
+    // Open the "new workspace" menu and pick "打开本地文件夹".
+    fireEvent.click(await screen.findByRole("button", { name: "新建项目" }));
+    fireEvent.click(await screen.findByRole("menuitem", { name: /打开本地文件夹/ }));
+
+    const dialog = await screen.findByRole("dialog");
+    // Choose a directory via the dialog mock. The "选择..." button is wrapped
+    // by a <label>, so its accessible name absorbs the label text — query by
+    // class instead.
+    const chooseDirBtn = dialog.querySelector(".sl-directory-btn") as HTMLButtonElement;
+    fireEvent.click(chooseDirBtn);
+
+    // Open the agent dropdown and pick DeepSeek Harness. The dropdown trigger
+    // is wrapped by a <label> (accessible name "Agent"), and the menu items
+    // select via onPointerDown, so query by class/text and fire pointerDown.
+    const agentSelectBtn = dialog.querySelector(".sl-agent-select-btn") as HTMLButtonElement;
+    fireEvent.click(agentSelectBtn);
+    const dshSpan = await within(dialog).findByText("DeepSeek Harness");
+    const dshButton = dshSpan.closest("button") as HTMLButtonElement;
+    fireEvent.pointerDown(dshButton);
+
+    // The preset dropdown appears once the roster loads.
+    await screen.findByText("跟随 dsh 默认");
+    const presetSelect = within(dialog).getByLabelText("Agent 预设") as HTMLSelectElement;
+    fireEvent.change(presetSelect, { target: { value: "standard" } });
+
+    fireEvent.click(screen.getByRole("button", { name: "创建工作区" }));
+
+    await waitFor(() =>
+      expect(workspaceOpen).toHaveBeenCalledWith("/Users/kothchen/code/Other", "deepseek-harness", "standard"),
+    );
   });
 
   it("blocks Claude sessions when the selected provider is not configured", async () => {
@@ -297,31 +470,6 @@ describe("SessionList agent picker", () => {
 
     expect(await screen.findByText("Claude Xiaomi Token Plan 需要先在设置中保存 Xiaomi Token Plan API key。")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "创建会话" })).toBeDisabled();
-  });
-
-  it("defaults to CodeBuddy when the default Claude profile is not configured", async () => {
-    vi.mocked(settingsGetAgentSnapshot).mockResolvedValue(agentSnapshot("xiaomi_mimo", false));
-
-    render(
-      <SessionList
-        activeSessionId=""
-        activeSessionTitle=""
-        activeWorkspaceRoot="/Users/kothchen/code/Kodex"
-        currentSessionStatus="Idle"
-        onOpenSettings={vi.fn()}
-        onSessionChanged={vi.fn()}
-        onWorkspaceChanged={vi.fn()}
-      />,
-    );
-
-    fireEvent.click(await screen.findByRole("button", { name: "在 Kodex 中新建会话" }));
-
-    expect(await screen.findByRole("dialog")).toBeInTheDocument();
-    expect(screen.queryByText(/需要先在设置中保存/)).not.toBeInTheDocument();
-
-    fireEvent.click(screen.getByRole("button", { name: "创建会话" }));
-
-    await waitFor(() => expect(sessionCreate).toHaveBeenCalledWith("/Users/kothchen/code/Kodex", "codebuddy"));
   });
 
   it("defaults to Codex when Claude is not configured but Codex provider is ready", async () => {
@@ -372,7 +520,7 @@ describe("SessionList agent picker", () => {
     fireEvent.click(await screen.findByRole("button", { name: "在 Kodex 中新建会话" }));
     fireEvent.click(await screen.findByRole("button", { name: "创建会话" }));
 
-    await waitFor(() => expect(sessionCreate).toHaveBeenCalledWith("/Users/kothchen/code/Kodex", "codex-acp"));
+    await waitFor(() => expect(sessionCreate).toHaveBeenCalledWith("/Users/kothchen/code/Kodex", "codex-acp", null));
   });
 
   it("reopens dormant remote workspaces through the remote bootstrap flow", async () => {
@@ -523,6 +671,7 @@ const workspaceButton = await screen.findByTitle(/^双击连接远程工作区/)
       expect(sessionCreate).toHaveBeenCalledWith(
         "ssh://root@9.134.121.208:36000/data/workspace/CodeTrans",
         "codex-acp",
+        null,
       );
       expect(onSessionChanged).toHaveBeenCalled();
     });
@@ -574,6 +723,7 @@ const workspaceButton = await screen.findByTitle(/^双击连接远程工作区/)
       expect(sessionCreate).toHaveBeenCalledWith(
         "ssh://root@9.134.121.208:36000/data/workspace/CodeTrans",
         "claude-agent-acp",
+        null,
       );
       expect(onSessionChanged).toHaveBeenCalled();
     });
@@ -621,6 +771,7 @@ const workspaceButton = await screen.findByTitle(/^双击连接远程工作区/)
       expect(sessionCreate).toHaveBeenCalledWith(
         "ssh://root@9.134.121.208:36000/data/workspace/CodeTrans",
         "claude-agent-acp",
+        null,
       );
       expect(onSessionChanged).toHaveBeenCalled();
     });

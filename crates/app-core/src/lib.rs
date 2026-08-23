@@ -1,7 +1,7 @@
 mod application;
 mod attachment_cache;
 mod bootstrap;
-mod dsh_bringup;
+pub mod dsh_bringup;
 mod editor_files;
 mod file_tracker;
 mod image_api;
@@ -374,6 +374,19 @@ mod tests {
         let dir = tempdir().unwrap();
         let mut ui = super::bootstrap::build_initial_ui(dir.path()).unwrap();
 
+        // Mode controls only sync into the session summary when they are
+        // LocalMode (the local permission broker). LegacyMode controls carry
+        // agent-side presets whose selection arrives via
+        // `SessionConfigValueChanged`.
+        let mut mode_control = select_control(
+            "mode",
+            "Mode",
+            SessionConfigCategory::Mode,
+            "plan",
+            &["plan", "code"],
+        );
+        mode_control.source = SessionConfigSource::LocalMode;
+
         super::reducer::apply_event(
             &mut ui,
             ClientEvent::SessionConfigUpdated {
@@ -387,13 +400,7 @@ mod tests {
                             "gpt-5.5",
                             &["gpt-5.4", "gpt-5.5"],
                         ),
-                        select_control(
-                            "mode",
-                            "Mode",
-                            SessionConfigCategory::Mode,
-                            "plan",
-                            &["plan", "code"],
-                        ),
+                        mode_control,
                     ],
                 },
             },
@@ -412,6 +419,70 @@ mod tests {
         );
 
         assert_eq!(ui.session.mode.as_deref(), Some("code"));
+    }
+
+    #[test]
+    fn reducer_does_not_sync_legacy_mode_controls_into_summary() {
+        // Regression: the dsh agent-preset Mode control (LegacyMode) is
+        // re-published with a stale `current_value_label` after a successful
+        // `agentPreset.select` because the backend re-emits the control
+        // before `SessionConfigValueChanged` lands. If `sync_session_summary`
+        // consumes that control, the freshly-selected preset is clobbered back
+        // to the previous label in `ui.session.mode`.
+        let dir = tempdir().unwrap();
+        let mut ui = super::bootstrap::build_initial_ui(dir.path()).unwrap();
+
+        let mut legacy_mode_control = select_control(
+            "mode",
+            "Mode",
+            SessionConfigCategory::Mode,
+            "code",
+            &["code", "minimal"],
+        );
+        legacy_mode_control.source = SessionConfigSource::LegacyMode;
+
+        // Publish the controls with the initial preset. Because this is a
+        // LegacyMode control, the session summary is NOT synced from the
+        // control — the dsh backend emits `SessionConfigValueChanged` once the
+        // preset is applied.
+        super::reducer::apply_event(
+            &mut ui,
+            ClientEvent::SessionConfigUpdated {
+                state: SessionConfigState {
+                    hydrated: true,
+                    controls: vec![legacy_mode_control.clone()],
+                },
+            },
+        );
+        assert_eq!(ui.session.mode.as_deref(), None);
+
+        // Simulate a successful `agentPreset.select` — the reducer applies the
+        // change event.
+        super::reducer::apply_event(
+            &mut ui,
+            ClientEvent::SessionConfigValueChanged {
+                control_id: "mode".into(),
+                value_id: "minimal".into(),
+                value_label: Some("极简".into()),
+            },
+        );
+        assert_eq!(ui.session.mode.as_deref(), Some("极简"));
+
+        // The backend then re-publishes the control with a stale label; this
+        // must NOT roll back the freshly-selected preset.
+        let mut stale_control = legacy_mode_control;
+        stale_control.current_value_id = "minimal".into();
+        stale_control.current_value_label = "code".into();
+        super::reducer::apply_event(
+            &mut ui,
+            ClientEvent::SessionConfigUpdated {
+                state: SessionConfigState {
+                    hydrated: true,
+                    controls: vec![stale_control],
+                },
+            },
+        );
+        assert_eq!(ui.session.mode.as_deref(), Some("极简"));
     }
 
     #[test]
@@ -1434,7 +1505,7 @@ async function clickCanvasNewMenuItem(page: Page, itemText: string) {
         drop(store);
 
         let app =
-            Application::bootstrap_with_app_paths(&workspace, "codebuddy --acp", app_paths.clone())
+            Application::bootstrap_with_app_paths(&workspace, "codebuddy --acp", app_paths.clone(), None)
                 .unwrap();
 
         assert_eq!(app.ui.session.id.to_string(), session_id);
@@ -1457,7 +1528,7 @@ async function clickCanvasNewMenuItem(page: Page, itemText: string) {
             .unwrap();
         assert_eq!(app.ui.session.model, "Mock Smart");
 
-        app.session_create(None).unwrap();
+        app.session_create(None, None).unwrap();
 
         assert_eq!(app.ui.session.model, "Agent default");
         assert!(app.ui.session_config.controls.is_empty());
@@ -1490,7 +1561,7 @@ async function clickCanvasNewMenuItem(page: Page, itemText: string) {
         wait_for_control(&mut app, SessionConfigCategory::Model);
         let original_session_id = app.ui.session.id.to_string();
 
-        app.session_create(None).unwrap();
+        app.session_create(None, None).unwrap();
         let empty_session_id = app.ui.session.id.to_string();
         wait_for_control(&mut app, SessionConfigCategory::Model);
 
@@ -1730,6 +1801,7 @@ async function clickCanvasNewMenuItem(page: Page, itemText: string) {
             &workspace,
             mock_agent_command(),
             app_paths.clone(),
+            None,
         )
         .unwrap();
 
@@ -1834,6 +1906,7 @@ async function clickCanvasNewMenuItem(page: Page, itemText: string) {
             dir.path(),
             mock_agent_command(),
             AppPaths::from_root(dir.path().join("home").join(".kodex")),
+            None,
         )
         .unwrap()
     }

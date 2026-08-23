@@ -8,7 +8,7 @@ use tauri::{AppHandle, Manager, State};
 use workspace_model::{
     AgentCliId, AgentInstallResult, AgentProviderFamily, AgentSettingsSnapshot, AppTheme,
     CustomProviderInput, ImageGenerateProtocol, LspProbeResult, LspServerConfigInput,
-    LspServerSettingsEntry, LspSettingsSnapshot, ModelAttributesInput,
+    DshVersionInfo, LspServerSettingsEntry, LspSettingsSnapshot, ModelAttributesInput,
     RemoteMachineProfile, RemoteMachineProfileInput, RemoteMachineProfilesSnapshot,
     RemoteMachineValidationRequest,
 };
@@ -464,6 +464,121 @@ pub async fn settings_install_agent(
         success: result.is_ok(),
         message: result.unwrap_or_else(|e| e),
         manual_instruction: manual_instruction(agent),
+        snapshot,
+    })
+}
+
+/// Explicit update check for the DeepSeek Harness `dsh` CLI: queries the npm
+/// registry for the latest version and compares against the installed one.
+#[tauri::command]
+pub async fn settings_check_dsh_update() -> Result<DshVersionInfo, String> {
+    let (current_version, latest_version) =
+        tokio::task::spawn_blocking(app_core::settings::dsh_version_info)
+            .await
+            .map_err(|e| format!("Update check task failed: {e}"))?;
+    let update_available = match (&current_version, &latest_version) {
+        (Some(current), Some(latest)) => current != latest,
+        _ => false,
+    };
+    Ok(DshVersionInfo {
+        current_version,
+        latest_version,
+        update_available,
+    })
+}
+
+/// List the DeepSeek Harness agent presets (modes) for the settings picker.
+/// Requires the managed `dsh web` host; spawns it if not already running.
+#[tauri::command]
+pub async fn settings_list_dsh_presets() -> Result<Vec<workspace_model::DshPresetOption>, String> {
+    let paths = app_core::AppPaths::resolve().map_err(|e| e.to_string())?;
+    tokio::task::spawn_blocking(move || {
+        let endpoint = app_core::dsh_bringup::dsh_bringup().ensure_harness_endpoint(&paths)?;
+        let host = dsh_bridge::HarnessHostRegistry::new()
+            .acquire(endpoint)
+            .map_err(|e| e.to_string())?;
+        let client = host.client().clone();
+        let value = host
+            .runtime()
+            .block_on(client.agent_preset_list(uuid::Uuid::new_v4().to_string()))
+            .map_err(|e| format!("agentPreset.list failed: {e}"))?;
+        Ok(value
+            .presets
+            .iter()
+            .map(|p| workspace_model::DshPresetOption {
+                id: p.id.clone(),
+                label: p.name.clone().unwrap_or_else(|| p.id.clone()),
+                description: p.description.clone(),
+            })
+            .collect())
+    })
+    .await
+    .map_err(|e| format!("list presets task failed: {e}"))?
+}
+
+/// Set the DeepSeek Harness default agent preset (mode) for new sessions.
+#[tauri::command]
+pub async fn settings_set_dsh_preset(
+    preset: Option<String>,
+) -> Result<AgentSettingsSnapshot, String> {
+    let paths = app_core::AppPaths::resolve().map_err(|e| e.to_string())?;
+    tokio::task::spawn_blocking(move || {
+        app_core::settings::set_dsh_default_preset(&paths, preset).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| format!("set preset task failed: {e}"))?
+}
+
+/// One-click upgrade for the DeepSeek Harness `dsh` CLI: reinstalls the npm
+/// package at `@latest` and returns a refreshed agent snapshot (with the new
+/// current/latest versions).
+#[tauri::command]
+pub async fn settings_upgrade_dsh() -> Result<AgentInstallResult, String> {
+    let paths = app_core::AppPaths::resolve().map_err(|e| e.to_string())?;
+    let install_paths = paths.clone();
+    let result = tokio::task::spawn_blocking(move || {
+        let package = format!("{}@latest", app_core::settings::DSH_NPM_PACKAGE);
+        let mut command = npm_command_with_augmented_path(if cfg!(windows) {
+            "npm.cmd"
+        } else {
+            "npm"
+        });
+        command
+            .args(["install", "-g", package.as_str()])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+
+        #[cfg(windows)]
+        command.creation_flags(0x08000000); // CREATE_NO_WINDOW
+
+        let output = command.output().map_err(|e| {
+            format!("Failed to start upgrader. Make sure npm is installed and on PATH: {e}")
+        })?;
+        if output.status.success() {
+            Ok("Upgrade completed.".to_string())
+        } else {
+            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            let details = if !stderr.is_empty() { stderr } else { stdout };
+            Err(if details.is_empty() {
+                "Upgrade failed without output".to_string()
+            } else {
+                details
+            })
+        }
+    })
+    .await
+    .map_err(|e| format!("Upgrader task failed: {e}"))?;
+    let snapshot =
+        tokio::task::spawn_blocking(move || app_core::settings::settings_snapshot(&paths))
+            .await
+            .map_err(|e| format!("Settings refresh failed: {e}"))?;
+    Ok(AgentInstallResult {
+        agent: AgentCliId::DeepSeekHarness,
+        success: result.is_ok(),
+        message: result.unwrap_or_else(|e| e),
+        manual_instruction: manual_instruction(AgentCliId::DeepSeekHarness),
         snapshot,
     })
 }

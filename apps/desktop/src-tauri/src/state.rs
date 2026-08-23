@@ -101,6 +101,7 @@ impl AppState {
         &self,
         path: PathBuf,
         agent: Option<AgentCliId>,
+        preset: Option<String>,
     ) -> Result<UiSnapshot, String> {
         app_core::startup_perf::mark("state/open_workspace/start", path.display().to_string());
         let key = workspace_key(&path);
@@ -109,7 +110,7 @@ impl AppState {
         })?;
         let snapshot =
             app_core::startup_perf::measure("state/open_workspace/connect", &key, || {
-                connect_workspace_locked(&mut guard, key.clone(), path, agent)
+                connect_workspace_locked(&mut guard, key.clone(), path, agent, preset)
             })?;
         guard.active_workspace = Some(key);
         app_core::startup_perf::mark("state/open_workspace/end", "");
@@ -252,7 +253,7 @@ impl AppState {
             if let Some(remote) = remote {
                 let _ = connect_remote_workspace_locked(&mut guard, next_key, remote);
             } else if let Some(path) = path {
-                let _ = connect_workspace_locked(&mut guard, next_key, path, None);
+                let _ = connect_workspace_locked(&mut guard, next_key, path, None, None);
             }
         }
         Ok(())
@@ -512,7 +513,7 @@ impl AppState {
 
             let local_path = local_path.ok_or("Workspace is not open")?;
             let mut guard = self.workspaces.lock().map_err(|e| e.to_string())?;
-            let snapshot = connect_workspace_locked(&mut guard, key.clone(), local_path, None)?;
+            let snapshot = connect_workspace_locked(&mut guard, key.clone(), local_path, None, None)?;
             guard.active_workspace = Some(key);
             app_core::startup_perf::mark("state/set_active_workspace/end", "");
             return Ok(snapshot);
@@ -523,7 +524,7 @@ impl AppState {
         let mut guard = self.workspaces.lock().map_err(|e| e.to_string())?;
         let snapshot =
             app_core::startup_perf::measure("state/set_active_workspace/connect", &key, || {
-                connect_workspace_locked(&mut guard, key.clone(), path, None)
+                connect_workspace_locked(&mut guard, key.clone(), path, None, None)
             })?;
         guard.active_workspace = Some(key);
         app_core::startup_perf::mark("state/set_active_workspace/end", "");
@@ -886,7 +887,7 @@ impl AppState {
                     let root = chats_workspace_root()?;
                     std::fs::create_dir_all(&root)
                         .map_err(|e| format!("创建聊天工作区目录失败: {e}"))?;
-                    connect_workspace_locked(&mut guard, key.clone(), root, None)?;
+                    connect_workspace_locked(&mut guard, key.clone(), root, None, None)?;
                     (None, None)
                 } else {
                     return Err("Workspace is not open".into());
@@ -897,7 +898,7 @@ impl AppState {
             connect_remote_workspace_locked(&mut guard, key.clone(), remote)?;
         } else if let Some(path) = path {
             if !matches!(guard.workspaces.get(&key), Some(WorkspaceEntry::Connected(_))) {
-                connect_workspace_locked(&mut guard, key.clone(), path, None)?;
+                connect_workspace_locked(&mut guard, key.clone(), path, None, None)?;
             }
         }
         guard.active_workspace = Some(key.clone());
@@ -926,7 +927,7 @@ impl AppState {
                 connect_remote_workspace_locked(&mut guard, key.clone(), remote)?;
             } else {
                 let path = path.ok_or("Workspace is not open")?;
-                connect_workspace_locked(&mut guard, key.clone(), path, None)?;
+                connect_workspace_locked(&mut guard, key.clone(), path, None, None)?;
             }
             let app = match guard.workspaces.get_mut(&key) {
                 Some(WorkspaceEntry::Connected(app)) => app,
@@ -970,7 +971,7 @@ impl AppState {
                 connect_remote_workspace_locked(&mut guard, key.clone(), remote)?;
             } else {
                 let path = path.ok_or("Workspace is not open")?;
-                connect_workspace_locked(&mut guard, key.clone(), path, None)?;
+                connect_workspace_locked(&mut guard, key.clone(), path, None, None)?;
             }
             let app = match guard.workspaces.get_mut(&key) {
                 Some(WorkspaceEntry::Connected(app)) => app,
@@ -1044,6 +1045,7 @@ fn connect_workspace_locked(
     key: String,
     path: PathBuf,
     agent: Option<AgentCliId>,
+    preset: Option<String>,
 ) -> Result<UiSnapshot, String> {
     app_core::startup_perf::mark("state/connect_workspace/start", &key);
     if let Some(WorkspaceEntry::Connected(application)) = guard.workspaces.get(&key) {
@@ -1070,7 +1072,7 @@ fn connect_workspace_locked(
         "state/connect_workspace/application_bootstrap",
         &key,
         || {
-            Application::bootstrap_with_app_paths(path, agent_command, paths)
+            Application::bootstrap_with_app_paths(path, agent_command, paths, preset)
                 .map_err(|e| e.to_string())
         },
     )?;
@@ -1122,7 +1124,7 @@ fn activate_workspace_locked(
     }
 
     let path = path.ok_or("Workspace is not open")?;
-    connect_workspace_locked(guard, key, path, None)
+    connect_workspace_locked(guard, key, path, None, None)
 }
 
 fn build_remote_workspace_application(
@@ -1250,7 +1252,7 @@ fn ensure_workspace_connected_locked(
         connect_remote_workspace_locked(guard, key.to_string(), remote)?;
     } else {
         let path = path.ok_or("Workspace is not open")?;
-        connect_workspace_locked(guard, key.to_string(), path, None)?;
+        connect_workspace_locked(guard, key.to_string(), path, None, None)?;
     }
     Ok(())
 }

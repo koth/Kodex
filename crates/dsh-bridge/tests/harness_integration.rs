@@ -9,15 +9,14 @@ mod common;
 
 use acp_core::{ClientEvent, PermissionBroker};
 use common::{
-    MockHarness, MuxEnd, MuxScript, default_config, history_event, mux_session_event,
-    mux_subscribed, scripts_with,
+    MockHarness, MuxEnd, MuxScript, default_config, history_event, mux_assistant_final,
+    mux_assistant_text_delta, mux_session_event, mux_subscribed, scripts_with,
 };
 use dsh_bridge::{HarnessHostRegistry, HttpClient};
-use serde_json::json;
+use serde_json::{json, Value};
 use std::sync::Arc;
 use std::sync::mpsc;
 use std::time::Duration;
-use tokio::process::Command;
 
 fn test_sink() -> (Arc<dsh_bridge::SessionSink>, mpsc::Receiver<ClientEvent>) {
     let (tx, rx) = mpsc::channel();
@@ -62,18 +61,10 @@ async fn two_sessions_share_one_host_and_route_frames_to_the_right_sink() {
         c.mux = scripts_with(vec![
             mux_subscribed("s-a", 0),
             mux_subscribed("s-b", 0),
-            mux_session_event(
-                "s-a",
-                1,
-                "assistant/message",
-                json!({ "turn": 1, "step": 1, "message": { "role": "assistant", "content": [{ "type": "text", "text": "hello A" }] } }),
-            ),
-            mux_session_event(
-                "s-b",
-                2,
-                "assistant/message",
-                json!({ "turn": 1, "step": 1, "message": { "role": "assistant", "content": [{ "type": "text", "text": "hello B" }] } }),
-            ),
+            mux_assistant_text_delta("s-a", 1, "hello A"),
+            mux_assistant_final("s-a", 2),
+            mux_assistant_text_delta("s-b", 3, "hello B"),
+            mux_assistant_final("s-b", 4),
         ]);
         c
     };
@@ -123,18 +114,8 @@ async fn unmatched_frame_is_dropped_not_fatal() {
     c.mux = scripts_with(vec![
         mux_subscribed("s-a", 0),
         // Frame for a session nobody registered.
-        mux_session_event(
-            "s-ghost",
-            1,
-            "assistant/message",
-            json!({ "turn": 1, "step": 1, "message": { "role": "assistant", "content": [{ "type": "text", "text": "ghost" }] } }),
-        ),
-        mux_session_event(
-            "s-a",
-            2,
-            "assistant/message",
-            json!({ "turn": 1, "step": 1, "message": { "role": "assistant", "content": [{ "type": "text", "text": "after ghost" }] } }),
-        ),
+        mux_assistant_text_delta("s-ghost", 1, "ghost"),
+        mux_assistant_text_delta("s-a", 2, "after ghost"),
     ]);
     let mock = MockHarness::start(c).await;
     let registry = Arc::new(HarnessHostRegistry::new());
@@ -274,18 +255,8 @@ async fn mux_drop_rebaselines_all_live_sessions_with_bounded_concurrency() {
         MuxScript {
             frames: vec![
                 // Re-baseline gap events delivered on the reconnected stream.
-                mux_session_event(
-                    "s-a",
-                    5,
-                    "assistant/message",
-                    json!({ "turn": 1, "step": 1, "message": { "role": "assistant", "content": [{ "type": "text", "text": "A recovered" }] } }),
-                ),
-                mux_session_event(
-                    "s-c",
-                    7,
-                    "assistant/message",
-                    json!({ "turn": 1, "step": 1, "message": { "role": "assistant", "content": [{ "type": "text", "text": "C recovered" }] } }),
-                ),
+                mux_assistant_text_delta("s-a", 5, "A recovered"),
+                mux_assistant_text_delta("s-c", 7, "C recovered"),
             ],
             end: MuxEnd::Hold,
             wait_for_subscribe: true,
@@ -395,12 +366,7 @@ async fn last_session_exit_tears_down_host_other_session_keeps_receiving() {
     c.mux = scripts_with(vec![
         mux_subscribed("s-a", 0),
         mux_subscribed("s-b", 0),
-        mux_session_event(
-            "s-b",
-            3,
-            "assistant/message",
-            json!({ "turn": 1, "step": 1, "message": { "role": "assistant", "content": [{ "type": "text", "text": "B alive" }] } }),
-        ),
+        mux_assistant_text_delta("s-b", 3, "B alive"),
     ]);
     let mock = MockHarness::start(c).await;
     let registry = Arc::new(HarnessHostRegistry::new());
@@ -437,34 +403,45 @@ fn attached_child_is_terminated_on_host_teardown() {
     // Regression: a child can be attached after the host is acquired for an
     // externally discovered endpoint. Attachment must mark the host as owning
     // the child, otherwise teardown skips termination and leaks `dsh web`.
-    let mock = tokio::runtime::Builder::new_current_thread()
+    // Dedicated current-thread runtime (not the ambient one): `host.teardown()`
+    // stops the host's runtime, which cannot be dropped from async context.
+    let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
-        .unwrap()
-        .block_on(async { MockHarness::start(default_config()).await });
-    let registry = Arc::new(HarnessHostRegistry::new());
-    let host = registry.acquire(mock.endpoint()).unwrap();
+        .unwrap();
+    let (mock, host) = rt.block_on(async {
+        let mock = MockHarness::start(default_config()).await;
+        let registry = Arc::new(HarnessHostRegistry::new());
+        let host = registry.acquire(mock.endpoint()).unwrap();
+        (mock, host)
+    });
 
-    let mut command = if cfg!(windows) {
-        let mut command = Command::new("cmd");
-        command.args(["/c", "ping", "-n", "60", "127.0.0.1"]);
+    // Spawn + wrap as a tokio child inside the runtime: `DshChild` holds a
+    // `tokio::process::Child`, whose spawn/kill paths require an active reactor.
+    let (child, child_id) = rt.block_on(async {
+        let mut command = if cfg!(windows) {
+            let mut command = tokio::process::Command::new("cmd");
+            command.args(["/c", "ping", "-n", "60", "127.0.0.1"]);
+            command
+        } else {
+            let mut command = tokio::process::Command::new("sleep");
+            command.arg("60");
+            command
+        };
         command
-    } else {
-        let mut command = Command::new("sleep");
-        command.arg("60");
-        command
-    };
-    command
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null());
-    let child = command.spawn().unwrap();
-    let child_id = child.id().expect("test child should expose a pid");
-    let mut child = dsh_bridge::DshChild::new(child);
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+        let spawned = command.spawn().unwrap();
+        let id = spawned.id().expect("test child should expose a pid");
+        (dsh_bridge::DshChild::new(spawned), id)
+    });
+    let mut child = child;
     child.enable_kill_on_drop_job();
 
     host.attach_child(child);
-    host.teardown();
+    // teardown() stops the host's own runtime — must run outside async context.
+    std::thread::spawn(move || host.teardown()).join().unwrap();
 
     let exited = !process_exists(child_id);
     assert!(
@@ -523,12 +500,8 @@ async fn single_session_create_prompt_message_flow() {
     let mut c = default_config();
     c.mux = scripts_with(vec![
         mux_subscribed("s-1", 0),
-        mux_session_event(
-            "s-1",
-            1,
-            "assistant/message",
-            json!({ "turn": 1, "step": 1, "message": { "role": "assistant", "content": [{ "type": "text", "text": "text answer" }] } }),
-        ),
+        mux_assistant_text_delta("s-1", 1, "text answer"),
+        mux_assistant_final("s-1", 1),
         mux_session_event(
             "s-1",
             2,
@@ -686,6 +659,7 @@ async fn session_restore_replays_history_before_started() {
         remote_ssh: None,
         mcp_servers: Vec::new(),
         harness_endpoint: Some(mock.endpoint()),
+        agent_preset: None,
     };
     let worker_registry = registry.clone();
     let worker = std::thread::spawn(move || {
@@ -732,6 +706,313 @@ async fn session_restore_replays_history_before_started() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn question_answer_multiple_questions_partial_payload() {
+    // Reproduce the real-world hang: dsh asks TWO questions, Kodex answers
+    // only ONE — dsh's matchesQuestions requires answers.length ==
+    // questions.length, so a partial batch is rejected as bad-response.
+    let mut c = default_config();
+    c.mux = vec![MuxScript {
+        frames: vec![
+            mux_subscribed("s-1", 0),
+            json!({
+                "type": "server-request",
+                "rpcId": "qrpc-multi",
+                "method": "question/requested",
+                "payload": {
+                    "type": "question/requested",
+                    "sessionId": "s-1",
+                    "questions": [
+                        { "id": "q1", "question": "First?", "options": [{ "label": "A" }] },
+                        { "id": "q2", "question": "Second?", "options": [{ "label": "X" }] }
+                    ]
+                }
+            }),
+        ],
+        end: MuxEnd::Hold,
+        wait_for_subscribe: true,
+    }];
+    let mock = MockHarness::start(c).await;
+    let registry = Arc::new(HarnessHostRegistry::new());
+    let (tx, rx) = mpsc::channel::<ClientEvent>();
+    let (command_tx, command_rx) = mpsc::channel();
+    let config = acp_core::SessionConfig {
+        workspace_root: "/tmp".into(),
+        app_data_root: "/tmp".into(),
+        model: "deepseek-v4-pro".into(),
+        agent_command: "dsh".into(),
+        agent_env: Vec::new(),
+        resume_session_id: None,
+        log_id: "t".into(),
+        acp_port: 0,
+        remote_ssh: None,
+        mcp_servers: Vec::new(),
+        harness_endpoint: Some(mock.endpoint()),
+        agent_preset: None,
+    };
+    let wr = registry.clone();
+    let worker = std::thread::spawn(move || {
+        dsh_bridge::run_harness_session(
+            wr,
+            config,
+            tx,
+            command_rx,
+            PermissionBroker::default(),
+            acp_core::ShutdownSignal::default(),
+        )
+    });
+    let start = std::time::Instant::now();
+    while start.elapsed() < Duration::from_secs(5) {
+        match rx.recv_timeout(Duration::from_millis(100)) {
+            Ok(ClientEvent::ToolPermissionRequest { id, input: Some(_), .. }) if id == "q1" => break,
+            Ok(_) => {}
+            Err(_) => break,
+        }
+    }
+    // Answer BOTH questions in REVERSE order — the UI's answer map iterates in
+    // insertion order, which need not match the question order. The bridge must
+    // re-sort answers positionally or dsh's matchesQuestions rejects the batch.
+    let (reply_tx, reply_rx) = mpsc::channel();
+    command_tx
+        .send(acp_core::RuntimeCommand::ResolveHarnessApproval {
+            rpc_id: "q1".into(),
+            result: acp_core::HarnessApprovalResult::Question {
+                answers: vec![
+                    acp_core::HarnessQuestionAnswer {
+                        question_id: "q2".into(),
+                        selected: vec!["X".into()],
+                        custom: None,
+                    },
+                    acp_core::HarnessQuestionAnswer {
+                        question_id: "q1".into(),
+                        selected: vec!["A".into()],
+                        custom: None,
+                    },
+                ],
+            },
+            reply_tx,
+        })
+        .unwrap();
+    reply_rx.recv_timeout(Duration::from_secs(5)).unwrap().unwrap();
+    let responds = mock.responds();
+    assert_eq!(responds.len(), 1);
+    // The respond payload must list answers in the question order (q1 then q2),
+    // even though they were submitted reversed.
+    let answers = responds[0]
+        .pointer("/result/value/answer/answers")
+        .and_then(Value::as_array)
+        .expect("answers array");
+    let ids: Vec<&str> = answers
+        .iter()
+        .map(|a| a.get("id").and_then(Value::as_str).unwrap())
+        .collect();
+    assert_eq!(ids, vec!["q1", "q2"], "answers must be re-ordered to the question order");
+    let _ = command_tx.send(acp_core::RuntimeCommand::Shutdown);
+    let _ = worker.join();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn question_answer_payload_matches_dsh_schema() {
+    // Dump the exact bytes the bridge POSTs to /api/respond for a question
+    // answer, so we can diff against dsh's `questionResponsePayloadSchema`
+    // (sessionId + answer.answers[{id, selected, custom?}]) and
+    // `matchesQuestions` (count + id order + label membership).
+    let mut c = default_config();
+    c.mux = vec![MuxScript {
+        frames: vec![
+            mux_subscribed("s-1", 0),
+            json!({
+                "type": "server-request",
+                "rpcId": "qrpc-1",
+                "method": "question/requested",
+                "payload": {
+                    "type": "question/requested",
+                    "sessionId": "s-1",
+                    "questions": [
+                        { "id": "q1", "question": "Pick", "options": [{ "label": "是（推荐）" }, { "label": "否" }] }
+                    ]
+                }
+            }),
+        ],
+        end: MuxEnd::Hold,
+        wait_for_subscribe: true,
+    }];
+    let mock = MockHarness::start(c).await;
+    let registry = Arc::new(HarnessHostRegistry::new());
+    let (tx, rx) = mpsc::channel::<ClientEvent>();
+    let (command_tx, command_rx) = mpsc::channel();
+    let config = acp_core::SessionConfig {
+        workspace_root: "/tmp".into(),
+        app_data_root: "/tmp".into(),
+        model: "deepseek-v4-pro".into(),
+        agent_command: "dsh".into(),
+        agent_env: Vec::new(),
+        resume_session_id: None,
+        log_id: "t".into(),
+        acp_port: 0,
+        remote_ssh: None,
+        mcp_servers: Vec::new(),
+        harness_endpoint: Some(mock.endpoint()),
+        agent_preset: None,
+    };
+    let wr = registry.clone();
+    let worker = std::thread::spawn(move || {
+        dsh_bridge::run_harness_session(
+            wr,
+            config,
+            tx,
+            command_rx,
+            PermissionBroker::default(),
+            acp_core::ShutdownSignal::default(),
+        )
+    });
+    // wait for question
+    let start = std::time::Instant::now();
+    while start.elapsed() < Duration::from_secs(5) {
+        match rx.recv_timeout(Duration::from_millis(100)) {
+            Ok(ClientEvent::ToolPermissionRequest { id, input: Some(_), .. }) if id == "q1" => break,
+            Ok(_) => {}
+            Err(_) => break,
+        }
+    }
+    let (reply_tx, reply_rx) = mpsc::channel();
+    command_tx
+        .send(acp_core::RuntimeCommand::ResolveHarnessApproval {
+            rpc_id: "q1".into(),
+            result: acp_core::HarnessApprovalResult::Question {
+                answers: vec![acp_core::HarnessQuestionAnswer {
+                    question_id: "q1".into(),
+                    selected: vec!["是（推荐）".into()],
+                    custom: None,
+                }],
+            },
+            reply_tx,
+        })
+        .unwrap();
+    reply_rx.recv_timeout(Duration::from_secs(5)).unwrap().unwrap();
+    let responds = mock.responds();
+    assert_eq!(responds.len(), 1);
+    println!("=== RESPOND PAYLOAD ===\n{}", serde_json::to_string_pretty(&responds[0]).unwrap());
+    let _ = command_tx.send(acp_core::RuntimeCommand::Shutdown);
+    let _ = worker.join();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn question_answer_rejected_as_bad_response_surfaces_notice() {
+    // When dsh rejects an answer as `bad-response` (e.g. a validation mismatch
+    // in the payload), the pending question stays open host-side and the turn
+    // would hang. The bridge must surface the rejection as a system notice so
+    // the user sees what happened instead of a silent stuck session.
+    let mut c = default_config();
+    c.respond_reject = true;
+    c.mux = vec![MuxScript {
+        frames: vec![
+            mux_subscribed("s-1", 0),
+            json!({
+                "type": "server-request",
+                "rpcId": "question-rpc-rej",
+                "method": "question/requested",
+                "payload": {
+                    "type": "question/requested",
+                    "sessionId": "s-1",
+                    "questions": [
+                        { "id": "q1", "question": "Pick one", "options": [{ "label": "A" }] }
+                    ]
+                }
+            }),
+        ],
+        end: MuxEnd::Hold,
+        wait_for_subscribe: true,
+    }];
+    let mock = MockHarness::start(c).await;
+    let registry = Arc::new(HarnessHostRegistry::new());
+
+    let (tx, rx) = mpsc::channel::<ClientEvent>();
+    let (command_tx, command_rx) = mpsc::channel();
+    let config = acp_core::SessionConfig {
+        workspace_root: "/tmp".into(),
+        app_data_root: "/tmp".into(),
+        model: "deepseek-v4-pro".into(),
+        agent_command: "dsh".into(),
+        agent_env: Vec::new(),
+        resume_session_id: None,
+        log_id: "test-log".into(),
+        acp_port: 0,
+        remote_ssh: None,
+        mcp_servers: Vec::new(),
+        harness_endpoint: Some(mock.endpoint()),
+        agent_preset: None,
+    };
+    let worker_registry = registry.clone();
+    let worker = std::thread::spawn(move || {
+        dsh_bridge::run_harness_session(
+            worker_registry,
+            config,
+            tx,
+            command_rx,
+            PermissionBroker::default(),
+            acp_core::ShutdownSignal::default(),
+        )
+    });
+
+    // Wait for the question to surface.
+    let start = std::time::Instant::now();
+    let mut saw_question = false;
+    while start.elapsed() < Duration::from_secs(5) && !saw_question {
+        match rx.recv_timeout(Duration::from_millis(100)) {
+            Ok(ClientEvent::ToolPermissionRequest { id, input: Some(_), .. }) if id == "q1" => {
+                saw_question = true;
+            }
+            Ok(_) => {}
+            Err(mpsc::RecvTimeoutError::Timeout) => continue,
+            Err(mpsc::RecvTimeoutError::Disconnected) => break,
+        }
+    }
+    assert!(saw_question, "question request was not surfaced");
+
+    let (reply_tx, reply_rx) = mpsc::channel();
+    command_tx
+        .send(acp_core::RuntimeCommand::ResolveHarnessApproval {
+            rpc_id: "q1".into(),
+            result: acp_core::HarnessApprovalResult::Question {
+                answers: vec![acp_core::HarnessQuestionAnswer {
+                    question_id: "q1".into(),
+                    selected: vec!["A".into()],
+                    custom: None,
+                }],
+            },
+            reply_tx,
+        })
+        .unwrap();
+    // The reply carries the rejection as an Err, so the UI layer can react.
+    let outcome = reply_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("respond timed out");
+    assert!(outcome.is_err(), "rejection must surface as an error");
+
+    // And the user-facing notice is pushed onto the event stream.
+    let start = std::time::Instant::now();
+    let mut saw_notice = false;
+    while start.elapsed() < Duration::from_secs(5) && !saw_notice {
+        match rx.recv_timeout(Duration::from_millis(100)) {
+            Ok(ClientEvent::MessageChunk { role, content, .. }) => {
+                if role == workspace_model::MessageRole::System
+                    && content.contains("未被接受")
+                {
+                    saw_notice = true;
+                }
+            }
+            Ok(_) => {}
+            Err(mpsc::RecvTimeoutError::Timeout) => continue,
+            Err(mpsc::RecvTimeoutError::Disconnected) => break,
+        }
+    }
+    assert!(saw_notice, "rejection notice was not emitted");
+
+    let _ = command_tx.send(acp_core::RuntimeCommand::Shutdown);
+    let _ = worker.join();
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn session_restore_creates_with_stored_session_id() {
     // Regression: resuming a stored session must pass its dsh sessionId to
     // `session.create` so the harness RESUMES the persisted agent (full model
@@ -753,6 +1034,7 @@ async fn session_restore_creates_with_stored_session_id() {
         remote_ssh: None,
         mcp_servers: Vec::new(),
         harness_endpoint: Some(mock.endpoint()),
+        agent_preset: None,
     };
     let worker_registry = registry.clone();
     let worker = std::thread::spawn(move || {
@@ -811,6 +1093,7 @@ async fn fresh_session_create_omits_session_id() {
         remote_ssh: None,
         mcp_servers: Vec::new(),
         harness_endpoint: Some(mock.endpoint()),
+        agent_preset: None,
     };
     let worker_registry = registry.clone();
     let worker = std::thread::spawn(move || {
@@ -869,6 +1152,7 @@ async fn session_publishes_steer_prompt_capabilities() {
         remote_ssh: None,
         mcp_servers: Vec::new(),
         harness_endpoint: Some(mock.endpoint()),
+        agent_preset: None,
     };
     let worker_registry = registry.clone();
     let worker = std::thread::spawn(move || {
@@ -888,6 +1172,10 @@ async fn session_publishes_steer_prompt_capabilities() {
         match rx.recv_timeout(Duration::from_millis(100)) {
             Ok(ClientEvent::PromptCapabilitiesUpdated { capabilities }) => {
                 if capabilities.session_steer {
+                    assert!(
+                        capabilities.embedded_context,
+                        "embedded_context should be advertised so workspace references are allowed"
+                    );
                     saw_steer_cap = true;
                     break;
                 }
@@ -929,6 +1217,7 @@ async fn model_selector_publishes_model_control_with_catalog() {
         remote_ssh: None,
         mcp_servers: Vec::new(),
         harness_endpoint: Some(mock.endpoint()),
+        agent_preset: None,
     };
     let worker_registry = registry.clone();
     let worker = std::thread::spawn(move || {
@@ -1030,6 +1319,7 @@ async fn question_answer_responds_with_envelope_rpc_id() {
         remote_ssh: None,
         mcp_servers: Vec::new(),
         harness_endpoint: Some(mock.endpoint()),
+        agent_preset: None,
     };
     let worker_registry = registry.clone();
     let worker = std::thread::spawn(move || {

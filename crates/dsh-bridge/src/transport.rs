@@ -132,9 +132,10 @@ impl HttpClient {
                 "transport failure for respond: HTTP {status}: {text}"
             ));
         }
-        resp.json::<RpcReceipt>()
-            .await
-            .context("invalid respond receipt")
+        let text = resp.text().await.context("respond body read")?;
+        tracing::debug!(target: "dsh-bridge::respond", body = %text, "respond receipt raw");
+        serde_json::from_str::<RpcReceipt>(&text)
+            .with_context(|| format!("invalid respond receipt: {text}"))
     }
 
     // ---- Typed control-method helpers ----
@@ -207,6 +208,26 @@ impl HttpClient {
     ) -> anyhow::Result<Value> {
         self.call::<SessionSelectModelPayload, Value>("session.selectModel", rpc_id, payload)
             .await
+    }
+
+    pub async fn agent_preset_list(
+        &self,
+        rpc_id: RpcId,
+    ) -> anyhow::Result<crate::rpc_types::AgentPresetListValue> {
+        self.call::<crate::rpc_types::AgentPresetListPayload, crate::rpc_types::AgentPresetListValue>(
+            "agentPreset.list",
+            rpc_id,
+            &crate::rpc_types::AgentPresetListPayload {},
+        )
+        .await
+    }
+
+    pub async fn agent_preset_select(
+        &self,
+        rpc_id: RpcId,
+        payload: &crate::rpc_types::AgentPresetSelectPayload,
+    ) -> anyhow::Result<crate::rpc_types::AgentPresetSelectValue> {
+        self.call("agentPreset.select", rpc_id, payload).await
     }
 
     // ---- WebSocket event streams ----

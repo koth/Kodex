@@ -25,7 +25,7 @@ pub fn key_env_for_provider(provider_id: &str) -> String {
 }
 
 /// One LLM provider route for dsh's `llm-pi-ai.providers` dict.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Default, Serialize)]
 pub struct DshProviderRoute {
     /// Route key (also the dsh provider id). Kodex provider id, e.g.
     /// `deepseek`, `kimi`, `mimo`, `commandcode`, `timiai`, custom ids.
@@ -57,7 +57,7 @@ pub struct DshModelEntry {
 }
 
 /// The default model selection for new dsh sessions.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Default, Serialize)]
 pub struct DshDefaultModel {
     pub provider: String,
     pub model: String,
@@ -68,10 +68,13 @@ pub struct DshDefaultModel {
 /// each bring-up; `web-search-deepseek` is written when
 /// `web_search_api_key_env` is set and removed when it is `None`, so a revoked
 /// key never leaves a dangling credential reference behind.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct DshSettingsConfig {
     pub providers: Vec<DshProviderRoute>,
     pub default_model: DshDefaultModel,
+    /// Default agent preset for new sessions (`agent-presets.default`). `None`
+    /// leaves any existing value untouched (the dsh deployment default).
+    pub default_preset: Option<String>,
     /// Credential reference for dsh's `web-search-deepseek` plugin. Set when
     /// the DeepSeek BYOK provider is configured: Kodex injects the secret into
     /// the spawned process under `key_env_for_provider("deepseek")`, and this
@@ -185,6 +188,17 @@ pub fn write_settings(path: &Path, config: &DshSettingsConfig) -> anyhow::Result
         "agent-default-model".into(),
         build_default_model_section(&config.default_model),
     );
+    // Default agent preset for new sessions: only written when configured so
+    // an unset value leaves the dsh deployment default (or a user's own
+    // hand-edited `agent-presets.default`) untouched.
+    if let Some(preset) = &config.default_preset {
+        let presets_section = obj
+            .entry("agent-presets".to_string())
+            .or_insert_with(|| Value::Object(serde_json::Map::new()));
+        if let Some(map) = presets_section.as_object_mut() {
+            map.insert("default".into(), Value::String(preset.clone()));
+        }
+    }
     match &config.web_search_api_key_env {
         Some(api_key_env) => {
             obj.insert(
@@ -252,6 +266,7 @@ mod tests {
             },
             web_search_api_key_env: None,
             deepseek_byok_configured: false,
+            ..Default::default()
         };
         write_settings(&path, &cfg).unwrap();
         let text = std::fs::read_to_string(&path).unwrap();
@@ -280,6 +295,7 @@ mod tests {
             },
             web_search_api_key_env: Some("KODEX_DSH_DEEPSEEK_KEY".into()),
             deepseek_byok_configured: true,
+            ..Default::default()
         };
         write_settings(&path, &cfg).unwrap();
         let text = std::fs::read_to_string(&path).unwrap();
@@ -301,6 +317,7 @@ mod tests {
             },
             web_search_api_key_env: None,
             deepseek_byok_configured: true,
+            ..Default::default()
         };
         write_settings(&path, &cfg).unwrap();
         assert!(
@@ -332,6 +349,7 @@ mod tests {
             },
             web_search_api_key_env: Some("KODEX_DSH_DEEPSEEK_KEY".into()),
             deepseek_byok_configured: true,
+            ..Default::default()
         };
         write_settings(&path, &cfg).unwrap();
         let text = std::fs::read_to_string(&path).unwrap();
@@ -351,6 +369,7 @@ mod tests {
             },
             web_search_api_key_env: Some("KODEX_DSH_DEEPSEEK_KEY".into()),
             deepseek_byok_configured: true,
+            ..Default::default()
         };
         write_settings(&path, &cfg).unwrap();
         assert!(
@@ -388,6 +407,7 @@ mod tests {
             },
             web_search_api_key_env: None,
             deepseek_byok_configured: false,
+            ..Default::default()
         };
         write_settings(&path, &cfg).unwrap();
         let text = std::fs::read_to_string(&path).unwrap();
@@ -412,6 +432,7 @@ mod tests {
             },
             web_search_api_key_env: None,
             deepseek_byok_configured: false,
+            ..Default::default()
         };
         write_settings(&path, &cfg).unwrap();
         let text = std::fs::read_to_string(&path).unwrap();
@@ -433,6 +454,7 @@ mod tests {
             },
             web_search_api_key_env: None,
             deepseek_byok_configured: false,
+            ..Default::default()
         };
         write_settings(&path, &cfg).unwrap();
         // Second run with a different provider set.
@@ -449,8 +471,7 @@ mod tests {
                 provider: "kimi".into(),
                 model: "kimi-k3".into(),
             },
-            web_search_api_key_env: None,
-            deepseek_byok_configured: false,
+            ..Default::default()
         };
         write_settings(&path, &cfg2).unwrap();
         let text = std::fs::read_to_string(&path).unwrap();

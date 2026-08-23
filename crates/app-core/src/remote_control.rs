@@ -160,7 +160,7 @@ where
         agent: Option<AgentCliId>,
     ) -> impl std::future::Future<Output = Result<String, String>> + Send {
         let result = self.with_app(|app| {
-            app.session_create(agent)?;
+            app.session_create(agent, None)?;
             Ok(app.ui.session.id.to_string())
         });
         async move { result }
@@ -189,7 +189,7 @@ where
     fn get_state(&self) -> impl std::future::Future<Output = Result<UiSnapshot, String>> + Send {
         let result = self.with_app(|app| {
             app.poll_prompt_progress();
-            Ok(app.lightweight_ui_snapshot())
+            Ok(app.remote_ui_snapshot())
         });
         async move { result }
     }

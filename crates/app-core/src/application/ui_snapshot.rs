@@ -347,11 +347,57 @@ impl Application {
                 .collect(),
             turn_changes: metadata_only_turn_changes(&self.ui.turn_changes),
             thinking_status: self.ui.thinking_status.clone(),
+            thinking_text: self.ui.thinking_text.clone(),
             usage: self.ui.usage.clone(),
             pending_steers: self.ui.pending_steers.clone(),
             history_total: self.history_total_count,
             history_earliest_seq: self.history_earliest_seq,
         }
+    }
+
+    /// Remote-control variant of [`Application::lightweight_ui_snapshot`].
+    ///
+    /// The relay path sends this over a mobile WebSocket. A full snapshot can
+    /// be multiple megabytes (conversation bodies, tool outputs, repository
+    /// diffs), which is enough to break the phone's WS connection before the
+    /// response can be processed. This trims the heaviest fields while
+    /// keeping the structure the mobile UI needs for its initial render.
+    pub fn remote_ui_snapshot(&self) -> workspace_model::UiSnapshot {
+        const REMOTE_MESSAGE_BODY_CHARS: usize = 2 * 1024;
+        const REMOTE_MESSAGE_WINDOW: usize = 200;
+        const REMOTE_THINKING_CHARS: usize = 4 * 1024;
+        const REMOTE_TOOL_TEXT_CHARS: usize = 2 * 1024;
+
+        let mut snapshot = self.lightweight_ui_snapshot();
+
+        // Keep a bounded window of recent messages and cap each body.
+        if snapshot.messages.len() > REMOTE_MESSAGE_WINDOW {
+            let start = snapshot.messages.len() - REMOTE_MESSAGE_WINDOW;
+            snapshot.messages.drain(0..start);
+        }
+        for message in &mut snapshot.messages {
+            cap_string_in_place(&mut message.body, REMOTE_MESSAGE_BODY_CHARS);
+        }
+
+        // Transient reasoning text can be very large during a long turn.
+        cap_string_in_place(&mut snapshot.thinking_text, REMOTE_THINKING_CHARS);
+
+        // Repository diffs are fetched on demand in the UI; the initial
+        // remote sync only needs branch/head and changed-file metadata.
+        for file in &mut snapshot.repository.changed_files {
+            file.hunks.clear();
+        }
+
+        // Tool fields are already capped by lightweight_ui_snapshot; cap the
+        // remaining free-text fields for the remote path too.
+        for tool in &mut snapshot.tools {
+            cap_string_in_place(&mut tool.summary, REMOTE_TOOL_TEXT_CHARS);
+            if let Some(err) = &mut tool.error {
+                cap_string_in_place(err, REMOTE_TOOL_TEXT_CHARS);
+            }
+        }
+
+        snapshot
     }
 
     pub fn lightweight_ui_update(
@@ -487,6 +533,7 @@ impl Application {
                 .collect(),
             turn_changes: metadata_only_turn_changes(&self.ui.turn_changes),
             thinking_status: self.ui.thinking_status.clone(),
+            thinking_text: self.ui.thinking_text.clone(),
             usage: self.ui.usage.clone(),
             pending_steers: self.ui.pending_steers.clone(),
         }))

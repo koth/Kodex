@@ -38,7 +38,7 @@ impl RemoteControl for DesktopRemoteControl {
         agent: Option<AgentCliId>,
     ) -> impl std::future::Future<Output = Result<String, String>> + Send {
         let result = self.app.state::<AppState>().with_app(|app| {
-            app.session_create(agent)?;
+            app.session_create(agent, None)?;
             Ok(app.ui.session.id.to_string())
         });
         async move { result }
@@ -73,7 +73,10 @@ impl RemoteControl for DesktopRemoteControl {
     fn get_state(&self) -> impl std::future::Future<Output = Result<UiSnapshot, String>> + Send {
         let result = self.app.state::<AppState>().with_app(|app| {
             app.poll_prompt_progress();
-            Ok(app.lightweight_ui_snapshot())
+            // Remote initial sync must stay small enough for a mobile WS
+            // frame; full snapshots can be multiple MB and kill the phone
+            // connection before the response is processed.
+            Ok(app.remote_ui_snapshot())
         });
         async move { result }
     }

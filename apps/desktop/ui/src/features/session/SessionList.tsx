@@ -8,10 +8,12 @@ import {
   sessionArchive,
   sessionCancel,
   settingsGetAgentSnapshot,
+  settingsListDshPresets,
   workspaceArchive,
   workspaceOpen,
   workspaceChatsRoot,
 } from "../../lib/tauri";
+import type { DshPresetOption } from "../../lib/tauri";
 import { onSessionStatus } from "../../lib/events";
 import { open } from "@tauri-apps/plugin-dialog";
 import { RemoteOpenPanel } from "../workbench/RemoteOpenPanel";
@@ -84,6 +86,12 @@ export function SessionList({
   const [remoteOpenVisible, setRemoteOpenVisible] = useState(false);
   const [remoteReconnect, setRemoteReconnect] = useState<RemoteLinuxWorkspace | null>(null);
   const [comingSoonFeature, setComingSoonFeature] = useState<string | null>(null);
+  // DeepSeek Harness agent preset (mode) picker for the new-session modal.
+  // Loaded lazily once the user selects the `deepseek-harness` agent.
+  const [dshPresets, setDshPresets] = useState<DshPresetOption[] | null>(null);
+  const [dshPresetsLoading, setDshPresetsLoading] = useState(false);
+  const [dshPresetError, setDshPresetError] = useState<string | null>(null);
+  const [selectedDshPreset, setSelectedDshPreset] = useState<string | null>(null);
   const agentDropdownRef = useRef<HTMLDivElement>(null);
   const workspaceMenuRef = useRef<HTMLDivElement>(null);
   const workspacesScrollRef = useRef<HTMLDivElement>(null);
@@ -127,6 +135,44 @@ export function SessionList({
       .then(setChatsRoot)
       .catch(() => {});
   }, []);
+
+  // Lazily load the DeepSeek Harness agent preset (mode) roster the first time
+  // the user picks the `deepseek-harness` agent in the new-session modal. The
+  // roster comes from `dsh` via `agentPreset.list`; until it arrives the
+  // dropdown shows a loading placeholder. A ref tracks the in-flight/loaded
+  // state so the roster is fetched once per agent selection; a failed load
+  // (e.g. the dsh host was not running) is retried the next time the user
+  // picks the agent.
+  const dshPresetsFetchedRef = useRef(false);
+  useEffect(() => {
+    if (selectedAgent !== "deepseek-harness") return;
+    if (dshPresetsFetchedRef.current) return;
+    dshPresetsFetchedRef.current = true;
+    let cancelled = false;
+    setDshPresetsLoading(true);
+    setDshPresetError(null);
+    settingsListDshPresets()
+      .then((list) => {
+        if (cancelled) return;
+        setDshPresets(list);
+        // Default to "follow dsh default" (empty); the backend falls back to
+        // `dsh_default_preset` from settings when no override is passed.
+        setSelectedDshPreset((current) => current ?? "");
+      })
+      .catch((error) => {
+        if (cancelled) return;
+        setDshPresets([]);
+        setDshPresetError(String(error));
+        // Allow a retry on the next selection after a failure.
+        dshPresetsFetchedRef.current = false;
+      })
+      .finally(() => {
+        if (!cancelled) setDshPresetsLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedAgent]);
 
   const refresh = useCallback(() => {
     if (refreshInFlightRef.current) return;
@@ -265,6 +311,9 @@ export function SessionList({
     setModalError(null);
     setAgentDropdownOpen(false);
     setWorkspaceMenuOpen(false);
+    // Reset any stale preset selection so re-opening the modal always starts
+    // from "follow dsh default"; the roster effect re-seeds the empty value.
+    setSelectedDshPreset(null);
     const snapshot = await settingsGetAgentSnapshot();
     setAgentSnapshot(snapshot);
     setSelectedAgent(preferredAgent ?? defaultAgentForNewWork(snapshot));
@@ -363,6 +412,7 @@ export function SessionList({
     setModalMode(null);
     setModalError(null);
     setAgentDropdownOpen(false);
+    setSelectedDshPreset(null);
   }, [isSubmitting]);
 
   const handleConfirmAgentModal = useCallback(async () => {
@@ -372,11 +422,15 @@ export function SessionList({
       setModalError(null);
       if (modalMode === "workspace") {
         if (!pendingWorkspacePath) return;
-        const nextSnapshot = await workspaceOpen(pendingWorkspacePath, selectedAgent);
+        const preset =
+          selectedAgent === "deepseek-harness" ? (selectedDshPreset || null) : null;
+        const nextSnapshot = await workspaceOpen(pendingWorkspacePath, selectedAgent, preset);
         onWorkspaceChanged(nextSnapshot);
       } else {
         if (!pendingWorkspaceRoot) return;
-        await sessionCreate(pendingWorkspaceRoot, selectedAgent);
+        const preset =
+          selectedAgent === "deepseek-harness" ? (selectedDshPreset || null) : null;
+        await sessionCreate(pendingWorkspaceRoot, selectedAgent, preset);
         onSessionChanged();
       }
       setPendingWorkspaceRoot(null);
@@ -387,13 +441,14 @@ export function SessionList({
       setSelectedAgent(null);
       setModalMode(null);
       setAgentDropdownOpen(false);
+      setSelectedDshPreset(null);
       refresh();
     } catch (error) {
       setModalError(String(error));
     } finally {
       setIsSubmitting(false);
     }
-  }, [modalMode, onSessionChanged, onWorkspaceChanged, pendingWorkspacePath, pendingWorkspaceRoot, refresh, selectedAgent]);
+  }, [modalMode, onSessionChanged, onWorkspaceChanged, pendingWorkspacePath, pendingWorkspaceRoot, refresh, selectedAgent, selectedDshPreset]);
 
   const handleArchive = useCallback(
     async (id: string, workspaceRoot: string, sessionTitle?: string) => {
@@ -454,6 +509,9 @@ export function SessionList({
   const handleSelectModalAgent = useCallback((agent: AgentCliId) => {
     setSelectedAgent(agent);
     setAgentDropdownOpen(false);
+    // Reset any prior preset selection whenever the agent changes; the preset
+    // dropdown is only meaningful for `deepseek-harness`.
+    setSelectedDshPreset(null);
   }, []);
 
   const modalTitle = modalMode === "workspace" ? "创建工作区" : "创建会话";
@@ -805,6 +863,34 @@ export function SessionList({
                 ))}
               </div>
             )}
+            {selectedAgent === "deepseek-harness" && (
+              <div className="sl-dsh-preset-field">
+                <label className="sl-form-label" htmlFor="sl-dsh-preset-select">Agent 预设</label>
+                {dshPresetsLoading ? (
+                  <span className="sl-dsh-preset-loading">正在加载预设列表...</span>
+                ) : dshPresets && dshPresets.length > 0 ? (
+                  <select
+                    id="sl-dsh-preset-select"
+                    className="sl-dsh-preset-select"
+                    value={selectedDshPreset ?? ""}
+                    disabled={isSubmitting}
+                    onChange={(event) => setSelectedDshPreset(event.target.value)}
+                  >
+                    <option value="">跟随 dsh 默认</option>
+                    {dshPresets.map((preset) => (
+                      <option key={preset.id} value={preset.id}>
+                        {preset.label}
+                        {preset.description ? ` — ${preset.description}` : ""}
+                      </option>
+                    ))}
+                  </select>
+                ) : (
+                  <span className="sl-dsh-preset-error">
+                    {dshPresetError ?? "未获取到预设列表（确认 dsh 已安装并运行）"}
+                  </span>
+                )}
+              </div>
+            )}
             {agentSnapshot.env_override && (
               <div className="sl-agent-note">已设置 ACP_AGENT_COMMAND；本次选择会直接使用所选 Agent。</div>
             )}
@@ -835,9 +921,6 @@ function defaultAgentForNewWork(snapshot: AgentSettingsSnapshot): AgentCliId {
   const codexInstalled = snapshot.agents.some(
     (agent) => agent.id === "codex-acp" && agent.installed,
   );
-  const codebuddyInstalled = snapshot.agents.some(
-    (agent) => agent.id === "codebuddy" && agent.installed,
-  );
   if (
     defaultAgent === "claude-agent-acp" &&
     !claudeAgentReady(snapshot)
@@ -845,10 +928,7 @@ function defaultAgentForNewWork(snapshot: AgentSettingsSnapshot): AgentCliId {
     if (codexInstalled && codexAgentReady(snapshot)) {
       return "codex-acp";
     }
-    if (!codebuddyInstalled) {
-      return defaultAgent;
-    }
-    return "codebuddy";
+    return defaultAgent;
   }
   return defaultInstalled
     ? defaultAgent
