@@ -93,6 +93,12 @@ export function ConversationScreen({ sessionId, title, onBack }: Props) {
 
       {snapshot ? (
         <ConversationTimeline snapshot={snapshot} onStopTool={handleStop} />
+      ) : sendError ? (
+        <View style={styles.center}>
+          <Text style={[styles.text, { color: colors.danger, textAlign: "center" }]}>
+            {sendError}
+          </Text>
+        </View>
       ) : (
         <View style={styles.center}>
           <ActivityIndicator color={colors.accent} />

@@ -110,6 +110,30 @@ pub fn run_harness_session(
         session_id: session_id.clone(),
     });
 
+    // Persist/restore the session's actual preset so reconnect/resume shows
+    // the correct preset instead of falling back to the global default.
+    // - New session: dsh acks `session.create` with the actual preset.
+    // - Resume: dsh does not echo the preset back and we don't send one (to
+    //   avoid `agent-preset-conflict`), but the session's own preset is still
+    //   known from the store — re-emit it so the UI restores correctly.
+    let preset_to_publish = create_value
+        .agent_preset
+        .as_deref()
+        .filter(|p| !p.is_empty())
+        .or_else(|| {
+            // On resume the store carries the preset; app-core passes it via
+            // `config.agent_preset` even though dsh's `session.create` must
+            // not receive it.
+            config.agent_preset.as_deref().filter(|p| !p.is_empty())
+        });
+    if let Some(preset) = preset_to_publish {
+        let _ = tx_events.send(ClientEvent::SessionConfigValueChanged {
+            control_id: "agent_preset".to_string(),
+            value_id: preset.to_string(),
+            value_label: None,
+        });
+    }
+
     // Publish the config selectors: fetch `session.models` and `agentPreset.list`
     // and translate them into a `SessionConfigUpdated` carrying the Model and
     // Mode (agent-preset) controls so the composer dropdowns render.
@@ -117,7 +141,7 @@ pub fn run_harness_session(
         &client,
         &host,
         &session_id,
-        create_value.agent_preset.as_deref(),
+        preset_to_publish,
         &tx_events,
     );
     // Declare prompt capabilities. The harness `session/prompt` RPC accepts

@@ -99,6 +99,8 @@ pub struct RelayConnection<T: RelayTransport> {
     /// Optional diagnostic sink for E2E failures (the desktop shell writes
     /// these to its driver log).
     error_log: Option<std::sync::Arc<dyn Fn(&str) + Send + Sync>>,
+    /// Optional diagnostic sink for outbound framing events (chunking etc.).
+    send_log: Option<std::sync::Arc<dyn Fn(&str) + Send + Sync>>,
     /// In-progress chunk reassembly keyed by `chunk_id`.
     chunks: HashMap<String, ChunkBuffer>,
 }
@@ -111,6 +113,7 @@ impl<T: RelayTransport> RelayConnection<T> {
             session_key: None,
             peer_device_id: None,
             error_log: None,
+            send_log: None,
             chunks: HashMap::new(),
         }
     }
@@ -118,6 +121,12 @@ impl<T: RelayTransport> RelayConnection<T> {
     /// Attach a diagnostic sink called on E2E decrypt failures.
     pub fn set_error_log(&mut self, log: std::sync::Arc<dyn Fn(&str) + Send + Sync>) {
         self.error_log = Some(log);
+    }
+
+    /// Attach a diagnostic sink called on outbound framing events (e.g. when
+    /// a large encrypted payload is split into chunk frames).
+    pub fn set_send_log(&mut self, log: std::sync::Arc<dyn Fn(&str) + Send + Sync>) {
+        self.send_log = Some(log);
     }
 
     /// Install the E2E session key (post-pairing). Subsequent
@@ -164,6 +173,17 @@ impl<T: RelayTransport> RelayConnection<T> {
             (Some(key), Some(peer)) => {
                 let enc = encrypt(key, peer, envelope)?;
                 let frames = split_encrypted_envelope(&enc)?;
+                if frames.len() > 1 {
+                    let line = format!(
+                        "split encrypted {} into {} chunk frames",
+                        envelope.message_type,
+                        frames.len()
+                    );
+                    eprintln!("[remote-control] {line}");
+                    if let Some(log) = &self.send_log {
+                        log(&line);
+                    }
+                }
                 for frame in frames {
                     self.transport.send_text(frame).await?;
                 }

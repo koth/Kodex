@@ -158,25 +158,16 @@ async fn set_mode_on_started_session_reports_notice_not_interrupt() {
             reply_tx: mode_reply_tx,
         })
         .unwrap();
-    let mode_events = mode_reply_rx
+    // The bridge rejects preset switches on a started session with an error
+    // so `SessionHandle::set_mode` does not mutate the shared permission
+    // broker; the composer surfaces the error to the user.
+    let mode_result = mode_reply_rx
         .recv_timeout(Duration::from_secs(5))
-        .expect("SetMode reply timed out")
-        .expect("SetMode reply channel closed");
+        .expect("SetMode reply timed out");
+    let err = mode_result.expect_err("locked preset switch must fail");
     assert!(
-        !mode_events
-            .iter()
-            .any(|e| matches!(e, ClientEvent::Interrupted { .. })),
-        "locked preset switch must not interrupt the session: {mode_events:?}"
-    );
-    assert!(
-        mode_events.iter().any(|e| matches!(
-            e,
-            ClientEvent::MessageChunk {
-                role: workspace_model::MessageRole::System,
-                ..
-            }
-        )),
-        "locked preset switch must emit a system notice: {mode_events:?}"
+        err.to_string().contains("预设已固定"),
+        "error must explain the preset is locked: {err}"
     );
 
     let _ = command_tx.send(RuntimeCommand::Shutdown);
@@ -280,5 +271,47 @@ async fn lifecycle_hydrate_includes_preset_mode_control_and_set_mode() {
     assert_eq!(mock.preset_selects(), vec!["standard".to_string()]);
 
     let _ = command_tx.send(RuntimeCommand::Shutdown);
+    let _ = worker.join();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn new_session_create_carries_configured_preset() {
+    // A new session must pass `config.agent_preset` to `session.create` so the
+    // harness composes the chosen preset (e.g. `minimal`) instead of the
+    // deployment default.
+    let mock = MockHarness::start(default_config()).await;
+    let registry = Arc::new(HarnessHostRegistry::new());
+
+    let (tx, _rx) = mpsc::channel::<ClientEvent>();
+    let (_command_tx, command_rx) = mpsc::channel();
+    let mut config = config_for(mock.endpoint());
+    config.agent_preset = Some("minimal".into());
+
+    let worker_registry = registry.clone();
+    let worker = thread::spawn(move || {
+        dsh_bridge::run_harness_session(
+            worker_registry,
+            config,
+            tx,
+            command_rx,
+            PermissionBroker::default(),
+            ShutdownSignal::default(),
+        )
+    });
+
+    // Wait for the create call to land, then shut down.
+    let start = std::time::Instant::now();
+    while start.elapsed() < Duration::from_secs(5) && mock.creates().is_empty() {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let creates = mock.creates();
+    assert_eq!(creates.len(), 1, "expected one session.create call");
+    assert_eq!(
+        creates[0].get("agentPreset").and_then(|v| v.as_str()),
+        Some("minimal"),
+        "session.create must carry the configured preset: {creates:?}"
+    );
+
+    let _ = _command_tx.send(RuntimeCommand::Shutdown);
     let _ = worker.join();
 }

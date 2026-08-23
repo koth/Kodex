@@ -216,6 +216,17 @@ impl Application {
             }
             ClientEvent::SessionConfigUpdated { .. }
             | ClientEvent::SessionConfigValueChanged { .. } => {
+                // dsh emits a synthetic `agent_preset` config value change when
+                // the session's actual preset is known (create / select).
+                // Persist it so reconnect/resume restores the session's own
+                // preset instead of falling back to the global default.
+                if let ClientEvent::SessionConfigValueChanged { control_id, value_id, .. } = event
+                    && control_id == "agent_preset"
+                {
+                    let _ = self
+                        .store
+                        .update_session_agent_preset(&session_id, Some(value_id));
+                }
                 self.persist_session_model_mode();
             }
             ClientEvent::SessionTitleUpdated { title } => {

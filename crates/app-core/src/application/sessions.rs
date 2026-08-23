@@ -372,18 +372,13 @@ impl Application {
             let workspace_root = self.session_config_workspace_root(None);
             // Per-session preset override wins over the global `dsh_default_preset`
             // setting; fall back to the configured default when none is supplied.
-            // When RESUMING an existing harness session no preset is requested:
-            // the preset is fixed at session creation, so sending one (e.g. the
-            // current global default) can conflict with the session's actual
-            // preset and dsh rejects the resume with `agent-preset-conflict`.
+            // When RESUMING, the stored preset is passed through so the UI can
+            // restore it — dsh-bridge strips it from `session.create` to avoid
+            // the `agent-preset-conflict` error.
             let agent_preset = preset_override
                 .filter(|preset| !preset.trim().is_empty())
                 .or_else(|| {
-                    if resuming_existing_session {
-                        None
-                    } else {
-                        crate::settings::load_app_settings(&self.app_paths).dsh_default_preset
-                    }
+                    crate::settings::load_app_settings(&self.app_paths).dsh_default_preset
                 });
             // Attach the `kodex-image` fallback when image settings are enabled
             // so text-only harness models (e.g. DeepSeek) accept image
@@ -679,10 +674,19 @@ impl Application {
         let resume_id_for_handle = resume_id.clone();
         let has_resume_id = resume_id_for_handle.is_some();
         let agent_command = self.agent_command.clone();
+        // On reconnect, restore the session's own persisted preset (from a
+        // previous `session.create` ack) so dsh does not fall back to the
+        // global default — the preset is fixed at creation and dsh rejects a
+        // conflicting preset on resume with `agent-preset-conflict`.
+        let reconnect_preset = self
+            .store
+            .get_session_agent_preset(&session_id)
+            .ok()
+            .flatten();
         let prepared_runtime = self.prepare_session_runtime_for_resume(
             &agent_command,
             &self.ui.session.model,
-            None,
+            reconnect_preset,
             has_resume_id,
         )?;
         let mut session = SessionHandle::start(SessionConfig {
@@ -818,10 +822,14 @@ impl Application {
         };
         let resume_acp_id = self.resume_acp_session_id_for_stored_session(id);
         let has_resume_id = resume_acp_id.is_some();
+        // Restore the session's own persisted preset so a switch/resume does
+        // not fall back to the global default (which can conflict with the
+        // session's fixed preset and cause dsh to reject the resume).
+        let stored_preset = self.store.get_session_agent_preset(id).ok().flatten();
         let prepared_runtime = self.prepare_session_runtime_for_resume(
             &session_agent_command,
             &model,
-            None,
+            stored_preset,
             has_resume_id,
         )?;
         let agent_cli_label =
@@ -856,7 +864,18 @@ impl Application {
         // while keeping the qualified value in `pending_model_restore` for
         // provider-aware restore.
         ui.session.model = super::config::display_model_from_persisted(&model);
-        ui.session.mode = mode;
+        // For dsh sessions the mode slot carries the agent preset (not the
+        // ACP Plan/Build permission mode), so restore the persisted preset
+        // over the generic mode value.
+        ui.session.mode = if crate::settings::is_deepseek_harness_command(&session_agent_command) {
+            self.store
+                .get_session_agent_preset(id)
+                .ok()
+                .flatten()
+                .or(mode)
+        } else {
+            mode
+        };
         ui.session.agent_cli = Some(agent_cli_label);
         ui.session_config = Default::default();
         ui.prompt_capabilities = Default::default();

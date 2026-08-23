@@ -286,7 +286,12 @@ pub fn map_session_event(
                             .kind
                             .clone()
                             .unwrap_or_else(|| infer_tool_kind(&name, raw_input_value.as_ref())),
-                        ToolCallView::Other => String::new(),
+                        // Unknown cards (e.g. a `read` call card added by a
+                        // newer dsh) still need kind inference so the UI does
+                        // not fall back to the shell surface.
+                        ToolCallView::Other => {
+                            infer_tool_kind(&name, raw_input_value.as_ref())
+                        }
                     };
                     let summary = view
                         .title()

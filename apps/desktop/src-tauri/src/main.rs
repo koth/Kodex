@@ -346,6 +346,10 @@ fn start_remote_control_driver(app: tauri::AppHandle) {
                 conn.set_error_log(Arc::new(move |line: &str| {
                     manager_for_err.log_driver_event(line);
                 }));
+                let manager_for_send = app_for_loop.state::<AppState>().remote_control();
+                conn.set_send_log(Arc::new(move |line: &str| {
+                    manager_for_send.log_driver_event(line);
+                }));
             }
             // Authenticate with the device identity (Ed25519 signature), then
             // register the current pairing code so a scanning phone's

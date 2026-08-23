@@ -124,13 +124,18 @@ impl Application {
         } else {
             None
         };
-        // DeepSeek Harness agent preset for the bootstrap session: a per-open
-        // override wins over the global `dsh_default_preset` setting. Only
-        // meaningful for a fresh DSH session; on resume the harness reuses the
-        // session's locked preset via session/load.
-        let agent_preset = preset
-            .filter(|preset| !preset.trim().is_empty())
-            .or_else(|| settings.dsh_default_preset.clone());
+        // DeepSeek Harness agent preset for the bootstrap session. On RESUME
+        // the session's own persisted preset wins (the harness fixed it at
+        // creation and rejects a conflicting preset); on a fresh session a
+        // per-open override wins over the global `dsh_default_preset` setting.
+        let agent_preset = if resume_session_id.is_some() {
+            most_recent_session
+                .and_then(|session| store.get_session_agent_preset(&session.id).ok().flatten())
+        } else {
+            preset
+                .filter(|preset| !preset.trim().is_empty())
+                .or_else(|| settings.dsh_default_preset.clone())
+        };
         let mut session = crate::startup_perf::measure(
             "app/bootstrap/session_handle_start",
             format!("resume={}", resume_session_id.is_some()),
@@ -200,7 +205,18 @@ impl Application {
                         // label in the UI while keeping the qualified value in
                         // `pending_model_restore` for provider-aware restore.
                         ui.session.model = super::config::display_model_from_persisted(&model);
-                        ui.session.mode = mode;
+                        // For dsh sessions the mode slot carries the agent
+                        // preset (not the ACP Plan/Build permission mode), so
+                        // restore the persisted preset over the generic mode.
+                        ui.session.mode = if crate::settings::is_deepseek_harness_command(&agent_command) {
+                            store
+                                .get_session_agent_preset(session_id)
+                                .ok()
+                                .flatten()
+                                .or(mode)
+                        } else {
+                            mode
+                        };
                     }
                     ui.messages = messages;
                     ui.tools = tools;

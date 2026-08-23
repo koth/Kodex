@@ -21,7 +21,7 @@ export type RootStackParamList = {
 
 const Stack = createNativeStackNavigator<RootStackParamList>();
 
-function MainStack() {
+function MainStack({ onRescan }: { onRescan: () => void }) {
   return (
     <Stack.Navigator
       screenOptions={{
@@ -31,10 +31,25 @@ function MainStack() {
         contentStyle: { backgroundColor: colors.bg },
       }}
     >
-      <Stack.Screen name="Sessions" options={{ title: "Maju" }}>
+      <Stack.Screen
+        name="Sessions"
+        options={({ navigation }) => ({
+          title: "Maju",
+          headerRight: () => (
+            <Pressable
+              onPress={() => navigation.navigate("Settings")}
+              hitSlop={8}
+              style={{ paddingHorizontal: 4 }}
+            >
+              <Text style={{ color: colors.accent, fontSize: 15 }}>Settings</Text>
+            </Pressable>
+          ),
+        })}
+      >
         {({ navigation }) => (
           <SessionListScreen
             onOpenSession={(sessionId, title) => navigation.navigate("Conversation", { sessionId, title })}
+            onOpenSettings={() => navigation.navigate("Settings")}
           />
         )}
       </Stack.Screen>
@@ -54,7 +69,7 @@ function MainStack() {
       <Stack.Screen name="Settings" options={{ title: "Settings" }}>
         {({ navigation }) => (
           <SettingsScreen
-            onRescan={() => navigation.navigate("Sessions")}
+            onRescan={onRescan}
             onOpenDiagnostics={() => navigation.navigate("Diagnostics")}
           />
         )}
@@ -95,7 +110,7 @@ function Root() {
           </Pressable>
         </View>
       ) : (
-        <MainStack />
+        <MainStack onRescan={() => setEverConnected(false)} />
       )}
       {showDiagnostics ? (
         <View style={{ position: "absolute", top: 0, left: 0, right: 0, bottom: 0 }}>
