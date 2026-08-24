@@ -537,6 +537,7 @@ export interface UiSnapshot {
   review_changes: SessionFileChange[];
   turn_changes: TurnFileChanges[];
   thinking_status: ThinkingStatus | null;
+  thinking_text?: string;
   usage?: SessionUsageSnapshot;
   pending_steers?: PendingSteer[];
   history_total?: number;
@@ -562,6 +563,7 @@ export interface UiSnapshotPatch {
   review_changes: SessionFileChange[];
   turn_changes: TurnFileChanges[];
   thinking_status: ThinkingStatus | null;
+  thinking_text?: string;
   usage?: SessionUsageSnapshot;
   pending_steers?: PendingSteer[];
 }
@@ -901,6 +903,7 @@ export interface AppSettings {
   selected_claude_provider_profile_id: string | null;
   claude: ClaudeProviderSettings;
   web_tools: WebToolsSettings;
+  dsh_default_preset?: string | null;
 }
 
 export interface ClaudeProviderSettings {
@@ -958,6 +961,8 @@ export interface AgentCliStatus {
   installed: boolean;
   detected_path: string | null;
   selected: boolean;
+  current_version?: string | null;
+  latest_version?: string | null;
 }
 
 export interface AgentSettingsSnapshot {

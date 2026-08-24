@@ -40,6 +40,12 @@ import {
   settingsGetLspSnapshot,
   settingsGetRemoteProfiles,
   settingsInstallAgent,
+  settingsUpgradeDsh,
+  settingsCheckDshUpdate,
+  type DshVersionInfo,
+  settingsListDshPresets,
+  settingsSetDshPreset,
+  type DshPresetOption,
   settingsProbeLspServer,
   settingsResetLspServer,
   settingsSaveAgentProviderSecret,
@@ -92,7 +98,7 @@ import {
 
 export type AgentSettingsTab = Extract<
   AgentCliId,
-  "codebuddy" | "codex-acp" | "claude-agent-acp" | "deepseek-harness"
+  "codex-acp" | "claude-agent-acp" | "deepseek-harness"
 >;
 export type SettingsPane =
   | "general"
@@ -148,7 +154,6 @@ interface Props {
 const AGENT_SETTINGS_TABS: Array<{ id: AgentSettingsTab; label: string }> = [
   { id: "claude-agent-acp", label: "Claude" },
   { id: "codex-acp", label: "Codex" },
-  { id: "codebuddy", label: "CodeBuddy" },
   { id: "deepseek-harness", label: "DeepSeek Harness" },
 ];
 
@@ -944,7 +949,6 @@ export function SettingsPage({
     if (initialAgentTab) return;
     const selectedAgent = snapshot?.settings.selected_agent;
     if (
-      selectedAgent === "codebuddy" ||
       selectedAgent === "codex-acp" ||
       selectedAgent === "claude-agent-acp"
     ) {
@@ -1153,6 +1157,83 @@ export function SettingsPage({
       setError(String(e));
     } finally {
       setBusyAgent(null);
+    }
+  }, []);
+
+  const [checkingDsh, setCheckingDsh] = useState(false);
+  const [upgradingDsh, setUpgradingDsh] = useState(false);
+  const [dshVersionInfo, setDshVersionInfo] = useState<DshVersionInfo | null>(null);
+  const [dshCheckMessage, setDshCheckMessage] = useState<string | null>(null);
+  const [dshPresets, setDshPresets] = useState<DshPresetOption[] | null>(null);
+  const [dshPresetsLoading, setDshPresetsLoading] = useState(false);
+  const [dshPresetSaving, setDshPresetSaving] = useState(false);
+  // Load the dsh preset roster once the dsh tab is opened.
+  useEffect(() => {
+    if (activeAgentTab !== "deepseek-harness" || dshPresets !== null) return;
+    let cancelled = false;
+    setDshPresetsLoading(true);
+    settingsListDshPresets()
+      .then((list) => {
+        if (!cancelled) setDshPresets(list);
+      })
+      .catch(() => {
+        if (!cancelled) setDshPresets([]);
+      })
+      .finally(() => {
+        if (!cancelled) setDshPresetsLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [activeAgentTab, dshPresets]);
+  const handleSelectDshPreset = useCallback(async (presetId: string) => {
+    setDshPresetSaving(true);
+    setError(null);
+    try {
+      const next = await settingsSetDshPreset(presetId);
+      setSnapshot(next);
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setDshPresetSaving(false);
+    }
+  }, []);
+  const handleCheckDshUpdate = useCallback(async () => {
+    setCheckingDsh(true);
+    setError(null);
+    setInstallResult(null);
+    setDshCheckMessage(null);
+    try {
+      const info = await settingsCheckDshUpdate();
+      setDshVersionInfo(info);
+      if (info.update_available) {
+        setDshCheckMessage(`发现新版本 v${info.latest_version}（当前 v${info.current_version}）`);
+      } else if (info.latest_version) {
+        setDshCheckMessage(`当前已是最新版本 v${info.current_version ?? info.latest_version}`);
+      } else {
+        setDshCheckMessage("无法获取最新版本信息");
+      }
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setCheckingDsh(false);
+    }
+  }, []);
+  const handleUpgradeDsh = useCallback(async () => {
+    setUpgradingDsh(true);
+    setError(null);
+    setInstallResult(null);
+    setDshCheckMessage(null);
+    try {
+      const result = await settingsUpgradeDsh();
+      setInstallResult(result);
+      setSnapshot(result.snapshot);
+      // Clear the pending update state so the button returns to 检测更新.
+      setDshVersionInfo(null);
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setUpgradingDsh(false);
     }
   }, []);
 
@@ -2024,6 +2105,12 @@ export function SettingsPage({
     if (!snapshot) return null;
     const agent = snapshot.agents.find((item) => item.id === agentId);
     if (!agent) return null;
+    const isDsh = agent.id === "deepseek-harness";
+    // Version text: installed version always shown; latest appended after a
+    // successful update check.
+    const dshCurrent = agent.current_version ?? dshVersionInfo?.current_version ?? null;
+    const dshLatest = dshVersionInfo?.latest_version ?? null;
+    const dshUpdateAvailable = isDsh && (dshVersionInfo?.update_available ?? false);
     return (
       <div className="settings-provider-detail settings-agent-runtime">
         <span
@@ -2031,24 +2118,52 @@ export function SettingsPage({
         >
           {agent.installed ? "已安装" : "未安装"}
         </span>
+        {isDsh && agent.installed && dshCurrent && (
+          <span className="settings-agent-version">
+            {`v${dshCurrent}`}
+            {dshLatest && dshLatest !== dshCurrent ? ` → v${dshLatest}` : ""}
+          </span>
+        )}
         <div className="settings-row-actions">
           {agent.installed ? (
-            <button
-              type="button"
-              className={`settings-btn ${agent.selected ? "is-selected" : ""}`}
-              disabled={
-                agent.selected ||
-                busyAgent === agent.id ||
-                !!snapshot.env_override
-              }
-              onClick={() => handleSelect(agent.id)}
-            >
-              {agent.selected
-                ? "当前默认"
-                : busyAgent === agent.id
-                  ? "保存中..."
-                  : "设为默认"}
-            </button>
+            <>
+              {isDsh &&
+                (dshUpdateAvailable ? (
+                <button
+                  type="button"
+                  className="settings-btn is-install"
+                  disabled={upgradingDsh}
+                  onClick={handleUpgradeDsh}
+                >
+                  {upgradingDsh ? "升级中..." : "升级到最新"}
+                </button>
+                ) : (
+                  <button
+                    type="button"
+                    className="settings-btn"
+                    disabled={checkingDsh || upgradingDsh}
+                    onClick={handleCheckDshUpdate}
+                  >
+                    {checkingDsh ? "检测中..." : "检测更新"}
+                  </button>
+                ))}
+              <button
+                type="button"
+                className={`settings-btn ${agent.selected ? "is-selected" : ""}`}
+                disabled={
+                  agent.selected ||
+                  busyAgent === agent.id ||
+                  !!snapshot.env_override
+                }
+                onClick={() => handleSelect(agent.id)}
+              >
+                {agent.selected
+                  ? "当前默认"
+                  : busyAgent === agent.id
+                    ? "保存中..."
+                    : "设为默认"}
+              </button>
+            </>
           ) : (
             <button
               type="button"
@@ -3579,14 +3694,6 @@ export function SettingsPage({
                 >
                   编辑远程 Codex
                 </button>
-                <button
-                  type="button"
-                  className="settings-btn"
-                  disabled={!canUseRemoteSettings}
-                  onClick={() => openRemoteAgentSettings("codebuddy")}
-                >
-                  编辑远程 CodeBuddy
-                </button>
               </div>
             </div>
           </div>
@@ -4372,26 +4479,6 @@ export function SettingsPage({
                   </div>
 
                   <div className="settings-agent-tab-panel">
-                    {activeAgentTab === "codebuddy" &&
-                      (() => {
-                        return (
-                          <div className="settings-provider-config">
-                            <div className="settings-provider-config-head">
-                              <div>
-                                <span>CodeBuddy</span>
-                              </div>
-                              <span className="settings-provider-active">
-                                {snapshot.settings.selected_agent ===
-                                "codebuddy"
-                                  ? "当前默认"
-                                  : "可选"}
-                              </span>
-                            </div>
-                            {renderAgentRuntime("codebuddy")}
-                          </div>
-                        );
-                      })()}
-
                     {activeAgentTab === "codex-acp" && (
                       <>
                         <div className="settings-provider-config">
@@ -4453,6 +4540,41 @@ export function SettingsPage({
                             </span>
                           </div>
                           {renderAgentRuntime("deepseek-harness")}
+                          {dshCheckMessage && (
+                            <div className="settings-success">
+                              <span>{dshCheckMessage}</span>
+                            </div>
+                          )}
+                          <div className="settings-field settings-dsh-preset-field">
+                            <span>默认模式</span>
+                            <p className="settings-dsh-preset-hint">
+                              新建 DeepSeek Harness 会话时使用的 agent 预设。
+                            </p>
+                            {dshPresetsLoading ? (
+                              <span className="settings-status">加载中...</span>
+                            ) : dshPresets && dshPresets.length > 0 ? (
+                              <select
+                                className="settings-provider-native-select"
+                                value={snapshot.settings.dsh_default_preset ?? ""}
+                                disabled={dshPresetSaving}
+                                onChange={(event) => {
+                                  void handleSelectDshPreset(event.target.value);
+                                }}
+                              >
+                                <option value="">跟随 dsh 默认</option>
+                                {dshPresets.map((preset) => (
+                                  <option key={preset.id} value={preset.id}>
+                                    {preset.label}
+                                    {preset.description ? ` — ${preset.description}` : ""}
+                                  </option>
+                                ))}
+                              </select>
+                            ) : (
+                              <span className="settings-row-meta">
+                                未获取到模式列表（确认 dsh 已安装并运行）
+                              </span>
+                            )}
+                          </div>
                         </div>
                         {renderByokPool()}
                       </>

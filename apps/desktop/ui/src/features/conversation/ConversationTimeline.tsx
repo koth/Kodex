@@ -899,6 +899,7 @@ export function ConversationTimeline({
   const [expandedCollapseGroups, setExpandedCollapseGroups] = useState<Set<string>>(
     () => new Set(),
   );
+  const [thinkingExpanded, setThinkingExpanded] = useState(false);
   const activeTurnFallbackStart = useRef<{ key: string; startedAtMs: number } | null>(null);
   const [durationNowMs, setDurationNowMs] = useState(() => Date.now());
   const [navHoverId, setNavHoverId] = useState<string | null>(null);
@@ -1698,9 +1699,24 @@ export function ConversationTimeline({
           );
         })}
         {snapshot.thinking_status === "Active" && (
-          <div className="thinking-indicator thinking-active">
-            <span className="thinking-bullet">•</span>
-            <span className="thinking-text">思考中</span>
+          <div className="thinking-block">
+            <button
+              type="button"
+              className={`thinking-indicator thinking-active ${snapshot.thinking_text ? "is-expandable" : ""}`}
+              onClick={() => snapshot.thinking_text && setThinkingExpanded((v) => !v)}
+              aria-expanded={snapshot.thinking_text ? thinkingExpanded : undefined}
+            >
+              <span className="thinking-bullet">•</span>
+              <span className="thinking-text">
+                {snapshot.thinking_text ? "思考过程" : "思考中"}
+              </span>
+              {snapshot.thinking_text && (
+                <span className={`thinking-chevron ${thinkingExpanded ? "is-expanded" : ""}`}>›</span>
+              )}
+            </button>
+            {thinkingExpanded && snapshot.thinking_text && (
+              <div className="thinking-body">{snapshot.thinking_text}</div>
+            )}
           </div>
         )}
         {proxyRetry?.active && (

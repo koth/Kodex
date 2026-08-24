@@ -126,6 +126,7 @@ fn build_initial_ui_for_descriptor(descriptor: WorkspaceDescriptor) -> anyhow::R
         review_changes: Vec::new(),
         turn_changes: Vec::new(),
         thinking_status: None,
+        thinking_text: String::new(),
         usage: Default::default(),
         pending_steers: Vec::new(),
         history_total: 0,

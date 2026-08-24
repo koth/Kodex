@@ -44,6 +44,11 @@ pub struct SessionSink {
     pub tx_events: mpsc::Sender<ClientEvent>,
     pub permission_broker: PermissionBroker,
     pub last_seq: AtomicU64,
+    /// Set while history replay is feeding events (resume / stream-gap
+    /// re-baseline): no live `assistant/chunk` deltas accompany replayed
+    /// events, so the mapping layer must take text from `assistant/message`
+    /// blocks instead of the (absent) stream.
+    replaying: AtomicBool,
     /// Pending approvals/questions keyed by the id surfaced to the UI (dsh
     /// `approvalId` for approvals; the question batch's first `question.id` for
     /// questions). The value carries the dsh `rpcId` needed for `/api/respond`
@@ -54,11 +59,24 @@ pub struct SessionSink {
     /// approvalId as both the UI id and the respond payload field; questions
     /// need the server-request rpcId for the respond envelope).
     question_rpc_ids: Mutex<Vec<(String, RpcId)>>,
+    /// The ordered question ids of each pending batch, keyed by UI request id.
+    /// dsh's `matchesQuestions` validates answers positionally
+    /// (`answer[i].id === questions[i].id`), so the respond payload must list
+    /// answers in the exact order the questions were asked.
+    question_order: Mutex<std::collections::HashMap<String, Vec<String>>>,
     /// The dsh session id, set once `session.create` returns.
     session_id: Mutex<Option<SessionId>>,
     /// Set when the session has been removed by the host (`host/session-removed`)
     /// during a stream gap, so re-baseline skips it and marks it Interrupted.
     removed: AtomicBool,
+    /// Shared "a prompt turn is in flight" flag, owned by the session thread
+    /// and cleared here when a `TurnFinished`/`Interrupted` event is sent to
+    /// app-core. The session thread checks this before queueing a new prompt so
+    /// a completed turn (whose completion flows through the sink, not the
+    /// command loop) does not leave a stale guard that silently drops the next
+    /// prompt. `None` until the session thread attaches it via
+    /// [`SessionSink::set_inflight_flag`].
+    inflight: Mutex<Option<Arc<AtomicBool>>>,
 }
 
 #[derive(Debug, Clone)]
@@ -74,11 +92,22 @@ impl SessionSink {
             tx_events,
             permission_broker: broker,
             last_seq: AtomicU64::new(0),
+            replaying: AtomicBool::new(false),
             pending: Mutex::new(Vec::new()),
             question_rpc_ids: Mutex::new(Vec::new()),
+            question_order: Mutex::new(std::collections::HashMap::new()),
             session_id: Mutex::new(None),
             removed: AtomicBool::new(false),
+            inflight: Mutex::new(None),
         }
+    }
+
+    pub fn set_replaying(&self, active: bool) {
+        self.replaying.store(active, Ordering::Release);
+    }
+
+    pub fn is_replaying(&self) -> bool {
+        self.replaying.load(Ordering::Acquire)
     }
 
     pub fn set_session_id(&self, id: SessionId) {
@@ -99,7 +128,34 @@ impl SessionSink {
         self.removed.load(Ordering::Acquire)
     }
 
+    /// Attach the shared in-flight flag owned by the session thread. The sink
+    /// clears it when a `TurnFinished`/`Interrupted` reaches app-core, so the
+    /// session thread's "one prompt per turn" guard stays in sync with turns
+    /// that complete via the event stream (not the command loop).
+    pub fn set_inflight_flag(&self, flag: Arc<AtomicBool>) {
+        if let Ok(mut guard) = self.inflight.lock() {
+            *guard = Some(flag);
+        }
+    }
+
+    fn clear_inflight_if_turn_done(&self, event: &ClientEvent) {
+        if matches!(
+            event,
+            ClientEvent::TurnFinished { .. } | ClientEvent::Interrupted { .. }
+        ) {
+            if let Ok(guard) = self.inflight.lock() {
+                if let Some(flag) = guard.as_ref() {
+                    flag.store(false, Ordering::Release);
+                }
+            }
+        }
+    }
+
     pub fn send(&self, event: ClientEvent) {
+        // A turn completion / interruption flows through the sink (the session
+        // thread's command loop never sees these events), so clear the shared
+        // in-flight flag here before forwarding the event to app-core.
+        self.clear_inflight_if_turn_done(&event);
         // A send error means the SessionHandle dropped its receiver; the router
         // will unregister it shortly. Log and continue.
         let _ = self.tx_events.send(event);
@@ -128,6 +184,23 @@ impl SessionSink {
         }
     }
 
+    /// Record the ordered question ids for a pending batch, so the respond
+    /// payload lists answers in the same positional order dsh validates.
+    pub fn record_question_order(&self, ui_id: String, order: Vec<String>) {
+        if let Ok(mut guard) = self.question_order.lock() {
+            guard.insert(ui_id, order);
+        }
+    }
+
+    /// The ordered question ids for a pending batch (empty when unknown).
+    pub fn question_order(&self, ui_id: &str) -> Vec<String> {
+        self.question_order
+            .lock()
+            .ok()
+            .and_then(|g| g.get(ui_id).cloned())
+            .unwrap_or_default()
+    }
+
     pub fn attach_question_rpc_id(&self, ui_id: String, rpc_id: RpcId) {
         if let Ok(mut guard) = self.question_rpc_ids.lock() {
             guard.push((ui_id, rpc_id));
@@ -138,6 +211,9 @@ impl SessionSink {
     pub fn clear_pending_question(&self, ui_id: &str) {
         if let Ok(mut guard) = self.question_rpc_ids.lock() {
             guard.retain(|(id, _)| id != ui_id);
+        }
+        if let Ok(mut guard) = self.question_order.lock() {
+            guard.remove(ui_id);
         }
         if let Ok(mut pending) = self.pending.lock() {
             pending.retain(|e| !(e.kind == PendingApprovalKind::Question && e.ui_id == ui_id));
@@ -538,6 +614,7 @@ impl HarnessHost {
                         .await
                     {
                         Ok(value) => {
+                            sink.set_replaying(true);
                             for entry in value.events {
                                 let event_json = entry.event;
                                 let view_json = entry.view;
@@ -555,6 +632,7 @@ impl HarnessHost {
                                     sink.last_seq.store(event.seq, Ordering::Release);
                                 }
                             }
+                            sink.set_replaying(false);
                         }
                         Err(err) => {
                             tracing::warn!(target: "dsh-bridge::host::rebaseline", session_id = %session_id, error = %err, "history fetch failed; isolating session");

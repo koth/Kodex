@@ -63,6 +63,12 @@ function toolDetailLooksCapped(tool: ToolInvocation): boolean {
 function mergeToolDetail(base: ToolInvocation, detail: ToolInvocation): ToolInvocation {
   return {
     ...base,
+    // The lazily-loaded detail comes from the store (persisted before the
+    // current session's mapping fixes); keep the live snapshot's kind/name so
+    // a stale persisted record cannot revert the tool's classification.
+    kind: base.kind || detail.kind,
+    name: base.name || detail.name,
+    summary: base.summary || detail.summary,
     raw_input: detail.raw_input ?? base.raw_input,
     raw_output: detail.raw_output ?? base.raw_output,
     error: detail.error ?? base.error,

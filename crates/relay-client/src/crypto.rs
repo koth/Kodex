@@ -71,6 +71,9 @@ pub fn encrypt(
         to_device_id: to_device_id.to_string(),
         nonce: nonce_bytes.to_vec(),
         ciphertext,
+        chunk_id: None,
+        chunk_index: None,
+        chunk_total: None,
     })
 }
 

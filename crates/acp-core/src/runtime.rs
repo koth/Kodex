@@ -22,6 +22,7 @@ mod tool_stop;
 mod workspace_paths;
 use agent_process::{AgentTransport, HiddenAgentProcess, RemoteSshAgentProcess, TcpAgentProcess};
 pub use permissions::PermissionBroker;
+pub use prompt_content::workspace_reference_to_mention_text;
 pub use shutdown::ShutdownSignal;
 
 pub enum RuntimeCommand {

@@ -131,6 +131,17 @@ impl std::fmt::Display for RpcError {
     }
 }
 
+/// Extract the dsh error `code` from a `call()` failure. `call()` formats
+/// business errors via `RpcError`'s Display as `"{code}: {message}"`, so the
+/// code is recoverable from the message prefix before the first `": "`.
+pub fn rpc_error_code(err: &anyhow::Error) -> Option<String> {
+    let msg = format!("{err}");
+    msg.split(": ")
+        .next()
+        .filter(|code| !code.is_empty() && code.chars().all(|c| c.is_ascii_alphanumeric() || c == '-'))
+        .map(|code| code.to_string())
+}
+
 /// `RpcReceipt` — the HTTP response body of `POST /api/respond`. A late or
 /// duplicate respond yields `not-pending`; a malformed body yields `bad-response`.
 #[derive(Debug, Clone, Deserialize)]
@@ -172,6 +183,47 @@ pub struct SessionCreateValue {
     pub session_id: SessionId,
     #[serde(default, rename = "agentPreset")]
     pub agent_preset: Option<String>,
+}
+
+/// `agentPreset.list` request payload (empty object).
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct AgentPresetListPayload {}
+
+/// One entry of `agentPreset.list` (`{ id, trust, isDefault, name?, description?, broken? }`).
+#[derive(Debug, Clone, Deserialize)]
+pub struct AgentPresetEntry {
+    pub id: String,
+    #[serde(default)]
+    pub trust: Option<String>,
+    #[serde(default, rename = "isDefault")]
+    pub is_default: bool,
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub description: Option<String>,
+}
+
+/// `agentPreset.list` response value.
+#[derive(Debug, Clone, Deserialize)]
+pub struct AgentPresetListValue {
+    #[serde(default)]
+    pub presets: Vec<AgentPresetEntry>,
+}
+
+/// `agentPreset.select` request payload (`{ sessionId, agentPreset }`).
+#[derive(Debug, Clone, Serialize)]
+pub struct AgentPresetSelectPayload {
+    #[serde(rename = "sessionId")]
+    pub session_id: SessionId,
+    #[serde(rename = "agentPreset")]
+    pub agent_preset: String,
+}
+
+/// `agentPreset.select` response value.
+#[derive(Debug, Clone, Deserialize)]
+pub struct AgentPresetSelectValue {
+    #[serde(rename = "agentPreset")]
+    pub agent_preset: String,
 }
 
 /// `session.prompt` request. `mode` is `queue` (a new turn) or `steer`

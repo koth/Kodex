@@ -185,6 +185,10 @@ fn main() {
             commands::settings::settings_save_codebuddy_config,
             commands::settings::settings_clear_codebuddy_config,
             commands::settings::settings_install_agent,
+            commands::settings::settings_check_dsh_update,
+            commands::settings::settings_upgrade_dsh,
+            commands::settings::settings_list_dsh_presets,
+            commands::settings::settings_set_dsh_preset,
             commands::settings::settings_get_lsp_snapshot,
             commands::settings::settings_save_lsp_server,
             commands::settings::settings_reset_lsp_server,
@@ -341,6 +345,10 @@ fn start_remote_control_driver(app: tauri::AppHandle) {
                 let manager_for_err = app_for_loop.state::<AppState>().remote_control();
                 conn.set_error_log(Arc::new(move |line: &str| {
                     manager_for_err.log_driver_event(line);
+                }));
+                let manager_for_send = app_for_loop.state::<AppState>().remote_control();
+                conn.set_send_log(Arc::new(move |line: &str| {
+                    manager_for_send.log_driver_event(line);
                 }));
             }
             // Authenticate with the device identity (Ed25519 signature), then

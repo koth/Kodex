@@ -100,8 +100,13 @@ pub struct MockHarnessConfig {
     /// Events returned by `session.history` (each a `HistoryEntry` JSON
     /// `{ event: { type, seq, time, data }, view? }`).
     pub history_events: Vec<Value>,
+    /// When true, `agentPreset.select` answers with the `agent-preset-locked`
+    /// business error (as dsh does for a session that has already started).
+    pub preset_locked: bool,
+    /// When true, `/api/respond` rejects with `bad-response` (as dsh does for
+    /// a malformed/ mismatched answer payload).
+    pub respond_reject: bool,
 }
-
 #[derive(Debug, Default)]
 struct MockState {
     /// Methods received (POST /api/<method>) with their rpcId, in order.
@@ -110,6 +115,11 @@ struct MockState {
     pub creates: Vec<Value>,
     /// `respond` payloads received (approval/question answers).
     pub responds: Vec<Value>,
+    /// `agentPreset.select` preset ids received, in order.
+    pub preset_selects: Vec<String>,
+    /// Pending question frames keyed by envelope rpcId (the questions the host
+    /// is waiting on). Populated when a `question/requested` frame is sent.
+    pub pending_questions: std::collections::HashMap<String, Vec<Value>>,
 }
 
 pub struct MockHarness {
@@ -175,6 +185,11 @@ impl MockHarness {
 
     pub fn responds(&self) -> Vec<Value> {
         self.state.lock().unwrap().responds.clone()
+    }
+
+    /// `agentPreset.select` preset ids received, in order.
+    pub fn preset_selects(&self) -> Vec<String> {
+        self.state.lock().unwrap().preset_selects.clone()
     }
 
     pub fn mux_connection_count(&self) -> usize {
@@ -271,7 +286,7 @@ async fn handle_connection(
                 }
                 next.unwrap_or_else(|| scripts_for_hold().remove(0))
             };
-            serve_mux(stream, buf[..head_end].to_vec(), scripts, drop_tx).await;
+            serve_mux(stream, buf[..head_end].to_vec(), scripts, drop_tx, state.clone()).await;
         }
         ("GET", "/api/events.host") => {
             // Host stream: WebSocket keep-alive with no frames (idle).
@@ -287,7 +302,54 @@ async fn handle_connection(
         ("POST", "/api/respond") => {
             let parsed: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
             state.lock().unwrap().responds.push(parsed.clone());
-            let receipt = serde_json::json!({ "accepted": true });
+            // Real validation, mirroring dsh's respond() + matchesQuestions:
+            // the answer must reference a pending question rpcId and satisfy
+            // count/id/label constraints, else `bad-response`.
+            let receipt = {
+                let state_guard = state.lock().unwrap();
+                let rpc_id = parsed.get("rpcId").and_then(Value::as_str).unwrap_or("");
+                let reject = config.lock().unwrap().respond_reject;
+                if reject {
+                    serde_json::json!({ "accepted": false, "reason": "bad-response" })
+                } else if let Some(questions) = state_guard.pending_questions.get(rpc_id) {
+                    let value = parsed.pointer("/result/value");
+                    let answers = value
+                        .and_then(|v| v.pointer("/answer/answers"))
+                        .and_then(Value::as_array)
+                        .cloned()
+                        .unwrap_or_default();
+                    let ok = answers.len() == questions.len()
+                        && answers.iter().zip(questions.iter()).all(|(a, q)| {
+                            let qid = q.get("id").and_then(Value::as_str).unwrap_or("");
+                            let aid = a.get("id").and_then(Value::as_str).unwrap_or("");
+                            if aid != qid {
+                                return false;
+                            }
+                            let selected: Vec<&str> = a
+                                .get("selected")
+                                .and_then(Value::as_array)
+                                .map(|arr| arr.iter().filter_map(Value::as_str).collect())
+                                .unwrap_or_default();
+                            let labels: Vec<&str> = q
+                                .get("options")
+                                .and_then(Value::as_array)
+                                .map(|arr| {
+                                    arr.iter()
+                                        .filter_map(|o| o.get("label").and_then(Value::as_str))
+                                        .collect()
+                                })
+                                .unwrap_or_default();
+                            selected.iter().all(|s| labels.contains(s))
+                        });
+                    if ok {
+                        serde_json::json!({ "accepted": true })
+                    } else {
+                        serde_json::json!({ "accepted": false, "reason": "bad-response" })
+                    }
+                } else {
+                    serde_json::json!({ "accepted": false, "reason": "not-pending" })
+                }
+            };
             let body = serde_json::to_vec(&receipt).unwrap();
             write_response(&mut stream, 200, "application/json", &body).await;
         }
@@ -366,6 +428,42 @@ async fn handle_connection(
                 "session.selectModel" => serde_json::json!({
                     "selected": { "provider": "deepseek", "model": "deepseek-v4-pro" }
                 }),
+                "agentPreset.list" => serde_json::json!({
+                    "presets": [
+                        { "id": "code", "trust": "system", "isDefault": true, "name": "Code", "description": "Standard coding agent" },
+                        { "id": "standard", "trust": "system", "isDefault": false, "name": "Standard", "description": "Full coding agent" },
+                        { "id": "minimal", "trust": "system", "isDefault": false, "name": "Minimal", "description": "Fixed-prompt composition" },
+                        { "id": "cordis", "trust": "system", "isDefault": false, "name": "Cordis", "description": "Runtime read/write" }
+                    ],
+                    "authorable": false,
+                    "hasDocument": false,
+                }),
+                "agentPreset.select" => {
+                    let preset = parsed
+                        .pointer("/payload/agentPreset")
+                        .and_then(Value::as_str)
+                        .unwrap_or("code")
+                        .to_string();
+                    if config.lock().unwrap().preset_locked {
+                        let response = serde_json::json!({
+                            "type": "server-response",
+                            "rpcId": rpc_id,
+                            "result": {
+                                "ok": false,
+                                "error": {
+                                    "code": "agent-preset-locked",
+                                    "message": format!("session has already started; its agent preset is fixed"),
+                                    "details": { "sessionId": session_id, "agentPreset": preset }
+                                }
+                            }
+                        });
+                        let body = serde_json::to_vec(&response).unwrap();
+                        write_response(&mut stream, 200, "application/json", &body).await;
+                        return;
+                    }
+                    state.lock().unwrap().preset_selects.push(preset.clone());
+                    serde_json::json!({ "agentPreset": preset })
+                }
                 _ => serde_json::json!({}),
             };
             let response = serde_json::json!({
@@ -389,7 +487,13 @@ async fn handle_connection(
     }
 }
 
-async fn serve_mux(stream: TcpStream, head: Vec<u8>, script: MuxScript, drop_tx: mpsc::Sender<()>) {
+async fn serve_mux(
+    stream: TcpStream,
+    head: Vec<u8>,
+    script: MuxScript,
+    drop_tx: mpsc::Sender<()>,
+    state: Arc<Mutex<MockState>>,
+) {
     let prefixed = PrefixedStream {
         prefix: head,
         prefix_pos: 0,
@@ -400,6 +504,25 @@ async fn serve_mux(stream: TcpStream, head: Vec<u8>, script: MuxScript, drop_tx:
         Err(_) => return,
     };
     for frame in &script.frames {
+        // Record pending questions so the respond handler can validate answers
+        // the way dsh's `matchesQuestions` does.
+        if frame.get("method").and_then(Value::as_str) == Some("question/requested") {
+            let rpc_id = frame
+                .get("rpcId")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
+            let questions = frame
+                .pointer("/payload/questions")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default();
+            state
+                .lock()
+                .unwrap()
+                .pending_questions
+                .insert(rpc_id, questions);
+        }
         let payload = serde_json::to_string(frame).unwrap();
         let _ = ws.send(Message::Text(payload.into())).await;
     }
@@ -458,6 +581,34 @@ pub fn mux_session_event(session_id: &str, seq: u64, type_tag: &str, data: Value
     })
 }
 
+/// A live mux `assistant/chunk` frame carrying a text-delta (the real dsh
+/// streaming path — finalized `assistant/message` frames do not re-emit text).
+pub fn mux_assistant_text_delta(session_id: &str, seq: u64, text: &str) -> Value {
+    mux_session_event(
+        session_id,
+        seq,
+        "assistant/chunk",
+        serde_json::json!({
+            "turn": 1, "step": 1,
+            "chunk": { "type": "text-delta", "index": 0, "text": text }
+        }),
+    )
+}
+
+/// A live mux finalized `assistant/message` frame (no usage). Pairs with
+/// `mux_assistant_text_delta` the way real dsh streams end a step.
+pub fn mux_assistant_final(session_id: &str, seq: u64) -> Value {
+    mux_session_event(
+        session_id,
+        seq,
+        "assistant/message",
+        serde_json::json!({
+            "turn": 1, "step": 1,
+            "message": { "role": "assistant", "content": [] }
+        }),
+    )
+}
+
 /// Build a mux `session/subscribed` `ServerRequest` frame.
 pub fn mux_subscribed(session_id: &str, last_seq: i64) -> Value {
     serde_json::json!({
@@ -486,6 +637,8 @@ pub fn default_config() -> MockHarnessConfig {
         mux: Vec::new(),
         history_failures: Vec::new(),
         history_events: Vec::new(),
+        preset_locked: false,
+        respond_reject: false,
     }
 }
 

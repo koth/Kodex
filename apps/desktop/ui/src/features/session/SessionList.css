@@ -1012,6 +1012,38 @@
   color: var(--danger);
 }
 
+.sl-dsh-preset-field {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  margin-top: 12px;
+}
+
+.sl-dsh-preset-select {
+  width: 100%;
+  padding: 9px 11px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 12px;
+  background: var(--surface-muted-bg);
+  color: var(--text-strong);
+  font-size: var(--font-size-shell-label);
+}
+
+.sl-dsh-preset-select:disabled {
+  opacity: 0.55;
+}
+
+.sl-dsh-preset-loading,
+.sl-dsh-preset-error {
+  color: var(--text-soft);
+  font-size: var(--font-size-shell-label);
+  line-height: 1.4;
+}
+
+.sl-dsh-preset-error {
+  color: var(--danger);
+}
+
 .sl-agent-actions {
   justify-content: flex-end;
   margin-top: 14px;

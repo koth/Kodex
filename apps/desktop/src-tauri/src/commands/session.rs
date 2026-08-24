@@ -128,13 +128,14 @@ pub fn session_create(
     state: State<'_, AppState>,
     workspace_root: Option<String>,
     agent: Option<AgentCliId>,
+    preset: Option<String>,
 ) -> Result<(), String> {
     let default_agent = agent.or_else(|| {
         app_core::AppPaths::resolve()
             .ok()
             .map(|paths| app_core::settings::default_agent_for_new_work(&paths))
     });
-    state.with_workspace_app(workspace_root, |app| app.session_create(default_agent))?;
+    state.with_workspace_app(workspace_root, |app| app.session_create(default_agent, preset))?;
     save_open_workspace_state(&state)
 }
 

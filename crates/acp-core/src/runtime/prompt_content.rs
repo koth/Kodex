@@ -129,6 +129,13 @@ fn workspace_reference_to_acp(
     let requested_path = Path::new(path);
     let resolved = validate_workspace_path(workspace_root, requested_path)
         .with_context(|| format!("failed to resolve referenced file {path}"))?;
+    if resolved.is_dir() {
+        // Directories cannot be embedded as a single resource; emit only a
+        // text mention (`@dir/`) so the agent can explore the directory itself.
+        return Ok(vec![ContentBlock::Text(TextContent::new(
+            workspace_reference_to_mention_text(workspace_root, path, start_line, end_line)?,
+        ))]);
+    }
     if !resolved.is_file() {
         anyhow::bail!("referenced path is not a file: {path}");
     }
@@ -158,6 +165,30 @@ fn workspace_reference_mention(path: &str, range: Option<(u32, u32)>) -> String 
         Some((start, end)) => format!("@{normalized}#L{start}-L{end}"),
         None => format!("@{normalized}"),
     }
+}
+
+/// Build a plain text mention for a workspace reference, validating the path
+/// against the workspace root. Directories resolve to `@dir/` (no line range);
+/// files resolve to `@path` or `@path#Lstart-Lend`. Unlike
+/// [`workspace_reference_to_acp`] this never reads file contents — it only
+/// produces the mention text, so text-only transports (e.g. the dsh harness
+/// bridge) can carry workspace references without an embedded resource.
+pub fn workspace_reference_to_mention_text(
+    workspace_root: &str,
+    path: &str,
+    start_line: Option<u32>,
+    end_line: Option<u32>,
+) -> anyhow::Result<String> {
+    let requested_path = Path::new(path);
+    let resolved = validate_workspace_path(workspace_root, requested_path)
+        .with_context(|| format!("failed to resolve referenced file {path}"))?;
+    if resolved.is_dir() {
+        let normalized = path.replace('\\', "/");
+        let normalized = normalized.trim_start_matches('/').trim_end_matches('/');
+        return Ok(format!("@{normalized}/"));
+    }
+    let range = normalize_reference_range(start_line, end_line);
+    Ok(workspace_reference_mention(path, range))
 }
 
 fn normalize_reference_range(start_line: Option<u32>, end_line: Option<u32>) -> Option<(u32, u32)> {
@@ -281,6 +312,36 @@ mod tests {
             err.to_string()
                 .contains("failed to resolve referenced file")
         );
+        let _ = fs::remove_dir_all(root.parent().unwrap());
+    }
+
+    #[test]
+    fn workspace_directory_reference_emits_mention_only() {
+        let root = temp_workspace("dirref");
+        fs::create_dir_all(root.join("src")).unwrap();
+
+        let blocks = prompt_content_to_acp(
+            UserPromptContent::workspace_file("src", None, None),
+            root.to_str().unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(blocks.len(), 1);
+        match &blocks[0] {
+            ContentBlock::Text(text) => assert_eq!(text.text, "@src/"),
+            other => panic!("expected text mention for directory, got {other:?}"),
+        }
+
+        // The shared mention helper agrees and ignores line ranges for dirs.
+        let mention = super::workspace_reference_to_mention_text(
+            root.to_str().unwrap(),
+            "src",
+            Some(2),
+            Some(4),
+        )
+        .unwrap();
+        assert_eq!(mention, "@src/");
+
         let _ = fs::remove_dir_all(root.parent().unwrap());
     }
 

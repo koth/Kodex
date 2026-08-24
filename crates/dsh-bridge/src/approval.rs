@@ -91,9 +91,24 @@ impl PendingApprovals {
                     .iter()
                     .find(|(id, _)| id == rpc_id)
                     .map(|(_, rpc_id)| rpc_id.clone())?;
-                let wire_answers: Vec<AskUserQuestionAnswerItemWire> = answers
+                // dsh's `matchesQuestions` validates answers POSITIONALLY
+                // (`answer[i].id === questions[i].id`), so the batch must be
+                // re-ordered to the exact question order before sending —
+                // the UI's answers arrive keyed by id (a map), whose
+                // iteration order does not match the question order.
+                let order = sink.question_order(rpc_id);
+                let mut sorted: Vec<&HarnessQuestionAnswer> = answers.iter().collect();
+                if !order.is_empty() {
+                    sorted.sort_by_key(|a| {
+                        order
+                            .iter()
+                            .position(|id| id == &a.question_id)
+                            .unwrap_or(usize::MAX)
+                    });
+                }
+                let wire_answers: Vec<AskUserQuestionAnswerItemWire> = sorted
                     .iter()
-                    .map(|a: &HarnessQuestionAnswer| AskUserQuestionAnswerItemWire {
+                    .map(|a| AskUserQuestionAnswerItemWire {
                         id: a.question_id.clone(),
                         selected: a.selected.clone(),
                         custom: a.custom.clone(),

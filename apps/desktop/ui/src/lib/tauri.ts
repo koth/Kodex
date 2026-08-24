@@ -265,8 +265,9 @@ export async function reviewRejectPatch(path: string): Promise<void> {
 export async function workspaceOpen(
   path: string,
   agent?: AgentCliId,
+  preset?: string | null,
 ): Promise<UiSnapshot> {
-  return invoke<UiSnapshot>("workspace_open", { path, agent });
+  return invoke<UiSnapshot>("workspace_open", { path, agent, preset: preset ?? null });
 }
 
 export async function workspaceOpenRemoteLinux(
@@ -339,8 +340,9 @@ export async function sessionSwitch(
 export async function sessionCreate(
   workspaceRoot?: string,
   agent?: AgentCliId,
+  preset?: string | null,
 ): Promise<void> {
-  return invoke("session_create", { workspaceRoot, agent });
+  return invoke("session_create", { workspaceRoot, agent, preset: preset ?? null });
 }
 
 export async function sessionDelete(
@@ -797,6 +799,36 @@ export async function settingsInstallAgent(
   agent: AgentCliId,
 ): Promise<AgentInstallResult> {
   return invoke<AgentInstallResult>("settings_install_agent", { agent });
+}
+
+export async function settingsUpgradeDsh(): Promise<AgentInstallResult> {
+  return invoke<AgentInstallResult>("settings_upgrade_dsh");
+}
+
+export interface DshVersionInfo {
+  current_version: string | null;
+  latest_version: string | null;
+  update_available: boolean;
+}
+
+export async function settingsCheckDshUpdate(): Promise<DshVersionInfo> {
+  return invoke<DshVersionInfo>("settings_check_dsh_update");
+}
+
+export interface DshPresetOption {
+  id: string;
+  label: string;
+  description?: string | null;
+}
+
+export async function settingsListDshPresets(): Promise<DshPresetOption[]> {
+  return invoke<DshPresetOption[]>("settings_list_dsh_presets");
+}
+
+export async function settingsSetDshPreset(
+  preset: string | null,
+): Promise<AgentSettingsSnapshot> {
+  return invoke<AgentSettingsSnapshot>("settings_set_dsh_preset", { preset });
 }
 
 export async function settingsGetLspSnapshot(

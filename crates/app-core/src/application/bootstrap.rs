@@ -7,14 +7,16 @@ impl Application {
     pub fn bootstrap(
         workspace_root: impl AsRef<Path>,
         agent_command: impl Into<String>,
+        preset: Option<String>,
     ) -> anyhow::Result<Self> {
-        Self::bootstrap_with_app_paths(workspace_root, agent_command, AppPaths::resolve()?)
+        Self::bootstrap_with_app_paths(workspace_root, agent_command, AppPaths::resolve()?, preset)
     }
 
     pub fn bootstrap_with_app_paths(
         workspace_root: impl AsRef<Path>,
         agent_command: impl Into<String>,
         app_paths: AppPaths,
+        preset: Option<String>,
     ) -> anyhow::Result<Self> {
         let workspace_root = normalize_workspace_root(workspace_root.as_ref());
         // Register the project name with the in-process codex_api_proxy so it
@@ -122,6 +124,18 @@ impl Application {
         } else {
             None
         };
+        // DeepSeek Harness agent preset for the bootstrap session. On RESUME
+        // the session's own persisted preset wins (the harness fixed it at
+        // creation and rejects a conflicting preset); on a fresh session a
+        // per-open override wins over the global `dsh_default_preset` setting.
+        let agent_preset = if resume_session_id.is_some() {
+            most_recent_session
+                .and_then(|session| store.get_session_agent_preset(&session.id).ok().flatten())
+        } else {
+            preset
+                .filter(|preset| !preset.trim().is_empty())
+                .or_else(|| settings.dsh_default_preset.clone())
+        };
         let mut session = crate::startup_perf::measure(
             "app/bootstrap/session_handle_start",
             format!("resume={}", resume_session_id.is_some()),
@@ -138,6 +152,7 @@ impl Application {
                     remote_ssh: None,
                     mcp_servers: mcp_servers.clone(),
                     harness_endpoint: harness_endpoint.clone(),
+                    agent_preset,
                 })
             },
         )?;
@@ -190,7 +205,18 @@ impl Application {
                         // label in the UI while keeping the qualified value in
                         // `pending_model_restore` for provider-aware restore.
                         ui.session.model = super::config::display_model_from_persisted(&model);
-                        ui.session.mode = mode;
+                        // For dsh sessions the mode slot carries the agent
+                        // preset (not the ACP Plan/Build permission mode), so
+                        // restore the persisted preset over the generic mode.
+                        ui.session.mode = if crate::settings::is_deepseek_harness_command(&agent_command) {
+                            store
+                                .get_session_agent_preset(session_id)
+                                .ok()
+                                .flatten()
+                                .or(mode)
+                        } else {
+                            mode
+                        };
                     }
                     ui.messages = messages;
                     ui.tools = tools;
@@ -471,6 +497,7 @@ impl Application {
                     remote_ssh: Some(remote_ssh.clone()),
                     mcp_servers: Vec::new(),
                     harness_endpoint: None,
+                    agent_preset: None,
                 })
             },
         )?;

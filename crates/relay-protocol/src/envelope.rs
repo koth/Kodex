@@ -67,6 +67,15 @@ pub struct EncryptedEnvelope {
     pub to_device_id: String,
     pub nonce: Vec<u8>,
     pub ciphertext: Vec<u8>,
+    /// Present when this frame is one fragment of a larger encrypted payload.
+    /// All fragments share the same `chunk_id`; receivers reassemble them by
+    /// `chunk_index` before decrypting the concatenated ciphertext.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chunk_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chunk_index: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chunk_total: Option<u32>,
 }
 
 impl Envelope {
@@ -221,6 +230,9 @@ mod tests {
             to_device_id: "dev-1".to_string(),
             nonce: vec![1, 2, 3],
             ciphertext: vec![4, 5, 6],
+            chunk_id: None,
+            chunk_index: None,
+            chunk_total: None,
         };
         let json = serde_json::to_value(&enc).unwrap();
         let obj = json.as_object().unwrap();

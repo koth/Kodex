@@ -13,7 +13,7 @@ use uuid::Uuid;
 use workspace_model::{
     AgentPlanEntry, AgentPlanEntryPriority, AgentPlanEntryStatus, DiffHunk, DiffLine, DiffLineKind,
     MessageRole, PermissionInputOption, PermissionInputQuestion, PermissionInputRequest,
-    PermissionOption, TerminalOutput, UsageEvent,
+    PermissionOption, TerminalOutput, UsageEvent, UsageEventScope, UsageTokenBreakdown,
 };
 
 use crate::frame::{
@@ -97,6 +97,10 @@ pub fn map_mux_frame(frame: &MuxFrame, sink: &SessionSink) -> MappedEvents {
                 .map(|q| q.id.clone())
                 .unwrap_or_else(|| Uuid::new_v4().to_string());
             sink.record_pending_question(request_id.clone());
+            sink.record_question_order(
+                request_id.clone(),
+                questions.iter().map(|q| q.id.clone()).collect(),
+            );
             let input = PermissionInputRequest {
                 questions: questions
                     .iter()
@@ -145,6 +149,28 @@ pub fn map_mux_frame(frame: &MuxFrame, sink: &SessionSink) -> MappedEvents {
                         title: title.to_string(),
                     });
                 }
+                return MappedEvents::default();
+            }
+            // dsh token-meter projections (see @deepseek-ai/dsh-token-meter):
+            //   contextPressure — { pressureTokens?, projectedTokens?, contextWindow? }
+            //     the harness's real context occupancy; `projectedTokens` already
+            //     reacts to compaction immediately, so feeding it here makes the
+            //     UI context bar track the harness instead of the cumulative-token
+            //     estimate in the reducer.
+            //   tokenUsage — { uncachedInputTokens, outputTokens, cacheReadTokens,
+            //     cacheWriteTokens } — durable cumulative provider usage for the
+            //     whole session, replacing the per-turn-delta estimate.
+            if key == "contextPressure" {
+                if let Some(event) = context_pressure_usage_event(&value) {
+                    return MappedEvents::single(event);
+                }
+                return MappedEvents::default();
+            }
+            if key == "tokenUsage" {
+                if let Some(event) = token_usage_projection_event(&value) {
+                    return MappedEvents::single(event);
+                }
+                return MappedEvents::default();
             }
             MappedEvents::default()
         }
@@ -205,26 +231,33 @@ pub fn map_session_event(
                     content: text,
                 }],
                 Some(StreamChunk::ReasoningDelta { text, .. }) => {
-                    // ThinkingActivity is a boolean flag in the current DTO;
-                    // reasoning text has no dedicated field, so we mark activity
-                    // active. A future DTO change can carry the text.
-                    let _ = text;
-                    vec![ClientEvent::ThinkingActivity { active: true }]
+                    vec![
+                        ClientEvent::ThinkingActivity { active: true },
+                        ClientEvent::ThinkingChunk { text },
+                    ]
                 }
                 Some(StreamChunk::Usage { usage }) => vec![usage_event(&usage)],
                 _ => Vec::new(),
             }
         }
         "assistant/message" => {
+            // Live path: the assistant text was already streamed via
+            // `assistant/chunk` text-deltas, so re-emitting the finalized
+            // message's text blocks would duplicate every paragraph — consume
+            // only the usage rollup. History-replay path: no chunks were
+            // streamed this run, so emit the text blocks here (exactly once
+            // per message; replays skip already-delivered seqs).
             let data: Option<AssistantMessageData> = event.data();
             let mut out = Vec::new();
             if let Some(data) = data {
-                for block in &data.message.content {
-                    if let ContentBlock::Text { text } = block {
-                        out.push(ClientEvent::MessageChunk {
-                            role: MessageRole::Assistant,
-                            content: text.clone(),
-                        });
+                if _sink.is_replaying() {
+                    for block in &data.message.content {
+                        if let ContentBlock::Text { text } = block {
+                            out.push(ClientEvent::MessageChunk {
+                                role: MessageRole::Assistant,
+                                content: text.clone(),
+                            });
+                        }
                     }
                 }
                 if let Some(usage) = &data.usage {
@@ -239,13 +272,26 @@ pub fn map_session_event(
                 Some(d) => (d.name, d.call_id, d.arguments.clone()),
                 None => (String::new(), String::new(), String::new()),
             };
+            let raw_input_value = serde_json::from_str::<Value>(&raw_input).ok();
             let (kind, summary) = match view {
                 Some(ToolEventView::Call { view }) => {
                     let kind = match view {
                         ToolCallView::Terminal(_) => "execute".to_string(),
                         ToolCallView::Diff(_) => "edit".to_string(),
-                        ToolCallView::Generic(g) => g.kind.clone().unwrap_or_default(),
-                        ToolCallView::Other => String::new(),
+                        // dsh renders file tools (view / str_replace / search...)
+                        // with the generic card, which carries no `kind`. Infer
+                        // the semantic kind from the tool name so the UI routes
+                        // them to the read/edit surfaces instead of Shell.
+                        ToolCallView::Generic(g) => g
+                            .kind
+                            .clone()
+                            .unwrap_or_else(|| infer_tool_kind(&name, raw_input_value.as_ref())),
+                        // Unknown cards (e.g. a `read` call card added by a
+                        // newer dsh) still need kind inference so the UI does
+                        // not fall back to the shell surface.
+                        ToolCallView::Other => {
+                            infer_tool_kind(&name, raw_input_value.as_ref())
+                        }
                     };
                     let summary = view
                         .title()
@@ -253,9 +299,11 @@ pub fn map_session_event(
                         .unwrap_or_else(|| name.clone());
                     (kind, summary)
                 }
-                _ => (String::new(), name.clone()),
+                _ => (
+                    infer_tool_kind(&name, raw_input_value.as_ref()),
+                    name.clone(),
+                ),
             };
-            let raw_input_value = serde_json::from_str::<Value>(&raw_input).ok();
             vec![ClientEvent::ToolStarted {
                 id: call_id,
                 parent_id: None,
@@ -367,11 +415,50 @@ pub fn map_session_event(
             // frame to keep the dropdown populated.
             Vec::new()
         }
+        // dsh compaction lifecycle (see @deepseek-ai/dsh-compaction/types):
+        // `compaction/start` and `compaction/end` are log-only session events
+        // that bracket a context compaction. Map them to the same
+        // `ContextCompactionStarted`/`ContextCompacted` notices CodeBuddy uses
+        // so the UI shows "正在压缩上下文" → "上下文已压缩". The occupancy drop
+        // itself arrives separately via the `contextPressure` projection, whose
+        // `projectedTokens` reacts to compaction immediately.
+        "compaction/start" => {
+            let data: Option<CompactionStartData> = event.data();
+            let compaction_id = data.and_then(|d| d.compaction_id);
+            vec![ClientEvent::ContextCompactionStarted {
+                message: compaction_id
+                    .map(|id| format!("正在压缩上下文（{id}）"))
+                    .unwrap_or_else(|| "正在压缩上下文".to_string()),
+            }]
+        }
+        "compaction/end" => {
+            let data: Option<CompactionEndData> = event.data();
+            let message = match data.and_then(|d| d.error) {
+                Some(error) if !error.trim().is_empty() => {
+                    format!("上下文压缩未完成：{error}")
+                }
+                _ => "上下文已压缩".to_string(),
+            };
+            vec![ClientEvent::ContextCompacted { message }]
+        }
         // turn/start, step/start, step/end, user/message, request/context,
-        // session/end-seed: log-only or surface metadata not represented in
-        // ClientEvent in v1. Ignorable per dsh's merge-extensibility guard.
+        // session/end-seed, compaction/summary, compaction/prune: log-only or
+        // surface metadata not represented in ClientEvent in v1. Ignorable per
+        // dsh's merge-extensibility guard.
         _ => Vec::new(),
     }
+}
+
+#[derive(serde::Deserialize)]
+struct CompactionStartData {
+    #[serde(default, rename = "compactionId")]
+    compaction_id: Option<String>,
+}
+
+#[derive(serde::Deserialize)]
+struct CompactionEndData {
+    #[serde(default)]
+    error: Option<String>,
 }
 
 #[derive(serde::Deserialize)]
@@ -497,6 +584,49 @@ fn todo_to_plan_entry(todo: TodoItem) -> AgentPlanEntry {
     }
 }
 
+/// Infer the semantic tool kind (`read` / `edit` / `execute` / `search`) from
+/// the dsh tool name when the generic call view carries no explicit `kind`.
+/// The workbench routes on `kind`: `read`/`search` render as exploration
+/// cards, `edit` renders the diff/变更 surface, `execute` renders the shell
+/// surface. Unknown tools stay empty so they keep the generic presentation.
+fn infer_tool_kind(name: &str, raw_input: Option<&Value>) -> String {
+    let lower = name.trim().to_lowercase();
+    let normalized = lower.replace(['_', '-'], " ");
+    let matches_any = |needles: &[&str]| {
+        needles.iter().any(|needle| {
+            normalized == *needle
+                || normalized.starts_with(&format!("{needle} "))
+                || normalized.ends_with(&format!(" {needle}"))
+                || normalized.contains(&format!(" {needle} "))
+        })
+    };
+
+    // Edit tools: replace/patch/write-shaped names, or any tool whose input
+    // carries an old/new text pair (str_replace-style arguments).
+    if matches_any(&["edit", "str replace", "replace", "patch", "apply patch", "write", "create"])
+    {
+        return "edit".to_string();
+    }
+    if let Some(input) = raw_input {
+        let has_old = input.get("old_string").is_some() || input.get("oldString").is_some();
+        let has_new = input.get("new_string").is_some() || input.get("newString").is_some();
+        if has_old && has_new {
+            return "edit".to_string();
+        }
+    }
+
+    if matches_any(&["view", "read", "open", "cat", "get file"]) {
+        return "read".to_string();
+    }
+    if matches_any(&["search", "grep", "glob", "find", "list", "ls", "query"]) {
+        return "search".to_string();
+    }
+    if matches_any(&["bash", "shell", "exec", "run", "terminal", "command", "cmd"]) {
+        return "execute".to_string();
+    }
+    String::new()
+}
+
 fn render_result(
     data: &ToolResultData,
     view: &ToolResultView,
@@ -519,7 +649,14 @@ fn render_result(
             // carries the model-facing result text as raw_output.
             ("completed".to_string(), None, result_text(data))
         }
-        ToolResultView::Search(v) | ToolResultView::Read(v) | ToolResultView::Web(v) => {
+        ToolResultView::Read(v) => {
+            // Read cards carry `{ path, lines: [{ number, text }] }` — render
+            // them as numbered file content so the exploration card shows the
+            // actual file instead of raw JSON.
+            let rendered = render_read_view(v);
+            (result_outcome(data), None, rendered.or_else(|| result_text(data)))
+        }
+        ToolResultView::Search(v) | ToolResultView::Web(v) => {
             // Unrepresentable structured views → raw_output JSON (recoverable).
             (
                 result_outcome(data),
@@ -558,6 +695,30 @@ fn result_text(data: &ToolResultData) -> Option<String> {
     }
 }
 
+/// Render a `read` result view (`{ path, lines: [{ number, text }] }`) as
+/// numbered file content. Returns None when the shape is not recognized.
+fn render_read_view(view: &Value) -> Option<String> {
+    let path = view.get("path").and_then(Value::as_str);
+    let lines = view.get("lines").and_then(Value::as_array)?;
+    let mut out = String::new();
+    if let Some(path) = path {
+        out.push_str(path);
+        out.push('\n');
+    }
+    let width = lines
+        .last()
+        .and_then(|line| line.get("number"))
+        .and_then(Value::as_u64)
+        .map(|n| n.to_string().len())
+        .unwrap_or(1);
+    for line in lines {
+        let number = line.get("number").and_then(Value::as_u64).unwrap_or(0);
+        let text = line.get("text").and_then(Value::as_str).unwrap_or_default();
+        out.push_str(&format!("{number:>width$} | {text}\n", width = width));
+    }
+    if out.is_empty() { None } else { Some(out) }
+}
+
 fn usage_event(usage: &TokenUsage) -> ClientEvent {
     ClientEvent::UsageUpdated {
         usage: UsageEvent {
@@ -576,6 +737,73 @@ fn usage_event(usage: &TokenUsage) -> ClientEvent {
             ..Default::default()
         },
     }
+}
+
+/// `session/projection` `contextPressure` value — the harness's real context
+/// occupancy. `projectedTokens` already prices in surface movement (and reacts
+/// to compaction immediately), so prefer it over the bare `pressureTokens`
+/// sample. Returns None when the projection carries no usable figure yet.
+#[derive(serde::Deserialize)]
+struct ContextPressureProjection {
+    #[serde(default, rename = "pressureTokens")]
+    pressure_tokens: Option<u64>,
+    #[serde(default, rename = "projectedTokens")]
+    projected_tokens: Option<u64>,
+    #[serde(default, rename = "contextWindow")]
+    context_window: Option<u64>,
+}
+
+fn context_pressure_usage_event(value: &Value) -> Option<ClientEvent> {
+    let pressure: ContextPressureProjection = serde_json::from_value(value.clone()).ok()?;
+    let used_tokens = pressure.projected_tokens.or(pressure.pressure_tokens);
+    // Only emit when at least one figure advanced; otherwise we'd overwrite a
+    // known occupancy with empty values on a no-op projection tick.
+    if used_tokens.is_none() && pressure.context_window.is_none() {
+        return None;
+    }
+    Some(ClientEvent::UsageUpdated {
+        usage: UsageEvent {
+            scope: UsageEventScope::ContextSnapshot,
+            context: workspace_model::UsageContextSnapshot {
+                used_tokens,
+                window_tokens: pressure.context_window,
+                ..Default::default()
+            },
+            ..Default::default()
+        },
+    })
+}
+
+/// `session/projection` `tokenUsage` value — durable cumulative provider usage
+/// for the whole session. Emitted as `SessionTotal` so the reducer replaces the
+/// per-turn-delta estimate with the harness's authoritative cumulative.
+#[derive(serde::Deserialize)]
+struct TokenUsageProjection {
+    #[serde(default, rename = "uncachedInputTokens")]
+    uncached_input_tokens: u64,
+    #[serde(default, rename = "outputTokens")]
+    output_tokens: u64,
+    #[serde(default, rename = "cacheReadTokens")]
+    cache_read_tokens: u64,
+    #[serde(default, rename = "cacheWriteTokens")]
+    cache_write_tokens: u64,
+}
+
+fn token_usage_projection_event(value: &Value) -> Option<ClientEvent> {
+    let usage: TokenUsageProjection = serde_json::from_value(value.clone()).ok()?;
+    Some(ClientEvent::UsageUpdated {
+        usage: UsageEvent {
+            scope: UsageEventScope::SessionTotal,
+            tokens: UsageTokenBreakdown {
+                input_tokens: Some(usage.uncached_input_tokens),
+                output_tokens: Some(usage.output_tokens),
+                cache_read_tokens: Some(usage.cache_read_tokens),
+                cache_write_tokens: Some(usage.cache_write_tokens),
+                ..Default::default()
+            },
+            ..Default::default()
+        },
+    })
 }
 
 /// Reconstruct a diff hunk list from a `FileDiff` (for `ToolDiffPreview`).
@@ -672,8 +900,76 @@ mod tests {
         let mapped = map_mux_frame(&frame, &sink);
         assert_eq!(
             mapped.events,
-            vec![ClientEvent::ThinkingActivity { active: true }]
+            vec![
+                ClientEvent::ThinkingActivity { active: true },
+                ClientEvent::ThinkingChunk {
+                    text: "think...".to_string(),
+                },
+            ]
         );
+    }
+
+    #[test]
+    fn live_assistant_message_emits_no_text() {
+        // Live stream: text already arrived via assistant/chunk text-deltas;
+        // the finalized assistant/message must not re-emit it (only usage).
+        let (sink, _rx) = test_sink();
+        let frame = mux(session_event(
+            "assistant/message",
+            3,
+            serde_json::json!({
+                "turn": 1, "step": 1,
+                "message": {
+                    "role": "assistant",
+                    "content": [{ "type": "text", "text": "already streamed" }]
+                },
+                "usage": { "inputTokens": 10, "outputTokens": 5 }
+            }),
+        ));
+        let mapped = map_mux_frame(&frame, &sink);
+        assert!(
+            mapped
+                .events
+                .iter()
+                .all(|e| !matches!(e, ClientEvent::MessageChunk { .. })),
+            "live assistant/message must not emit text: {:?}",
+            mapped.events
+        );
+        assert!(
+            mapped
+                .events
+                .iter()
+                .any(|e| matches!(e, ClientEvent::UsageUpdated { .. })),
+            "usage rollup must still be emitted"
+        );
+    }
+
+    #[test]
+    fn replay_assistant_message_emits_text() {
+        // History replay (resume / re-baseline): no live chunks exist, so the
+        // finalized assistant/message is the only text source and must emit.
+        let (sink, _rx) = test_sink();
+        sink.set_replaying(true);
+        let frame = mux(session_event(
+            "assistant/message",
+            4,
+            serde_json::json!({
+                "turn": 1, "step": 1,
+                "message": {
+                    "role": "assistant",
+                    "content": [{ "type": "text", "text": "from history" }]
+                }
+            }),
+        ));
+        let mapped = map_mux_frame(&frame, &sink);
+        assert_eq!(
+            mapped.events,
+            vec![ClientEvent::MessageChunk {
+                role: MessageRole::Assistant,
+                content: "from history".to_string(),
+            }]
+        );
+        sink.set_replaying(false);
     }
 
     #[test]
@@ -697,6 +993,73 @@ mod tests {
                 id, name, kind, summary, raw_input, ..
             } if id == "call-1" && name == "bash" && kind == "execute" && summary == "ls"
                 && raw_input.as_deref() == Some("{\"command\":\"ls\"}")
+        ));
+    }
+
+    #[test]
+    fn generic_card_view_tool_is_classified_as_read() {
+        // dsh renders `view` (file read) with the generic card, which carries
+        // no `kind`. Without inference the UI routes it to the Shell surface.
+        let (sink, _rx) = test_sink();
+        let frame = mux(serde_json::json!({
+            "type": "session/event",
+            "sessionId": "s-1",
+            "event": {
+                "type": "tool/call",
+                "seq": 3,
+                "time": 0.0,
+                "data": { "turn": 1, "step": 1, "callId": "call-v", "name": "view", "arguments": "{\"path\":\"/a/b.rs\"}" }
+            },
+            "view": { "for": "call", "view": { "card": "generic", "title": "view /a/b.rs" } }
+        }));
+        let mapped = map_mux_frame(&frame, &sink);
+        assert!(matches!(
+            &mapped.events[0],
+            ClientEvent::ToolStarted { id, kind, summary, .. }
+                if id == "call-v" && kind == "read" && summary == "view /a/b.rs"
+        ));
+    }
+
+    #[test]
+    fn generic_card_str_replace_tool_is_classified_as_edit() {
+        // `str_replace` edits must land on the edit/diff surface so the
+        // changes panel picks up the verified file change.
+        let (sink, _rx) = test_sink();
+        let frame = mux(serde_json::json!({
+            "type": "session/event",
+            "sessionId": "s-1",
+            "event": {
+                "type": "tool/call",
+                "seq": 3,
+                "time": 0.0,
+                "data": { "turn": 1, "step": 1, "callId": "call-e", "name": "str_replace", "arguments": "{\"path\":\"/a/b.rs\",\"old_string\":\"x\",\"new_string\":\"y\"}" }
+            },
+            "view": { "for": "call", "view": { "card": "generic", "title": "str_replace /a/b.rs" } }
+        }));
+        let mapped = map_mux_frame(&frame, &sink);
+        assert!(matches!(
+            &mapped.events[0],
+            ClientEvent::ToolStarted { id, kind, .. } if id == "call-e" && kind == "edit"
+        ));
+    }
+
+    #[test]
+    fn missing_view_still_infers_kind_from_tool_name() {
+        let (sink, _rx) = test_sink();
+        let frame = mux(serde_json::json!({
+            "type": "session/event",
+            "sessionId": "s-1",
+            "event": {
+                "type": "tool/call",
+                "seq": 3,
+                "time": 0.0,
+                "data": { "turn": 1, "step": 1, "callId": "call-r", "name": "read_file", "arguments": "{\"path\":\"/a/b.rs\"}" }
+            }
+        }));
+        let mapped = map_mux_frame(&frame, &sink);
+        assert!(matches!(
+            &mapped.events[0],
+            ClientEvent::ToolStarted { id, kind, .. } if id == "call-r" && kind == "read"
         ));
     }
 
@@ -941,6 +1304,158 @@ mod tests {
     }
 
     #[test]
+    fn maps_context_pressure_projection_to_context_snapshot() {
+        // The harness's real context occupancy rides the `contextPressure`
+        // projection. `projectedTokens` (not the bare pressure sample) is the
+        // numerator, and `contextWindow` the denominator — feeding both lets
+        // the UI bar track the harness instead of the cumulative estimate.
+        let (sink, _rx) = test_sink();
+        let frame = mux(serde_json::json!({
+            "type": "session/projection",
+            "sessionId": "s-1",
+            "key": "contextPressure",
+            "value": {
+                "pressureTokens": 12000,
+                "projectedTokens": 12500,
+                "contextWindow": 1000000
+            },
+            "seq": 9
+        }));
+        let mapped = map_mux_frame(&frame, &sink);
+        assert_eq!(mapped.events.len(), 1);
+        match &mapped.events[0] {
+            ClientEvent::UsageUpdated { usage } => {
+                assert_eq!(usage.scope, UsageEventScope::ContextSnapshot);
+                assert_eq!(usage.context.used_tokens, Some(12_500));
+                assert_eq!(usage.context.window_tokens, Some(1_000_000));
+            }
+            other => panic!("expected UsageUpdated, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn maps_context_pressure_projection_prefers_projected_tokens() {
+        // When only the bare pressure sample is present (no projection yet),
+        // fall back to it so the bar still renders.
+        let (sink, _rx) = test_sink();
+        let frame = mux(serde_json::json!({
+            "type": "session/projection",
+            "sessionId": "s-1",
+            "key": "contextPressure",
+            "value": { "pressureTokens": 8000, "contextWindow": 200000 },
+            "seq": 10
+        }));
+        let mapped = map_mux_frame(&frame, &sink);
+        match &mapped.events[0] {
+            ClientEvent::UsageUpdated { usage } => {
+                assert_eq!(usage.context.used_tokens, Some(8_000));
+                assert_eq!(usage.context.window_tokens, Some(200_000));
+            }
+            other => panic!("expected UsageUpdated, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn maps_context_pressure_projection_empty_is_noop() {
+        // A projection tick with no figures must not wipe a known occupancy.
+        let (sink, _rx) = test_sink();
+        let frame = mux(serde_json::json!({
+            "type": "session/projection",
+            "sessionId": "s-1",
+            "key": "contextPressure",
+            "value": {},
+            "seq": 11
+        }));
+        let mapped = map_mux_frame(&frame, &sink);
+        assert!(mapped.events.is_empty(), "empty projection must not emit");
+    }
+
+    #[test]
+    fn maps_token_usage_projection_to_session_total() {
+        // The durable cumulative `tokenUsage` projection replaces the
+        // per-turn-delta estimate with the harness's authoritative total.
+        let (sink, _rx) = test_sink();
+        let frame = mux(serde_json::json!({
+            "type": "session/projection",
+            "sessionId": "s-1",
+            "key": "tokenUsage",
+            "value": {
+                "uncachedInputTokens": 1000,
+                "outputTokens": 500,
+                "cacheReadTokens": 200,
+                "cacheWriteTokens": 50
+            },
+            "seq": 12
+        }));
+        let mapped = map_mux_frame(&frame, &sink);
+        assert_eq!(mapped.events.len(), 1);
+        match &mapped.events[0] {
+            ClientEvent::UsageUpdated { usage } => {
+                assert_eq!(usage.scope, UsageEventScope::SessionTotal);
+                assert_eq!(usage.tokens.input_tokens, Some(1_000));
+                assert_eq!(usage.tokens.output_tokens, Some(500));
+                assert_eq!(usage.tokens.cache_read_tokens, Some(200));
+                assert_eq!(usage.tokens.cache_write_tokens, Some(50));
+            }
+            other => panic!("expected UsageUpdated, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn maps_compaction_start_to_context_compaction_started() {
+        let (sink, _rx) = test_sink();
+        let frame = mux(session_event(
+            "compaction/start",
+            20,
+            serde_json::json!({ "compactionId": "cmp-1", "turn": null }),
+        ));
+        let mapped = map_mux_frame(&frame, &sink);
+        assert_eq!(mapped.events.len(), 1);
+        match &mapped.events[0] {
+            ClientEvent::ContextCompactionStarted { message } => {
+                assert!(message.contains("正在压缩上下文"), "message={message}");
+                assert!(message.contains("cmp-1"), "message should name compaction id: {message}");
+            }
+            other => panic!("expected ContextCompactionStarted, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn maps_compaction_end_to_context_compacted() {
+        let (sink, _rx) = test_sink();
+        let frame = mux(session_event(
+            "compaction/end",
+            21,
+            serde_json::json!({ "compactionId": "cmp-1", "turn": null }),
+        ));
+        let mapped = map_mux_frame(&frame, &sink);
+        match &mapped.events[0] {
+            ClientEvent::ContextCompacted { message } => {
+                assert_eq!(message, "上下文已压缩");
+            }
+            other => panic!("expected ContextCompacted, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn maps_compaction_end_with_error_surfaces_it() {
+        let (sink, _rx) = test_sink();
+        let frame = mux(session_event(
+            "compaction/end",
+            22,
+            serde_json::json!({ "compactionId": "cmp-1", "turn": null, "error": "summarize failed" }),
+        ));
+        let mapped = map_mux_frame(&frame, &sink);
+        match &mapped.events[0] {
+            ClientEvent::ContextCompacted { message } => {
+                assert!(message.contains("未完成"), "message={message}");
+                assert!(message.contains("summarize failed"), "message={message}");
+            }
+            other => panic!("expected ContextCompacted, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn maps_host_agent_error_to_interrupted() {
         let frame: HostFrame = serde_json::from_value(serde_json::json!({
             "type": "host/agent-error",
@@ -995,7 +1510,7 @@ mod tests {
     }
 
     #[test]
-    fn unrepresentable_view_serializes_to_raw_output_json() {
+    fn read_result_view_renders_numbered_file_content() {
         let (sink, _rx) = test_sink();
         let frame = mux(serde_json::json!({
             "type": "session/event",
@@ -1015,9 +1530,40 @@ mod tests {
             "view": { "for": "result", "view": { "card": "read", "path": "a.rs", "lines": [{ "number": 1, "text": "fn main() {}" }] } }
         }));
         let mapped = map_mux_frame(&frame, &sink);
+        match &mapped.events[0] {
+            ClientEvent::ToolCompleted { raw_output: Some(raw), .. } => {
+                assert!(raw.contains("a.rs"), "path header missing: {raw}");
+                assert!(raw.contains("1 | fn main() {}"), "numbered line missing: {raw}");
+                assert!(!raw.contains("\"lines\""), "must not be raw JSON: {raw}");
+            }
+            other => panic!("expected ToolCompleted with raw_output, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn unrepresentable_view_serializes_to_raw_output_json() {
+        let (sink, _rx) = test_sink();
+        let frame = mux(serde_json::json!({
+            "type": "session/event",
+            "sessionId": "s-1",
+            "event": {
+                "type": "tool/result",
+                "seq": 11,
+                "time": 0.0,
+                "data": {
+                    "turn": 1, "step": 1,
+                    "message": {
+                        "role": "user",
+                        "content": [{ "type": "tool-result", "toolCallId": "call-11", "content": [] }]
+                    }
+                }
+            },
+            "view": { "for": "result", "view": { "card": "search", "query": "foo", "hits": [] } }
+        }));
+        let mapped = map_mux_frame(&frame, &sink);
         assert!(matches!(
             &mapped.events[0],
-            ClientEvent::ToolCompleted { raw_output: Some(raw), .. } if raw.contains("a.rs") && raw.contains("fn main")
+            ClientEvent::ToolCompleted { raw_output: Some(raw), .. } if raw.contains("foo")
         ));
     }
 
@@ -1026,6 +1572,7 @@ mod tests {
         // 8.3: a fixture history page (assistant text + tool call + turn end)
         // reconstructs the expected ClientEvent sequence.
         let (sink, _rx) = test_sink();
+        sink.set_replaying(true);
         let history = serde_json::json!([
             session_event(
                 "assistant/message",

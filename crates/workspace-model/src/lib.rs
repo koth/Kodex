@@ -1345,6 +1345,10 @@ pub struct UiSnapshot {
     #[serde(default)]
     pub thinking_status: Option<ThinkingStatus>,
     #[serde(default)]
+    /// Accumulated reasoning/thinking text for the current live turn.
+    /// Transient: never persisted and never reconstructed on session resume.
+    pub thinking_text: String,
+    #[serde(default)]
     pub usage: SessionUsageSnapshot,
     /// Steers queued while a turn was running but not yet moved into the
     /// timeline. Rendered as a pending area above the composer by the
@@ -1400,6 +1404,10 @@ pub struct UiSnapshotPatch {
     pub turn_changes: Vec<TurnFileChanges>,
     #[serde(default)]
     pub thinking_status: Option<ThinkingStatus>,
+    #[serde(default)]
+    /// Accumulated reasoning/thinking text for the current live turn.
+    /// Transient: never persisted and never reconstructed on session resume.
+    pub thinking_text: String,
     #[serde(default)]
     pub usage: SessionUsageSnapshot,
     /// Replacement list of queued steers. Because steers are removed from
@@ -1848,6 +1856,11 @@ pub struct AppSettings {
     pub web_tools: WebToolsSettings,
     #[serde(default)]
     pub image: ImageSettings,
+    /// DeepSeek Harness default agent preset (mode) for NEW dsh sessions.
+    /// Written into the dsh `settings.yaml` `agent-presets.default` on bring-up.
+    /// `None` = dsh deployment default.
+    #[serde(default)]
+    pub dsh_default_preset: Option<String>,
 }
 
 fn default_acp_port() -> u16 {
@@ -1912,6 +1925,16 @@ pub struct AgentCliStatus {
     pub installed: bool,
     pub detected_path: Option<PathBuf>,
     pub selected: bool,
+    /// Currently installed CLI version (from `<binary> --version`), when it
+    /// could be determined. `None` when the binary is missing or does not
+    /// report a parseable version.
+    #[serde(default)]
+    pub current_version: Option<String>,
+    /// Latest published version, when the backend can determine it cheaply
+    /// (npm registry for npm-installed agents). `None` leaves the UI without
+    /// an upgrade hint.
+    #[serde(default)]
+    pub latest_version: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -1924,6 +1947,26 @@ pub struct AgentSettingsSnapshot {
     pub web_tools: WebToolsSettingsStatus,
     #[serde(default)]
     pub image: ImageSettingsStatus,
+}
+
+/// Result of an explicit DeepSeek Harness update check.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DshVersionInfo {
+    /// Installed `dsh` version (None when missing or unparseable).
+    pub current_version: Option<String>,
+    /// Latest published version from npm (None when the check failed).
+    pub latest_version: Option<String>,
+    /// True when both versions are known and differ.
+    pub update_available: bool,
+}
+
+/// One DeepSeek Harness agent preset (mode) choice for the settings picker.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DshPresetOption {
+    pub id: String,
+    pub label: String,
+    #[serde(default)]
+    pub description: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

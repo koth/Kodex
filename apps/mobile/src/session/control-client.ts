@@ -25,7 +25,12 @@ export class ControlClient {
 
   constructor(
     private readonly conn: RelayConnection,
-    private readonly requestTimeoutMs: number = 10_000,
+    // Session switching can be slow when the PC has to load a cold session
+    // (SQLite history, ACP/dsh runtime startup, remote bootstrap). 10s was
+    // too short and the phone would give up with "control request timeout"
+    // while the desktop was still working. Keep the same 60s convention as
+    // the desktop SDK so slow-but-legitimate operations have time to finish.
+    private readonly requestTimeoutMs: number = 60_000,
   ) {}
 
   /** Send a control request and await its matching response. */

@@ -1503,6 +1503,8 @@ pub(super) fn is_file_write_tool_identity(kind: &str, name: &str) -> bool {
         matches!(
             token.as_str(),
             "edit"
+                | "str_replace"
+                | "replace"
                 | "write"
                 | "patch"
                 | "multiedit"

@@ -460,6 +460,7 @@ fn remote_agent_statuses(
 ) -> Vec<AgentCliStatus> {
     AGENTS
         .iter()
+        .filter(|definition| definition.id != AgentCliId::Codebuddy)
         .map(|definition| {
             let detected_path = export
                 .agents
@@ -474,6 +475,8 @@ fn remote_agent_statuses(
                 installed: detected_path.is_some(),
                 detected_path,
                 selected: definition.id == selected_agent,
+                current_version: None,
+                latest_version: None,
             }
         })
         .collect()

@@ -10,7 +10,13 @@ type SessionListItem = WorkspaceSessionList["sessions"][number];
 // Lists sessions from `ListSessions` grouped by workspace. "New session"
 // calls `CreateSession` then routes to the conversation. Pull-to-refresh
 // re-issues `ListSessions`.
-export function SessionListScreen({ onOpenSession }: { onOpenSession: (sessionId: string, title: string) => void }) {
+export function SessionListScreen({
+  onOpenSession,
+  onOpenSettings,
+}: {
+  onOpenSession: (sessionId: string, title: string) => void;
+  onOpenSettings: () => void;
+}) {
   const controller = useAppController();
   const connState = useConnectionState();
   const [groups, setGroups] = useState<WorkspaceSessionList[]>([]);
@@ -72,9 +78,17 @@ export function SessionListScreen({ onOpenSession }: { onOpenSession: (sessionId
     <View style={styles.screen}>
       <View style={[styles.rowBetween, { padding: spacing.md }]}>
         <Text style={styles.title}>Sessions</Text>
-        <Pressable style={[styles.button, { paddingVertical: spacing.sm, opacity: connected ? 1 : 0.5 }]} onPress={createNew} disabled={creating || !connected}>
-          {creating || !connected ? <ActivityIndicator color="#fff" /> : <Text style={styles.buttonText}>New</Text>}
-        </Pressable>
+        <View style={styles.row}>
+          <Pressable
+            style={[styles.buttonGhost, { paddingVertical: spacing.sm, paddingHorizontal: spacing.md, marginRight: spacing.sm }]}
+            onPress={onOpenSettings}
+          >
+            <Text style={styles.text}>Settings</Text>
+          </Pressable>
+          <Pressable style={[styles.button, { paddingVertical: spacing.sm, opacity: connected ? 1 : 0.5 }]} onPress={createNew} disabled={creating || !connected}>
+            {creating || !connected ? <ActivityIndicator color="#fff" /> : <Text style={styles.buttonText}>New</Text>}
+          </Pressable>
+        </View>
       </View>
       <FlatList
         style={{ flex: 1 }}

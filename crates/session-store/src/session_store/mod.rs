@@ -371,6 +371,21 @@ impl SessionStore {
                 .execute_batch("ALTER TABLE sessions ADD COLUMN archived_at TEXT;")?;
         }
 
+        // Migration: add agent_preset column to sessions so a dsh session's
+        // preset (fixed at creation) survives reconnect / resume and the UI
+        // shows the actual preset instead of falling back to the global
+        // default.
+        let has_agent_preset_col: bool = self
+            .conn
+            .prepare(
+                "SELECT COUNT(*) FROM pragma_table_info('sessions') WHERE name = 'agent_preset'",
+            )?
+            .query_row([], |row| row.get(0))?;
+        if !has_agent_preset_col {
+            self.conn
+                .execute_batch("ALTER TABLE sessions ADD COLUMN agent_preset TEXT;")?;
+        }
+
         // Migration: add is_steer column to messages so the frontend can
         // distinguish steer (追加指令) messages from regular turn-starting
         // User messages and skip the premature turn-boundary fold.
@@ -600,6 +615,26 @@ impl SessionStore {
             params![model, model_provider, mode, now_iso(), id],
         )?;
         Ok(())
+    }
+
+    pub fn update_session_agent_preset(&self, id: &str, preset: Option<&str>) -> Result<()> {
+        self.conn.execute(
+            "UPDATE sessions SET agent_preset = ?1, updated_at = ?2 WHERE id = ?3",
+            params![preset, now_iso(), id],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_session_agent_preset(&self, id: &str) -> Result<Option<String>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT agent_preset FROM sessions WHERE id = ?1")?;
+        let mut rows = stmt.query(params![id])?;
+        if let Some(row) = rows.next()? {
+            Ok(row.get(0)?)
+        } else {
+            Ok(None)
+        }
     }
 
     pub fn get_session_model_mode(&self, id: &str) -> Result<Option<(String, Option<String>)>> {

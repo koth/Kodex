@@ -67,6 +67,7 @@ fn test_app(dir: &tempfile::TempDir) -> Application {
         dir.path(),
         mock_agent_command(),
         crate::paths::AppPaths::from_root(dir.path().join("home").join(".kodex")),
+        None,
     )
     .unwrap()
 }
@@ -184,7 +185,7 @@ fn usage_updates_persist_restore_and_delete_with_session() {
     assert_eq!(stored.context.used_tokens, Some(120));
     assert_eq!(stored.session_total.total_tokens, Some(120));
 
-    app.session_create(None).unwrap();
+    app.session_create(None, None).unwrap();
     assert_ne!(app.ui.session.id.to_string(), session_id);
     app.session_switch(&session_id).unwrap();
     assert_eq!(app.ui.usage.context.used_tokens, Some(120));
@@ -471,7 +472,7 @@ fn reject_review_file_change_reverts_modified_file_to_baseline() {
 
     let app_paths = crate::paths::AppPaths::from_root(dir.path().join("home").join(".kodex"));
     let mut app =
-        Application::bootstrap_with_app_paths(dir.path(), mock_agent_command(), app_paths).unwrap();
+        Application::bootstrap_with_app_paths(dir.path(), mock_agent_command(), app_paths, None).unwrap();
 
     fs::write(dir.path().join("main.rs"), "one\ntwo\n").unwrap();
     app.refresh_repository();
@@ -515,6 +516,7 @@ fn local_workspace_smoke_preserves_file_git_shell_and_restore_paths() {
             dir.path(),
             mock_agent_command(),
             app_paths.clone(),
+            None,
         )
         .unwrap();
 
@@ -595,7 +597,7 @@ fn local_workspace_smoke_preserves_file_git_shell_and_restore_paths() {
     };
 
     let restored =
-        Application::bootstrap_with_app_paths(dir.path(), mock_agent_command(), app_paths).unwrap();
+        Application::bootstrap_with_app_paths(dir.path(), mock_agent_command(), app_paths, None).unwrap();
     assert!(!restored.is_remote_workspace());
     assert!(matches!(
         restored.ui.workspace.location,
@@ -1215,7 +1217,7 @@ fn live_runtime_reuse_avoids_session_load_when_switching_back() {
     wait_for_control(&mut app, SessionConfigCategory::Model);
     let first_session_id = app.ui.session.id.to_string();
 
-    app.session_create(None).unwrap();
+    app.session_create(None, None).unwrap();
     wait_for_control(&mut app, SessionConfigCategory::Model);
     let second_session_id = app.ui.session.id.to_string();
 
@@ -1255,7 +1257,7 @@ fn session_switch_keeps_history_window_fields_per_session() {
     // A brand-new session must NOT inherit the previous session's window
     // fields; otherwise the UI would render the "load earlier history"
     // affordance on an empty conversation.
-    app.session_create(None).unwrap();
+    app.session_create(None, None).unwrap();
     wait_for_control(&mut app, SessionConfigCategory::Model);
     assert_ne!(app.ui.session.id.to_string(), first_session_id);
     assert_eq!(app.history_total_count, 0);
@@ -1280,7 +1282,7 @@ fn switched_away_in_flight_prompt_completes_under_original_session() {
     let background_session_id = app.ui.session.id.to_string();
 
     app.send_prompt_background("finish while hidden").unwrap();
-    app.session_create(None).unwrap();
+    app.session_create(None, None).unwrap();
     let visible_session_id = app.ui.session.id.to_string();
 
     let running = app
@@ -1329,7 +1331,7 @@ fn session_list_refresh_marks_hidden_completed_prompt_unviewed() {
 
     app.send_prompt_background("finish from session list refresh")
         .unwrap();
-    app.session_create(None).unwrap();
+    app.session_create(None, None).unwrap();
 
     let completed = wait_for_session_attention_from_list_refresh(
         &mut app,
@@ -1351,7 +1353,7 @@ fn background_idle_runtime_retires_and_reopens_with_session_load() {
 
     app.send_prompt_background("retire after completion")
         .unwrap();
-    app.session_create(None).unwrap();
+    app.session_create(None, None).unwrap();
     wait_for_session_attention(
         &mut app,
         &background_session_id,
@@ -1412,7 +1414,7 @@ fn cancel_visible_session_does_not_cancel_background_prompt() {
     let background_session_id = app.ui.session.id.to_string();
 
     app.send_prompt_background("keep running").unwrap();
-    app.session_create(None).unwrap();
+    app.session_create(None, None).unwrap();
     app.cancel_prompt().unwrap();
 
     let background = app
@@ -1482,7 +1484,7 @@ fn background_permission_marks_only_owning_session_as_needing_attention() {
     let mut app = test_app(&dir);
     let background_session_id = app.ui.session.id.to_string();
 
-    app.session_create(None).unwrap();
+    app.session_create(None, None).unwrap();
     let visible_session_id = app.ui.session.id.to_string();
     let mut runtime = app
         .runtime_registry
@@ -1540,7 +1542,7 @@ fn switching_away_from_pending_permission_marks_background_session_attention() {
         input: None,
     });
 
-    app.session_create(None).unwrap();
+    app.session_create(None, None).unwrap();
 
     let background = app
         .session_list()

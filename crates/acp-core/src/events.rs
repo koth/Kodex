@@ -55,6 +55,11 @@ pub struct SessionConfig {
     /// spawning an ACP agent subprocess. Transient — never persisted in ACP logs.
     #[serde(default, skip_serializing, skip_deserializing)]
     pub harness_endpoint: Option<String>,
+    /// DeepSeek Harness agent preset for a NEW session (maps to
+    /// `session.create`'s `agentPreset`). `None` uses the deployment default.
+    /// Transient — comes from the Kodex dsh default-mode setting.
+    #[serde(default, skip_serializing, skip_deserializing)]
+    pub agent_preset: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -190,6 +195,12 @@ pub enum ClientEvent {
     },
     ThinkingActivity {
         active: bool,
+    },
+    /// A streamed reasoning/thinking text delta. Transient: never persisted
+    /// and never reconstructed on session resume — thinking text is a live
+    /// view only, so a restored session shows no past reasoning.
+    ThinkingChunk {
+        text: String,
     },
     UsageUpdated {
         usage: UsageEvent,

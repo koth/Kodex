@@ -4,10 +4,12 @@ mod lsp;
 mod remote;
 
 pub use agent_cli::{
+    DSH_NPM_PACKAGE,
     agent_env_for_command, agent_id_for_label, agent_label_for_command, agent_label_for_id,
     command_for_agent, command_for_agent_label, command_for_agent_label_with_paths,
     command_for_agent_with_paths, default_agent_for_new_work, detect_agent,
-    detect_agent_with_paths, ensure_agent_ready_for_command, is_claude_agent_acp_command,
+    detect_agent_with_paths, dsh_version_info, ensure_agent_ready_for_command,
+    is_claude_agent_acp_command,
     is_codex_acp_command, is_deepseek_harness_agent, is_deepseek_harness_command,
     remote_agent_env_for_command, remote_codex_home, remote_codex_proxy_config,
     remote_linux_command_for_agent, remote_linux_command_for_agent_label,
@@ -738,6 +740,7 @@ fn default_settings() -> AppSettings {
         claude: ClaudeProviderSettings::default(),
         web_tools: WebToolsSettings::default(),
         image: workspace_model::ImageSettings::default(),
+        dsh_default_preset: None,
     }
 }
 
@@ -875,6 +878,7 @@ pub fn select_agent(paths: &AppPaths, agent: AgentCliId) -> Result<AgentSettings
         claude: existing.claude,
         web_tools: existing.web_tools,
         image: existing.image,
+        dsh_default_preset: existing.dsh_default_preset,
     };
     save_app_settings(paths, &settings)?;
     Ok(settings_snapshot(paths))
@@ -883,6 +887,28 @@ pub fn select_agent(paths: &AppPaths, agent: AgentCliId) -> Result<AgentSettings
 pub fn select_theme(paths: &AppPaths, theme: AppTheme) -> Result<AgentSettingsSnapshot> {
     let existing = load_app_settings(paths);
     let settings = AppSettings { theme, ..existing };
+    save_app_settings(paths, &settings)?;
+    Ok(settings_snapshot(paths))
+}
+
+/// The configured DeepSeek Harness default agent preset (mode) for new dsh
+/// sessions. `None` = the dsh deployment default.
+pub fn dsh_default_preset(paths: &AppPaths) -> Option<String> {
+    load_app_settings(paths).dsh_default_preset
+}
+
+/// Set the DeepSeek Harness default agent preset for new sessions. Pass an
+/// empty/None value to restore the dsh deployment default.
+pub fn set_dsh_default_preset(
+    paths: &AppPaths,
+    preset: Option<String>,
+) -> Result<AgentSettingsSnapshot> {
+    let existing = load_app_settings(paths);
+    let preset = preset.filter(|p| !p.trim().is_empty());
+    let settings = AppSettings {
+        dsh_default_preset: preset,
+        ..existing
+    };
     save_app_settings(paths, &settings)?;
     Ok(settings_snapshot(paths))
 }
@@ -1470,6 +1496,7 @@ pub fn build_dsh_settings_config(paths: &AppPaths) -> Result<DshSettingsConfig, 
         providers: routes,
         default_model,
         web_search_api_key_env,
+        default_preset: load_app_settings(paths).dsh_default_preset,
     })
 }
 

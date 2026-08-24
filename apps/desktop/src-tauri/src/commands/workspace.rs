@@ -36,12 +36,13 @@ pub fn workspace_open(
     state: State<'_, AppState>,
     path: String,
     agent: Option<AgentCliId>,
+    preset: Option<String>,
 ) -> Result<UiSnapshot, String> {
     let dir = PathBuf::from(&path);
     if !dir.is_dir() {
         return Err(format!("Not a directory: {path}"));
     }
-    let snapshot = state.open_workspace(dir, agent)?;
+    let snapshot = state.open_workspace(dir, agent, preset)?;
     recent_store()?.add(&path);
     save_open_workspace_state(&state)?;
     Ok(snapshot)
@@ -161,7 +162,7 @@ pub fn workspace_restore_open(state: State<'_, AppState>) -> Result<Option<UiSna
                 snapshot = Some(app_core::startup_perf::measure(
                     "workspace_restore_open/open_active",
                     &active_path,
-                    || state.open_workspace(dir, None),
+                    || state.open_workspace(dir, None, None),
                 )?);
                 opened_active_path = Some(active_path);
             } else {
@@ -187,7 +188,7 @@ pub fn workspace_restore_open(state: State<'_, AppState>) -> Result<Option<UiSna
                 snapshot = Some(app_core::startup_perf::measure(
                     "workspace_restore_open/open_fallback",
                     &workspace.path,
-                    || state.open_workspace(dir, None),
+                    || state.open_workspace(dir, None, None),
                 )?);
                 opened_active_path = Some(workspace.path.clone());
                 break;
