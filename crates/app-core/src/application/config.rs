@@ -33,6 +33,90 @@ fn permission_selection_outcome_for_display(
     }
 }
 
+#[cfg(test)]
+mod harness_question_tests {
+    use super::*;
+    use std::collections::BTreeMap;
+    use workspace_model::{PermissionInputOption, PermissionInputQuestion};
+
+    fn option(label: &str) -> PermissionInputOption {
+        PermissionInputOption {
+            label: label.into(),
+            description: String::new(),
+        }
+    }
+
+    fn question(id: &str, options: Vec<PermissionInputOption>) -> PermissionInputQuestion {
+        PermissionInputQuestion {
+            id: id.into(),
+            header: String::new(),
+            question: String::new(),
+            is_other: false,
+            is_secret: false,
+            multi_select: false,
+            options,
+        }
+    }
+
+    #[test]
+    fn selected_labels_go_to_selected_and_custom_text_to_custom() {
+        let questions = vec![question("q1", vec![option("Yes"), option("No")])];
+        let mut answers = BTreeMap::new();
+        // The composer encodes a single-select custom answer by replacing the
+        // selection with the free text (AgentPlanPanel buildPermissionInputResponse).
+        answers.insert("q1".to_string(), vec!["maybe later".to_string()]);
+
+        let wire = partition_question_answers(&questions, &answers);
+        assert_eq!(wire.len(), 1);
+        assert_eq!(wire[0].question_id, "q1");
+        assert!(wire[0].selected.is_empty(), "non-label must not be selected");
+        assert_eq!(wire[0].custom.as_deref(), Some("maybe later"));
+    }
+
+    #[test]
+    fn optionless_free_text_question_only_carries_custom() {
+        let questions = vec![question("free", vec![])];
+        let mut answers = BTreeMap::new();
+        answers.insert("free".to_string(), vec!["a typed response".to_string()]);
+
+        let wire = partition_question_answers(&questions, &answers);
+        assert!(wire[0].selected.is_empty());
+        assert_eq!(wire[0].custom.as_deref(), Some("a typed response"));
+    }
+
+    #[test]
+    fn multi_select_mixed_label_and_custom_splits_both() {
+        let mut q = question("multi", vec![option("Code"), option("Docs")]);
+        q.multi_select = true;
+        let questions = vec![q];
+        let mut answers = BTreeMap::new();
+        answers.insert(
+            "multi".to_string(),
+            vec!["Code".to_string(), "Release notes".to_string()],
+        );
+
+        let wire = partition_question_answers(&questions, &answers);
+        assert_eq!(wire[0].selected, vec!["Code".to_string()]);
+        assert_eq!(wire[0].custom.as_deref(), Some("Release notes"));
+    }
+
+    #[test]
+    fn answers_follow_question_request_order() {
+        let questions = vec![
+            question("second", vec![option("B")]),
+            question("first", vec![option("A")]),
+        ];
+        let mut answers = BTreeMap::new();
+        // BTreeMap iteration is key-sorted; the request order is not.
+        answers.insert("first".to_string(), vec!["A".to_string()]);
+        answers.insert("second".to_string(), vec!["B".to_string()]);
+
+        let wire = partition_question_answers(&questions, &answers);
+        assert_eq!(wire[0].question_id, "second");
+        assert_eq!(wire[1].question_id, "first");
+    }
+}
+
 impl Application {
     pub(super) fn persist_current_codex_provider_if_needed(&self) {
         if !self.is_codex_acp_session() {
@@ -305,16 +389,27 @@ impl Application {
         if let Some(response) = input_response
             && !response.answers.is_empty()
         {
-            let answers = response
-                .answers
-                .into_iter()
-                .map(|(question_id, selected)| HarnessQuestionAnswer {
-                    question_id,
-                    selected,
-                    custom: None,
-                })
-                .collect();
-            return HarnessApprovalResult::Question { answers };
+            // The composer flattens a custom/free-text answer into the same
+            // `answers[question.id]` string array as selected option labels
+            // (single-select replaces the selection; multi-select appends).
+            // The harness `matchesQuestions` gate, however, requires option
+            // labels in `selected` and free text in `custom` -- a non-label in
+            // `selected` (notably every optionless question) is rejected as
+            // `bad-response`, so the question never resolves and the turn
+            // hangs. Partition each answer against the request's own option
+            // labels, and emit answers in question order (the harness matches
+            // `answers[i].id === questions[i].id` by index).
+            let questions = self
+                .ui
+                .tools
+                .iter()
+                .find(|tool| tool.call_id == request_id)
+                .and_then(|tool| tool.permission_input.as_ref())
+                .map(|input| input.questions.clone())
+                .unwrap_or_default();
+            return HarnessApprovalResult::Question {
+                answers: partition_question_answers(&questions, &response.answers),
+            };
         }
         let outcome = match option_id.unwrap_or("rejected") {
             "allowed-once" => HarnessApprovalOutcome::AllowedOnce,
@@ -1239,6 +1334,45 @@ mod tests {
             vec!["/Users/me/project/src/new_file.rs"]
         );
     }
+}
+
+/// Partition a composer `PermissionInputResponse` into harness wire answers.
+///
+/// The composer collapses selected labels and free text into one string array
+/// per question; the harness `matchesQuestions` gate (api-proxy) requires
+/// option labels in `selected` and free text in `custom`. Values that match a
+/// question's own option label stay in `selected`; the rest join `custom`.
+/// Answers are emitted in the request's question order, since the harness
+/// matches `answers[i].id === questions[i].id` by index.
+fn partition_question_answers(
+    questions: &[workspace_model::PermissionInputQuestion],
+    answers: &std::collections::BTreeMap<String, Vec<String>>,
+) -> Vec<HarnessQuestionAnswer> {
+    questions
+        .iter()
+        .filter_map(|question| {
+            let values = answers.get(&question.id)?;
+            let mut selected = Vec::new();
+            let mut custom_parts = Vec::new();
+            for value in values {
+                if question.options.iter().any(|option| option.label == *value) {
+                    selected.push(value.clone());
+                } else {
+                    custom_parts.push(value.clone());
+                }
+            }
+            let custom = if custom_parts.is_empty() {
+                None
+            } else {
+                Some(custom_parts.join("\n"))
+            };
+            Some(HarnessQuestionAnswer {
+                question_id: question.id.clone(),
+                selected,
+                custom,
+            })
+        })
+        .collect()
 }
 
 #[cfg(test)]

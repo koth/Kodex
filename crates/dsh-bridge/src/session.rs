@@ -12,6 +12,7 @@
 use acp_core::{ClientEvent, PermissionBroker, RuntimeCommand, SessionConfig, ShutdownSignal};
 use std::sync::Arc;
 use std::sync::mpsc;
+use std::time::Instant;
 use uuid::Uuid;
 use workspace_model::UserPromptContent;
 
@@ -50,6 +51,7 @@ pub fn run_harness_session(
     // with the same id+cwd returns the same session. Without the id, dsh
     // mints a fresh blank session and every later prompt lands in it with no
     // prior context.
+    let boot_start = Instant::now();
     let create_payload = SessionCreatePayload {
         cwd: Some(config.workspace_root.clone()),
         session_id: config.resume_session_id.clone().filter(|id| !id.is_empty()),
@@ -59,6 +61,12 @@ pub fn run_harness_session(
         .runtime()
         .block_on(client.session_create(Uuid::new_v4().to_string(), &create_payload))?;
     let session_id: SessionId = create_value.session_id;
+    tracing::info!(
+        target: "dsh-bridge::session",
+        elapsed_ms = boot_start.elapsed().as_millis() as u64,
+        session_id = %session_id,
+        "session.create completed",
+    );
 
     // Register a sink so the host's SSE loops deliver frames for this session.
     let sink = Arc::new(SessionSink::new(
@@ -89,7 +97,14 @@ pub fn run_harness_session(
     // Publish the model selector: fetch `session.models` and translate it into
     // a `SessionConfigUpdated` carrying a Model control so the composer's
     // model dropdown renders instead of spinning.
+    let models_start = Instant::now();
     emit_model_control(&client, &host, &session_id, &tx_events);
+    tracing::info!(
+        target: "dsh-bridge::session",
+        elapsed_ms = models_start.elapsed().as_millis() as u64,
+        session_id = %session_id,
+        "session.models published",
+    );
     // Declare prompt capabilities. The harness `session/prompt` RPC accepts
     // `mode: "steer"` (an in-flight prompt can be steered mid-turn), so kodex
     // advertises `session_steer`. Image and embedded-context stay disabled
@@ -104,6 +119,12 @@ pub fn run_harness_session(
     // Drive the command channel on this thread. Events flow through the sink
     // on the host's runtime; we only handle commands here.
     let mut inflight_prompt: Option<String> = None;
+    tracing::info!(
+        target: "dsh-bridge::session",
+        boot_elapsed_ms = boot_start.elapsed().as_millis() as u64,
+        session_id = %session_id,
+        "command loop ready",
+    );
 
     for command in rx_commands.iter() {
         if shutdown_signal.is_requested() {
@@ -143,11 +164,19 @@ pub fn run_harness_session(
                     client_time_zone: Some(local_timezone()),
                 };
                 let rpc_id = Uuid::new_v4().to_string();
+                let prompt_start = Instant::now();
                 let result = host
                     .runtime()
                     .block_on(client.session_prompt(rpc_id.clone(), &payload));
                 match result {
                     Ok(_) => {
+                        tracing::info!(
+                            target: "dsh-bridge::session",
+                            elapsed_ms = prompt_start.elapsed().as_millis() as u64,
+                            session_id = %session_id,
+                            steer = is_steer,
+                            "session.prompt accepted",
+                        );
                         // A steer does not start a new turn; keep the existing
                         // inflight prompt id so the running turn's completion
                         // still clears it.
@@ -159,6 +188,13 @@ pub fn run_harness_session(
                         }
                     }
                     Err(err) => {
+                        tracing::warn!(
+                            target: "dsh-bridge::session",
+                            elapsed_ms = prompt_start.elapsed().as_millis() as u64,
+                            session_id = %session_id,
+                            error = %err,
+                            "session.prompt failed",
+                        );
                         let _ = tx_events.send(ClientEvent::Interrupted {
                             reason: format!("session.prompt failed: {err}"),
                         });
@@ -185,6 +221,7 @@ pub fn run_harness_session(
                 result,
                 reply_tx,
             } => {
+                let respond_start = Instant::now();
                 let pending = sink.pending_approvals();
                 let response = pending.build_response(&sink, &rpc_id, &result);
                 let send_result = match response {
@@ -201,6 +238,22 @@ pub fn run_harness_session(
                         Err(err)
                     }
                 });
+                match &send_result {
+                    Ok(_) => tracing::info!(
+                        target: "dsh-bridge::session",
+                        elapsed_ms = respond_start.elapsed().as_millis() as u64,
+                        session_id = %session_id,
+                        "respond accepted",
+                    ),
+                    Err(err) => tracing::warn!(
+                        target: "dsh-bridge::session",
+                        elapsed_ms = respond_start.elapsed().as_millis() as u64,
+                        session_id = %session_id,
+                        rpc_id = %rpc_id,
+                        error = %err,
+                        "respond failed",
+                    ),
+                }
                 let _ = reply_tx.send(send_result.map(|_| ()));
             }
             RuntimeCommand::SetModel {

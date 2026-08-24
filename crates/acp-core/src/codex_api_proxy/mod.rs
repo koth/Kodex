@@ -142,6 +142,33 @@ struct ProxyProviderConfig {
 static CODEX_API_PROXY_CONFIG: OnceLock<Arc<RwLock<CodexApiProxyConfig>>> = OnceLock::new();
 static CODEX_API_PROXY_RUNNING: OnceLock<Arc<AtomicBool>> = OnceLock::new();
 static CODEX_API_PROXY_PORT: OnceLock<Arc<RwLock<u16>>> = OnceLock::new();
+/// Process-wide shared upstream HTTP client. Every upstream LLM request
+/// reuses this one client so TCP/TLS connections are pooled across the many
+/// per-turn sub-requests (main completion, token counting, compact, fast
+/// model). A fresh `reqwest::Client::new()` per request rebuilt a connection
+/// every time, paying a full TLS handshake (hundreds of ms to seconds) on
+/// each call and leaving the request with no connect timeout, so a slow or
+/// stuck upstream hung the turn indefinitely. The total request timeout is
+/// left unset on the client: model inference legitimately takes tens of
+/// seconds, and streaming responses stay open for the whole turn. Only the
+/// connection-establishment phase is bounded.
+static CODEX_API_PROXY_UPSTREAM_CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+
+/// The shared upstream `reqwest::Client` used by every upstream LLM request.
+/// Falls back to `reqwest::Client::new()` only if a custom builder fails
+/// (which should not happen for a plain client with timeouts).
+fn upstream_client() -> reqwest::Client {
+    CODEX_API_PROXY_UPSTREAM_CLIENT
+        .get_or_init(|| {
+            reqwest::Client::builder()
+                .connect_timeout(std::time::Duration::from_secs(10))
+ .pool_idle_timeout(Some(std::time::Duration::from_secs(90)))
+ .pool_max_idle_per_host(8)
+                .build()
+                .unwrap_or_else(|_| reqwest::Client::new())
+        })
+        .clone()
+}
 /// Monotonically increasing counter for synthetic tool-call ids. When an
 /// upstream provider omits the tool-call `id` (common for some Chat
 /// Completions / Anthropic bridges), the proxy must mint a fallback id that
@@ -1209,7 +1236,7 @@ async fn proxy_native_responses_request(
     upstream_url: &str,
     session_id: Option<&str>,
 ) -> anyhow::Result<Response<ProxyBody>> {
-    let client = reqwest::Client::new();
+    let client = upstream_client();
     let upstream = send_upstream_with_retry(
         session_id,
         provider,
@@ -1264,7 +1291,7 @@ async fn proxy_anthropic_messages_codex_responses_request(
         &format!("{}_request", normalize_proxy_provider(provider)),
         &anthropic_payload,
     );
-    let client = reqwest::Client::new();
+    let client = upstream_client();
     let upstream = send_upstream_with_retry(
         Some(session_id),
         provider,
@@ -1423,7 +1450,7 @@ async fn proxy_chat_completions_passthrough_forward(
     session_id: &str,
     project_name: Option<&str>,
 ) -> anyhow::Result<Response<ProxyBody>> {
-    let client = reqwest::Client::new();
+    let client = upstream_client();
     let request = client
         .post(upstream_url)
         .header(CONTENT_TYPE, "application/json");
@@ -1482,7 +1509,7 @@ async fn proxy_chat_completions_codex_responses_request(
     session_id: Option<&str>,
     project_name: Option<&str>,
 ) -> anyhow::Result<Response<ProxyBody>> {
-    let client = reqwest::Client::new();
+    let client = upstream_client();
     let request = client
         .post(upstream_url)
         .header(CONTENT_TYPE, "application/json");
@@ -1621,7 +1648,7 @@ async fn proxy_native_codex_responses_compact_request(
     }
 
     let session_id = session_id_for_proxy_provider(&config, &provider);
-    let client = reqwest::Client::new();
+    let client = upstream_client();
     let upstream = send_upstream_with_retry(
         acp_session_id.as_deref(),
         &provider,
@@ -1805,7 +1832,7 @@ async fn proxy_responses_to_anthropic_messages_request(
         .and_then(Value::as_bool)
         .unwrap_or(false);
     let responses_payload = anthropic_payload_to_responses_payload(payload);
-    let client = reqwest::Client::new();
+    let client = upstream_client();
     let upstream = send_upstream_with_retry(
         acp_session_id,
         provider,
@@ -1890,7 +1917,7 @@ async fn proxy_native_anthropic_messages_request_with_url(
         .get("stream")
         .and_then(Value::as_bool)
         .unwrap_or(false);
-    let client = reqwest::Client::new();
+    let client = upstream_client();
     let normalized_provider = normalize_proxy_provider(provider);
     let payload = if normalized_provider == "timiai" {
         sanitize_timiai_anthropic_messages_payload(normalize_native_anthropic_payload(
@@ -2042,7 +2069,7 @@ async fn proxy_completion_to_anthropic_messages_request_with_url(
         ),
         &chat_payload,
     );
-    let client = reqwest::Client::new();
+    let client = upstream_client();
     let request = client
         .post(upstream_url)
         .header(CONTENT_TYPE, "application/json");
@@ -2305,7 +2332,7 @@ async fn proxy_kimi_codex_api_request(
     let anthropic_payload = chat_payload_to_anthropic_payload(chat_payload, requested_stream);
     log_anthropic_payload_summary("kimi_request", &anthropic_payload);
 
-    let client = reqwest::Client::new();
+    let client = upstream_client();
     let upstream = send_upstream_with_retry(
         Some(session_id),
         "kimi_code",
