@@ -28,7 +28,9 @@ mod transport;
 
 pub use host::SessionSink;
 pub use host::{HarnessHost, HarnessHostRegistry, HarnessHostRegistryHandle};
-pub use process::{DshChild, SpawnDshWebConfig, kill_child, spawn_dsh_web};
+pub use process::{
+    DshChild, SpawnDshWebConfig, kill_child, resolve_dsh_launch, resolve_npm_launch, spawn_dsh_web,
+};
 pub use rpc_types::{
     ClientResponse, PromptContentPart, PromptMode, SessionCreatePayload, SessionPromptPayload,
 };

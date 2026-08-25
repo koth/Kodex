@@ -7,17 +7,23 @@
 //! (`view_image` / `generate_image` / `edit_image`).
 //!
 //! `native_view` is derived from a static keyword table (the same signal the
-//! model catalog uses to emit `input_modalities`) plus BYOK slug decoding,
-//! defaulting to capable for unknown models so multimodal models are never
-//! forced through the tool path. `native_generate` is true only for the
-//! codex-acp channel under the `default` (ChatGPT login) provider, because
-//! codex-acp's native `ImageGenerationBegin/End` protocol events only fire
-//! there. `native_edit` is always false: Kodex has no native image-editing
-//! capability, so editing is always delivered through the MCP `edit_image` tool.
+//! model catalog uses to emit `input_modalities`) plus BYOK/harness slug
+//! decoding. The unknown-model default is channel-specific: image-capable for
+//! codex-acp/kodex-claude (so multimodal models are never forced through the
+//! tool path), but text-only for the dsh harness (whose own catalog defaults
+//! undeclared models to text-only and rejects native images with
+//! `attachment-error`, surfacing as a failed prompt). `native_generate` is
+//! true only for the codex-acp channel under the `default` (ChatGPT login)
+//! provider, because codex-acp's native `ImageGenerationBegin/End` protocol
+//! events only fire there. `native_edit` is always false: Kodex has no native
+//! image-editing capability, so editing is always delivered through the MCP
+//! `edit_image` tool.
 
 use workspace_model::ImageCapabilities;
 
-use crate::settings::{is_claude_agent_acp_command, is_codex_acp_command};
+use crate::settings::{
+    is_claude_agent_acp_command, is_codex_acp_command, is_deepseek_harness_command,
+};
 
 /// Model name substrings that indicate a text-only model (no image input).
 /// Plain GLM-5.x text models are text-only; only GLM-*V* (vision) variants
@@ -58,8 +64,23 @@ pub fn resolve_image_capabilities(
     let (decoded_model, decoded_provider) = decode_byok_identifier(model, provider);
     let is_codex = is_codex_acp_command(agent_command);
     let is_claude = is_claude_agent_acp_command(agent_command);
+    let is_harness = is_deepseek_harness_command(agent_command);
 
-    let native_view = model_supports_image_input(&decoded_model);
+    // The dsh harness determines per-model image support from its own model
+    // catalog (`input` modality), which it does NOT expose in `session.models`
+    // (the response carries only id/name/description/reasoning). A model that
+    // does not declare `input: [text, image]` is text-only -- and the harness
+    // defaults undeclared models to `["text"]`. Kodex cannot read that signal,
+    // so for the harness channel an *unknown* model (one the keyword table
+    // does not recognize) must default to text-only and degrade image
+    // attachments through the `view_image` fallback. Defaulting to capable --
+    // as the codex-acp/claude channels do -- forwards the raw image natively
+    // and the harness rejects it with `attachment-error: Model "X" does not
+    // support image input`, failing the prompt (perceived as a disconnect).
+    let native_view = match classify_image_input(&decoded_model) {
+        Some(supports) => supports,
+        None => !is_harness,
+    };
     let native_generate =
         is_codex && decoded_provider.as_deref() == Some(DEFAULT_PROVIDER_ID) && !is_claude;
     // kodex-claude has no native generation path; BYOK codex providers go
@@ -85,6 +106,18 @@ pub fn resolve_image_capabilities(
 /// authoritative source. Unknown models default to image-capable (true) so
 /// multimodal models are never误降级 (mis-degraded) through the tool path.
 pub fn model_supports_image_input(model: &str) -> bool {
+    classify_image_input(model).unwrap_or(true)
+}
+
+/// Tri-state image-input classification: `Some(true)` for a model the keyword
+/// table recognizes as multimodal, `Some(false)` for one it recognizes as
+/// text-only, and `None` when no keyword matches (unknown). Callers that know
+/// the channel can pick a channel-specific default for the unknown case;
+/// see [`resolve_image_capabilities`] (the dsh harness defaults unknown
+/// models to text-only, mirroring the harness's own `["text"]` modality
+/// default, because it does not expose per-model `input_modalities` in
+/// `session.models`).
+fn classify_image_input(model: &str) -> Option<bool> {
     let lower = model.to_ascii_lowercase();
     // Multimodal (vision) variants are checked first so a name like `GLM-5V`
     // is recognized as image-capable even though plain `glm-5` is text-only.
@@ -92,36 +125,52 @@ pub fn model_supports_image_input(model: &str) -> bool {
         .iter()
         .any(|keyword| lower.contains(keyword))
     {
-        return true;
+        return Some(true);
     }
     if TEXT_ONLY_MODEL_KEYWORDS
         .iter()
         .any(|keyword| lower.contains(keyword))
     {
-        return false;
+        return Some(false);
     }
-    // Unknown model: default to capable to avoid forcing multimodal models
-    // through the fallback tool path (D12).
-    true
+    None
 }
 
 /// Decode an encoded BYOK provider/model identifier into its parts.
 ///
-/// BYOK providers encode the selection as a slug such as
-/// `kodex-provider/byok/timiai/gpt-5.4`; the trailing segment is the model
-/// and the segment before it (when prefixed with `byok/`) is the provider.
-/// Plain model names pass through unchanged.
+/// Two encodings share the `kodex-provider/` prefix:
+///   - `kodex-provider/byok/{source_provider}/{model_slug}` (codex BYOK)
+///   - `kodex-provider/{provider}/{model_slug}`              (dsh harness /
+///     non-BYOK providers)
+/// The first segment after the prefix is the provider (or `byok`); the
+/// remainder is the model slug, which may itself contain slashes (e.g.
+/// `zai-org/GLM-5.2` or `cline-pass/glm-5.2`), so it is split once and kept
+/// verbatim. Plain model names (no `kodex-provider/` prefix) pass through
+/// unchanged.
 pub fn decode_byok_identifier(model: &str, provider: Option<&str>) -> (String, Option<String>) {
     let lower = model.to_ascii_lowercase();
-    if let Some(rest) = lower.strip_prefix("kodex-provider/byok/") {
-        // The slug is `kodex-provider/byok/{source_provider}/{model_slug}`,
-        // and `model_slug` may itself contain slashes (e.g. `zai-org/GLM-5.2`).
-        // Only the first segment is the provider; everything after it is the
-        // model id, so split once and keep the remainder verbatim.
-        if let Some((provider_part, model_part)) = rest.split_once('/') {
+    if let Some(rest) = lower.strip_prefix("kodex-provider/") {
+        if let Some((first, model_part)) = rest.split_once('/') {
             let model_part = model_part.trim();
-            if !provider_part.is_empty() && !model_part.is_empty() {
-                return (model_part.to_string(), Some(provider_part.to_string()));
+            if !first.is_empty() && !model_part.is_empty() {
+                if first == "byok" {
+                    // `kodex-provider/byok/{source_provider}/{model_slug}`:
+                    // the segment after `byok` is the source provider and the
+                    // remainder is the model slug.
+                    if let Some((source_provider, slug)) = model_part.split_once('/') {
+                        let slug = slug.trim();
+                        if !source_provider.is_empty() && !slug.is_empty() {
+                            return (slug.to_string(), Some(source_provider.to_string()));
+                        }
+                    }
+                } else {
+                    // `kodex-provider/{provider}/{model_slug}` (dsh harness and
+                    // other non-BYOK providers): decode so the bare model slug
+                    // is classified against the keyword table, not the encoded
+                    // string (whose provider segment could false-positive,
+                    // e.g. `kimi_code` matching the `kimi` multimodal keyword).
+                    return (model_part.to_string(), Some(first.to_string()));
+                }
             }
         }
     }
@@ -169,6 +218,66 @@ mod tests {
     #[test]
     fn unknown_model_defaults_to_image_capable() {
         let caps = resolve_image_capabilities("some-new-model-9", Some("default"), CODEX_CMD);
+        assert!(caps.native_view);
+    }
+
+    #[test]
+    fn harness_unknown_model_defaults_to_text_only() {
+        // The dsh harness does not expose per-model `input_modalities` in
+        // `session.models`, and its own catalog defaults undeclared models to
+        // `["text"]`. An unknown harness model id like `k3` (kimi_code) must
+        // therefore default to text-only so image attachments degrade through
+        // the `view_image` fallback instead of being forwarded natively and
+        // rejected with `attachment-error: Model "k3" does not support image
+        // input` (which surfaces as a failed prompt / "disconnect").
+        const DSH_CMD: &str = "dsh";
+        // Bare model id (as stored in `ui.session.model` at session create).
+        let caps = resolve_image_capabilities("k3", Some("kimi_code"), DSH_CMD);
+        assert!(
+            !caps.native_view,
+            "unknown harness model `k3` must be text-only, not native image-capable"
+        );
+        // Encoded form (as sent to `reapply_image_capabilities` on model switch):
+        // must decode to `k3` and NOT false-positive on the `kimi_code` provider
+        // segment matching the `kimi` multimodal keyword.
+        let caps_encoded = resolve_image_capabilities(
+            "kodex-provider/kimi_code/k3",
+            Some("kimi_code"),
+            DSH_CMD,
+        );
+        assert!(
+            !caps_encoded.native_view,
+            "encoded `kodex-provider/kimi_code/k3` must decode to `k3` and be text-only"
+        );
+        // The codex-acp channel keeps the capable default for the same id so
+        // its catalog's authoritative per-model override still wins upstream.
+        let caps_codex =
+            resolve_image_capabilities("k3", Some("kimi_code"), CODEX_CMD);
+        assert!(
+            caps_codex.native_view,
+            "codex-acp unknown model must keep the image-capable default"
+        );
+    }
+
+    #[test]
+    fn harness_encoded_model_with_slash_decodes_to_bare_slug() {
+        // A harness model slug that contains a slash (e.g. `cline-pass/glm-5.2`)
+        // must decode keeping the full slug so the keyword table sees the model
+        // name, not the truncated provider segment.
+        let (model, provider) =
+            decode_byok_identifier("kodex-provider/custom_cline/cline-pass/glm-5.2", None);
+        assert_eq!(model, "cline-pass/glm-5.2");
+        assert_eq!(provider.as_deref(), Some("custom_cline"));
+    }
+
+    #[test]
+    fn harness_known_multimodal_still_native() {
+        // A harness model the keyword table recognizes as multimodal (e.g.
+        // gpt-5.x) keeps native image forwarding; only the *unknown* default
+        // changes for the harness channel.
+        const DSH_CMD: &str = "dsh";
+        let caps =
+            resolve_image_capabilities("kodex-provider/timiai/gpt-5.5", Some("timiai"), DSH_CMD);
         assert!(caps.native_view);
     }
 

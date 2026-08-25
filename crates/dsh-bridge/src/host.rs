@@ -45,10 +45,21 @@ pub struct SessionSink {
     pub permission_broker: PermissionBroker,
     pub last_seq: AtomicU64,
     /// Set while history replay is feeding events (resume / stream-gap
-    /// re-baseline): no live `assistant/chunk` deltas accompany replayed
-    /// events, so the mapping layer must take text from `assistant/message`
-    /// blocks instead of the (absent) stream.
+    /// re-baseline). History pages contain both the raw `assistant/chunk`
+    /// deltas and the finalized `assistant/message`, so the mapping layer
+    /// tracks which assistant steps already streamed their text and suppress
+    /// the finalized block to avoid duplicates.
     replaying: AtomicBool,
+    /// Assistant steps (`(turn, step)`) for which this sink has already emitted
+    /// assistant text via `assistant/chunk` text-deltas. Kept across live and
+    /// replay passes so a re-baseline that sees only the finalized
+    /// `assistant/message` after a mid-stream gap does not append the full text
+    /// over text already shown.
+    streamed_text_steps: Mutex<std::collections::HashSet<(u64, u64)>>,
+    /// Tool-call arguments keyed by call id, captured while mapping `tool/call`
+    /// so a later `tool/result` can still synthesize diff previews for file
+    /// editor tools whose dsh card variant did not carry a diff view.
+    tool_call_args: Mutex<std::collections::HashMap<String, (String, serde_json::Value)>>,
     /// Pending approvals/questions keyed by the id surfaced to the UI (dsh
     /// `approvalId` for approvals; the question batch's first `question.id` for
     /// questions). The value carries the dsh `rpcId` needed for `/api/respond`
@@ -93,6 +104,8 @@ impl SessionSink {
             permission_broker: broker,
             last_seq: AtomicU64::new(0),
             replaying: AtomicBool::new(false),
+            streamed_text_steps: Mutex::new(std::collections::HashSet::new()),
+            tool_call_args: Mutex::new(std::collections::HashMap::new()),
             pending: Mutex::new(Vec::new()),
             question_rpc_ids: Mutex::new(Vec::new()),
             question_order: Mutex::new(std::collections::HashMap::new()),
@@ -108,6 +121,44 @@ impl SessionSink {
 
     pub fn is_replaying(&self) -> bool {
         self.replaying.load(Ordering::Acquire)
+    }
+
+    /// Record that assistant text for a step has been emitted through
+    /// `assistant/chunk` text-deltas (live or replay).
+    pub fn mark_text_seen(&self, turn: u64, step: u64) {
+        if let Ok(mut seen) = self.streamed_text_steps.lock() {
+            seen.insert((turn, step));
+        }
+    }
+
+    /// Whether assistant text for the step has already been emitted through
+    /// chunks.
+    pub fn text_seen(&self, turn: u64, step: u64) -> bool {
+        self.streamed_text_steps
+            .lock()
+            .ok()
+            .map(|seen| seen.contains(&(turn, step)))
+            .unwrap_or(false)
+    }
+
+    /// Record a tool call's parsed arguments for later synthetic diff rendering.
+    pub fn record_tool_call(&self, call_id: String, name: String, args: serde_json::Value) {
+        if let Ok(mut calls) = self.tool_call_args.lock() {
+            calls.insert(call_id, (name, args));
+        }
+    }
+
+    /// Take and remove one tool call's recorded name/args. Returns the raw
+    /// arguments object when it parses to a JSON object.
+    pub fn take_tool_call(
+        &self,
+        call_id: &str,
+    ) -> Option<(String, serde_json::Map<String, serde_json::Value>)> {
+        self.tool_call_args
+            .lock()
+            .ok()
+            .and_then(|mut calls| calls.remove(call_id))
+            .and_then(|(name, args)| args.as_object().map(|map| (name, map.clone())))
     }
 
     pub fn set_session_id(&self, id: SessionId) {
@@ -679,13 +730,36 @@ impl HarnessHost {
         // Kill a Kodex-spawned process (stdin EOF grace then terminate); never
         // kill an external endpoint.
         if self.spawned.load(Ordering::Acquire) {
-            if let Ok(mut guard) = self.child.lock() {
+            let direct_reaped = if let Ok(mut guard) = self.child.lock() {
                 if let Some(child) = guard.take() {
-                    let _ = crate::process::kill_child(child);
+                    crate::process::kill_child_reaped(child).unwrap_or(false)
+                } else {
+                    false
                 }
+            } else {
+                false
+            };
+            // Fallback for the shim case: when the `dsh` launcher (`cmd.exe`
+            // /volta) has already exited, the long-lived `node` is orphaned and
+            // `kill_child` (which only reaps the direct child) is a no-op. If
+            // the kill-on-close job also failed to attach, that node survives.
+            // Reap whatever still owns the loopback port only when the direct
+            // child was not reaped; keep the common exit path free of the
+            // slower `netstat`/`taskkill` fallback.
+            if !direct_reaped && let Some(port) = parse_loopback_port(&self.endpoint) {
+                crate::process::kill_port_owner(port);
             }
         }
     }
+}
+
+/// Extract the TCP port from a `http://127.0.0.1:<port>` harness endpoint, if
+/// it is a well-formed URL. Used to locate the orphaned `node` behind an
+/// exited shim for the teardown port-kill fallback.
+fn parse_loopback_port(endpoint: &str) -> Option<u16> {
+    reqwest::Url::parse(endpoint.trim_end_matches('/'))
+        .ok()
+        .and_then(|url| url.port())
 }
 
 impl Drop for HarnessHost {
@@ -763,6 +837,25 @@ impl HarnessHostRegistry {
             .map(|guard| guard.iter().any(|(url, _)| url == endpoint))
             .unwrap_or(false)
     }
+
+    /// Tear down every registered host (close SSE loops, dispose runtimes, kill
+    /// any spawned `dsh web` tree) and clear the registry. Intended for the
+    /// app's `before-quit` hook so the dsh process is reaped deterministically
+    /// instead of relying on `Drop` — a `process::exit` / Electron `app.exit`
+    /// skips destructors, so a registry held in a long-lived `Arc` would never
+    /// drop and `kill_child` would never run.
+    pub fn shutdown_all(&self) {
+        let hosts: Vec<Arc<HarnessHost>> = match self.hosts.lock() {
+            Ok(guard) => guard.iter().map(|(_, h)| h.clone()).collect(),
+            Err(_) => Vec::new(),
+        };
+        for host in hosts {
+            host.teardown();
+        }
+        if let Ok(mut guard) = self.hosts.lock() {
+            guard.clear();
+        }
+    }
 }
 
 impl Default for HarnessHostRegistry {
@@ -782,6 +875,13 @@ impl HarnessHostRegistryHandle {
 
     pub fn release(&self, endpoint: &str) {
         self.inner.release(endpoint);
+    }
+
+    /// Tear down every host and clear the registry. Wire to the app's
+    /// `before-quit` hook so spawned `dsh web` processes are reaped on a normal
+    /// exit (which otherwise skips `Drop`).
+    pub fn shutdown_all(&self) {
+        self.inner.shutdown_all();
     }
 }
 

@@ -12,7 +12,7 @@ use hyper_util::rt::TokioIo;
 use serde_json::{Value, json};
 use tokio::net::TcpListener;
 use crate::adapter::{AdapterOptions, build_session_options, run_non_streaming, run_streaming};
-use crate::logging::{append_codebuddy_proxy_log, set_debug_enabled};
+use crate::logging::append_codebuddy_proxy_log;
 use crate::openai_types::OaiChatRequest;
 use crate::session_pool::{ContextResetRequest, SessionPool, tool_signature_of};
 pub struct ProxyConfig {
@@ -36,15 +36,14 @@ pub struct ProxyConfig {
     /// `node`. Mirrors the env the legacy TS/desktop launcher set on the
     /// CLI child.
     pub cli_env: std::collections::BTreeMap<String, String>,
-    /// When `true`, the proxy appends debug lines to
-    /// `~/.kodex/logs/codebuddy-proxy.log` (via [`set_debug_enabled`]);
-    /// when `false` (the default) file logging is fully suppressed. The
-    /// desktop launcher derives this from the CodeBuddy settings page
-    /// "debug" toggle so log output stays opt-in.
+    /// Legacy debug toggle. Diagnostics are now routed through `tracing`
+    /// (target `codebuddy_proxy`); verbosity is controlled by the subscriber's
+    /// `EnvFilter` (e.g. `RUST_LOG=codebuddy_proxy=debug`), so this flag is no
+    /// longer read. Kept for `ProxyConfig` API compatibility with the desktop
+    /// launcher.
     pub debug: bool,
 }
 pub async fn run(cfg: ProxyConfig, mut shutdown: tokio::sync::oneshot::Receiver<()>) -> anyhow::Result<()> {
-    set_debug_enabled(cfg.debug);
     // Ensure the unified working directory exists. The CLI spawns every
     // session here (not in the client's project dir, which may not exist on
     // the proxy's machine — the proxy may run on a different OS than the
@@ -82,7 +81,7 @@ pub async fn run(cfg: ProxyConfig, mut shutdown: tokio::sync::oneshot::Receiver<
             .unwrap_or_else(|| "<sdk-resolve>".to_string()),
         cfg.cli_env.keys().collect::<Vec<_>>(),
     ));
-    eprintln!("[codebuddy-proxy] listening on {addr}");
+    tracing::info!(target: "codebuddy_proxy", addr = %addr, "listening");
     let cfg = Arc::new(cfg);
     loop {
         tokio::select! {
@@ -102,7 +101,7 @@ pub async fn run(cfg: ProxyConfig, mut shutdown: tokio::sync::oneshot::Receiver<
             }
             _ = &mut shutdown => {
                 append_codebuddy_proxy_log("shutting_down");
-                eprintln!("[codebuddy-proxy] shutting down");
+                tracing::info!(target: "codebuddy_proxy", "shutting down");
                 break;
             }
         }
@@ -225,7 +224,6 @@ async fn handle_chat(
             chat_req.messages.len(),
         );
         append_codebuddy_proxy_log(&format!("{header}\n{pretty}"));
-        eprintln!("[codebuddy-proxy] {header}\n{pretty}");
     }
     let tool_sig = tool_signature_of(&chat_req.tools);
     append_codebuddy_proxy_log(&format!(

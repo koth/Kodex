@@ -512,8 +512,26 @@ impl Application {
             }
             if self.skip_replay {
                 self.session.update_session_id(&events);
+                // Replay events from session/load (or dsh history replay) are
+                // already represented in the SQLite-restored UI. Applying
+                // message/tool/turn events again would append duplicate history
+                // and break turn-collapse calculations. Keep only non-history
+                // session metadata (config/title/capabilities) needed after a
+                // resume; discard replayed assistant/tool/turn/thinking frames.
                 for event in events {
-                    self.apply_event_and_restore_model(event);
+                    let keep = matches!(
+                        &event,
+                        ClientEvent::SessionStarted { .. }
+                            | ClientEvent::SessionConfigUpdated { .. }
+                            | ClientEvent::SessionConfigValueChanged { .. }
+                            | ClientEvent::PromptCapabilitiesUpdated { .. }
+                            | ClientEvent::AvailableCommandsUpdated { .. }
+                            | ClientEvent::SessionTitleUpdated { .. }
+                            | ClientEvent::UsageUpdated { .. }
+                    );
+                    if keep {
+                        self.apply_event_and_restore_model(event);
+                    }
                 }
                 self.bump_revision();
                 return;

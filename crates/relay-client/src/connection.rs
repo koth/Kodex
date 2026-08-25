@@ -96,11 +96,6 @@ pub struct RelayConnection<T: RelayTransport> {
     heartbeat: Duration,
     session_key: Option<SessionKey>,
     peer_device_id: Option<String>,
-    /// Optional diagnostic sink for E2E failures (the desktop shell writes
-    /// these to its driver log).
-    error_log: Option<std::sync::Arc<dyn Fn(&str) + Send + Sync>>,
-    /// Optional diagnostic sink for outbound framing events (chunking etc.).
-    send_log: Option<std::sync::Arc<dyn Fn(&str) + Send + Sync>>,
     /// In-progress chunk reassembly keyed by `chunk_id`.
     chunks: HashMap<String, ChunkBuffer>,
 }
@@ -112,21 +107,8 @@ impl<T: RelayTransport> RelayConnection<T> {
             heartbeat,
             session_key: None,
             peer_device_id: None,
-            error_log: None,
-            send_log: None,
             chunks: HashMap::new(),
         }
-    }
-
-    /// Attach a diagnostic sink called on E2E decrypt failures.
-    pub fn set_error_log(&mut self, log: std::sync::Arc<dyn Fn(&str) + Send + Sync>) {
-        self.error_log = Some(log);
-    }
-
-    /// Attach a diagnostic sink called on outbound framing events (e.g. when
-    /// a large encrypted payload is split into chunk frames).
-    pub fn set_send_log(&mut self, log: std::sync::Arc<dyn Fn(&str) + Send + Sync>) {
-        self.send_log = Some(log);
     }
 
     /// Install the E2E session key (post-pairing). Subsequent
@@ -174,15 +156,12 @@ impl<T: RelayTransport> RelayConnection<T> {
                 let enc = encrypt(key, peer, envelope)?;
                 let frames = split_encrypted_envelope(&enc)?;
                 if frames.len() > 1 {
-                    let line = format!(
-                        "split encrypted {} into {} chunk frames",
-                        envelope.message_type,
-                        frames.len()
+                    tracing::debug!(
+                        target: "remote_control",
+                        message_type = %envelope.message_type,
+                        frames = frames.len(),
+                        "split encrypted envelope into chunk frames"
                     );
-                    eprintln!("[remote-control] {line}");
-                    if let Some(log) = &self.send_log {
-                        log(&line);
-                    }
                 }
                 for frame in frames {
                     self.transport.send_text(frame).await?;
@@ -217,7 +196,11 @@ impl<T: RelayTransport> RelayConnection<T> {
                 match serde_json::from_str(&frame) {
                     Ok(env) => return Ok(Some(env)),
                     Err(e) => {
-                        eprintln!("[remote-control] recv_envelope: dropping undecodable plaintext frame: {e}");
+                        tracing::warn!(
+                            target: "remote_control",
+                            error = %e,
+                            "recv_envelope: dropping undecodable plaintext frame"
+                        );
                         continue;
                     }
                 }
@@ -238,7 +221,10 @@ impl<T: RelayTransport> RelayConnection<T> {
             };
 
             let Some(key) = self.session_key.as_ref() else {
-                eprintln!("[remote-control] recv_envelope: skipping encrypted frame before key installed");
+                tracing::debug!(
+                    target: "remote_control",
+                    "recv_envelope: skipping encrypted frame before key installed"
+                );
                 continue;
             };
             match decrypt(key, &full) {
@@ -248,15 +234,14 @@ impl<T: RelayTransport> RelayConnection<T> {
                     // and this connection's key is stale. Drop the key so the
                     // next envelope is treated as plaintext and the caller's
                     // reconnect can re-pair cleanly.
-                    eprintln!("[remote-control] recv_envelope: decrypt failed ({e}); dropping stale session key");
-                    if let Some(logger) = &self.error_log {
-                        logger(&format!(
-                            "decrypt failed to={} nonce_len={} ct_len={}: {e}",
-                            full.to_device_id,
-                            full.nonce.len(),
-                            full.ciphertext.len(),
-                        ));
-                    }
+                    tracing::warn!(
+                        target: "remote_control",
+                        error = %e,
+                        to_device_id = %full.to_device_id,
+                        nonce_len = full.nonce.len(),
+                        ct_len = full.ciphertext.len(),
+                        "recv_envelope: decrypt failed; dropping stale session key"
+                    );
                     self.session_key = None;
                     self.peer_device_id = None;
                     return Err(anyhow::anyhow!("decrypt failed: {e}"));

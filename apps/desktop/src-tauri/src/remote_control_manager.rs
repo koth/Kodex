@@ -172,7 +172,7 @@ impl RemoteControlManager {
         let identity = DeviceIdentity::load_or_create(&key_path)
             .map_err(|e| format!("load device identity: {e}"))?;
         let code = PairingCode::mint(DEFAULT_PAIRING_TTL);
-        self.log_driver_event(&format!("mint pairing code {}", code.code()));
+        tracing::info!(target: "remote_control", code = %code.code(), "mint pairing code");
         let payload = build_qr_payload(&inner.relay_endpoint, &code, &identity.public_b64());
         let json = payload
             .to_json()
@@ -238,24 +238,6 @@ impl RemoteControlManager {
             bound: inner.bound,
             account_email: inner.account_session.as_ref().map(|s| s.email.clone()),
             logged_in: inner.account_session.is_some(),
-        }
-    }
-
-    /// Append a diagnostic line to a local file. Release GUI builds have no
-    /// usable stderr, so the remote-control driver writes here instead.
-    pub fn log_driver_event(&self, event: &str) {
-        use std::io::Write;
-        let dir = self.app_paths.logs_dir();
-        if let Err(_) = std::fs::create_dir_all(&dir) {
-            return;
-        }
-        let path = dir.join("remote-control-driver.log");
-        if let Ok(mut file) = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(path)
-        {
-            let _ = writeln!(file, "{}", event);
         }
     }
 

@@ -40,6 +40,16 @@ impl MappedEvents {
     }
 }
 
+/// Serialize a JSON value to a compact string, keeping non-ASCII characters
+/// literal (e.g. CJK text in tool `raw_input`/`raw_output`) instead of
+/// rendering as `\u4f60\u597d` escape sequences that look like internal codes
+/// in the UI. `serde_json::to_string` only emits the JSON-mandated escapes
+/// (`"`, `\`, and control chars below 0x20); code points above 0x7F are
+/// written as raw UTF-8, which is valid inside a JSON string (RFC 8259).
+fn json_compact_no_escape(v: &serde_json::Value) -> String {
+    serde_json::to_string(v).unwrap_or_default()
+}
+
 /// Map a `MuxFrame` (already demuxed to the owning session by the router) into
 /// [`ClientEvent`]s. `seq` of the embedded `SessionEvent` updates the sink's
 /// `last_seq` so SSE reconnection can re-baseline from the exact gap.
@@ -225,11 +235,32 @@ pub fn map_session_event(
     match event.type_tag.as_str() {
         "assistant/chunk" => {
             let data: Option<AssistantChunkData> = event.data();
+            // History pages contain raw chunk deltas alongside the finalized
+            // `assistant/message`, so remember when this sink already emitted
+            // the step's text and let the finalized block skip it.
+            if let Some(ref d) = data {
+                if matches!(&d.chunk, StreamChunk::TextDelta { .. }) {
+                    _sink.mark_text_seen(d.turn, d.step);
+                }
+            }
             match data.map(|d| d.chunk) {
-                Some(StreamChunk::TextDelta { text, .. }) => vec![ClientEvent::MessageChunk {
-                    role: MessageRole::Assistant,
-                    content: text,
-                }],
+                Some(StreamChunk::TextDelta { text, .. }) => {
+                    // Mojibake trace: fingerprint the mapped text right before it
+                    // leaves the bridge, to compare against the raw WS frame.
+                    if text.matches('\u{FFFD}').count() > 0 || text.matches('Ã').count() > 0 {
+                        tracing::debug!(
+                            target: "dsh-bridge::mapping",
+                            bytes = text.len(),
+                            fffd = text.matches('\u{FFFD}').count(),
+                            latin1 = text.matches('Ã').count(),
+                            "assistant chunk mapped with mojibake markers"
+                        );
+                    }
+                    vec![ClientEvent::MessageChunk {
+                        role: MessageRole::Assistant,
+                        content: text,
+                    }]
+                }
                 Some(StreamChunk::ReasoningDelta { text, .. }) => {
                     vec![
                         ClientEvent::ThinkingActivity { active: true },
@@ -244,13 +275,13 @@ pub fn map_session_event(
             // Live path: the assistant text was already streamed via
             // `assistant/chunk` text-deltas, so re-emitting the finalized
             // message's text blocks would duplicate every paragraph — consume
-            // only the usage rollup. History-replay path: no chunks were
-            // streamed this run, so emit the text blocks here (exactly once
-            // per message; replays skip already-delivered seqs).
+            // only the usage rollup. History-replay path: dsh history pages
+            // include the raw chunk deltas too, so only emit finalized text for
+            // steps whose text has not already streamed through this sink.
             let data: Option<AssistantMessageData> = event.data();
             let mut out = Vec::new();
             if let Some(data) = data {
-                if _sink.is_replaying() {
+                if _sink.is_replaying() && !_sink.text_seen(data.turn, data.step) {
                     for block in &data.message.content {
                         if let ContentBlock::Text { text } = block {
                             out.push(ClientEvent::MessageChunk {
@@ -273,10 +304,21 @@ pub fn map_session_event(
                 None => (String::new(), String::new(), String::new()),
             };
             let raw_input_value = serde_json::from_str::<Value>(&raw_input).ok();
+            if let Some(value) = raw_input_value.clone() {
+                _sink.record_tool_call(call_id.clone(), name.clone(), value);
+            }
             let (kind, summary) = match view {
                 Some(ToolEventView::Call { view }) => {
                     let kind = match view {
-                        ToolCallView::Terminal(_) => "execute".to_string(),
+                        ToolCallView::Terminal(_) => {
+                            // Some dsh deployments wrap file tools in a terminal
+                            // card even though the underlying operation is the
+                            // Kodex workbench's read/edit surface. Infer the
+                            // semantic kind so `view`/`str_replace` do not fall
+                            // back to the shell card.
+                            let inferred = infer_tool_kind(&name, raw_input_value.as_ref());
+                            if inferred.is_empty() { "execute".to_string() } else { inferred }
+                        }
                         ToolCallView::Diff(_) => "edit".to_string(),
                         // dsh renders file tools (view / str_replace / search...)
                         // with the generic card, which carries no `kind`. Infer
@@ -304,6 +346,24 @@ pub fn map_session_event(
                     name.clone(),
                 ),
             };
+            let summary = {
+                let path = raw_input_value
+                    .as_ref()
+                    .and_then(|v| {
+                        v.get("path")
+                            .or_else(|| v.get("file_path"))
+                            .or_else(|| v.get("filePath"))
+                            .and_then(Value::as_str)
+                    });
+                if (kind == "read" || kind == "edit")
+                    && let Some(path) = path
+                    && !summary.contains(path)
+                {
+                    format!("{summary} {path}")
+                } else {
+                    summary
+                }
+            };
             vec![ClientEvent::ToolStarted {
                 id: call_id,
                 parent_id: None,
@@ -313,7 +373,7 @@ pub fn map_session_event(
                 is_subagent: false,
                 raw_input: raw_input_value
                     .as_ref()
-                    .map(|v| serde_json::to_string(v).unwrap_or_default()),
+                    .map(|v| json_compact_no_escape(v)),
             }]
         }
         "tool/result" => {
@@ -327,10 +387,13 @@ pub fn map_session_event(
                 })
                 .unwrap_or_default();
             let mut out = Vec::new();
+            let mut had_diff_view = false;
+            let recorded_call = _sink.take_tool_call(&call_id);
 
             // Diff views → one ToolDiff per file (before ToolCompleted).
             if let Some(ToolEventView::Result { view }) = view {
                 if let ToolResultView::Diff(diff_view) = view {
+                    had_diff_view = true;
                     for fd in &diff_view.diffs {
                         out.push(ClientEvent::ToolDiff {
                             id: call_id.clone(),
@@ -342,9 +405,34 @@ pub fn map_session_event(
                 }
             }
 
-            let (outcome, terminal_output, raw_output) = match (data.as_ref(), view) {
-                (Some(d), Some(ToolEventView::Result { view })) => render_result(d, view),
-                (Some(d), None) => (result_outcome(d), None, result_text(d)),
+            // File-editor tools sometimes arrive with a generic/terminal result
+            // card, so the dsh-bridge must synthesize the diff preview from the
+            // recorded tool-call arguments or the workbench will show a shell
+            // card instead of an edit/change preview.
+            if !had_diff_view
+                && data.as_ref().is_none_or(|d| d.error.is_none())
+                && let Some((name, args)) = recorded_call.as_ref()
+                && let Some(diff) = synthetic_edit_diff(&call_id, name.as_str(), args)
+            {
+                out.push(diff);
+            }
+
+            let inferred_kind = recorded_call
+                .as_ref()
+                .map(|(name, args)| {
+                    let args_value = serde_json::Value::Object(args.clone());
+                    infer_tool_kind(name, Some(&args_value))
+                })
+                .unwrap_or_default();
+            let (outcome, terminal_output, raw_output) = match (data.as_ref(), view, inferred_kind.as_str()) {
+                (Some(d), Some(ToolEventView::Result { view: ToolResultView::Terminal(_) }), "read") => {
+                    // Keep read tools on the file-view surface even when dsh
+                    // reported the result through a terminal card: use the
+                    // model-facing text as raw_output instead of a shell output.
+                    (result_outcome(d), None, result_text(d))
+                }
+                (Some(d), Some(ToolEventView::Result { view }), _) => render_result(d, view),
+                (Some(d), None, _) => (result_outcome(d), None, result_text(d)),
                 _ => ("completed".to_string(), None, None),
             };
 
@@ -409,7 +497,7 @@ pub fn map_session_event(
         }
         "request/header" => {
             // The full header/config is rich; in v1 the model selector is
-            // published from `session.models` by `emit_model_control`. Emitting
+            // published from `session.models` by `emit_config_controls`. Emitting
             // an empty `SessionConfigUpdated` here would wipe the model control
             // (the reducer replaces `session_config` wholesale), so drop the
             // frame to keep the dropdown populated.
@@ -601,6 +689,7 @@ fn infer_tool_kind(name: &str, raw_input: Option<&Value>) -> String {
         })
     };
 
+
     // Edit tools: replace/patch/write-shaped names, or any tool whose input
     // carries an old/new text pair (str_replace-style arguments).
     if matches_any(&["edit", "str replace", "replace", "patch", "apply patch", "write", "create"])
@@ -626,6 +715,46 @@ fn infer_tool_kind(name: &str, raw_input: Option<&Value>) -> String {
     }
     String::new()
 }
+
+/// Synthesize a `ToolDiff` event for a file-surgery tool when the dsh result
+/// card did not carry a diff view. Uses the recorded tool-call arguments so
+/// `str_replace`/`edit` tools still produce a change preview.
+fn synthetic_edit_diff(
+    call_id: &str,
+    name: &str,
+    args: &serde_json::Map<String, serde_json::Value>,
+) -> Option<ClientEvent> {
+    let lower = name.trim().to_lowercase().replace(['_', '-'], " ");
+    let is_edit_tool = lower.contains("str_replace")
+        || lower.contains("replace")
+        || lower.contains("edit")
+        || lower.contains("write");
+    if !is_edit_tool {
+        return None;
+    }
+    let path = args
+        .get("file_path")
+        .or_else(|| args.get("path"))
+        .or_else(|| args.get("filePath"))?
+        .as_str()?;
+    let old = args
+        .get("old_string")
+        .or_else(|| args.get("old_str"))
+        .or_else(|| args.get("oldString"))
+        .and_then(serde_json::Value::as_str);
+    let new = args
+        .get("new_string")
+        .or_else(|| args.get("new_str"))
+        .or_else(|| args.get("newString"))?
+        .as_str()?;
+    Some(ClientEvent::ToolDiff {
+        id: call_id.to_string(),
+        path: path.to_string(),
+        old_text: old.map(String::from),
+        new_text: new.to_string(),
+    })
+}
+
 
 fn render_result(
     data: &ToolResultData,
@@ -661,7 +790,7 @@ fn render_result(
             (
                 result_outcome(data),
                 None,
-                Some(serde_json::to_string(v).unwrap_or_default()),
+                Some(json_compact_no_escape(v)),
             )
         }
         ToolResultView::Generic(_) => ("completed".to_string(), None, result_text(data)),
@@ -844,6 +973,31 @@ mod tests {
         serde_json::from_value(json).expect("fixture frame must deserialize")
     }
 
+    #[test]
+    fn json_compact_no_escape_keeps_non_ascii_literal() {
+        // CJK in tool raw_input/raw_output must stay literal, not \u-escaped
+        // (mojibake-looking `\u4f60\u597d` escape sequences in the UI). Built
+        // from code points so the source stays pure ASCII and survives any
+        // re-encoding of the file.
+        let cjk: String = (0x4f60..=0x4f61)
+            .map(|cp| char::from_u32(cp).unwrap())
+            .collect();
+        let v = serde_json::json!({ "q": cjk });
+        let s = json_compact_no_escape(&v);
+        assert!(s.contains(&cjk), "non-ASCII must stay literal: {s}");
+        assert!(!s.contains("\\u4f60"), "unexpected \\u escape: {s}");
+    }
+
+    #[test]
+    fn json_compact_no_escape_escapes_required_chars() {
+        let v = serde_json::json!({ "q": "a\"b\\c\n\t" });
+        let s = json_compact_no_escape(&v);
+        assert!(s.contains("\\\""), "double-quote must be escaped: {s}");
+        assert!(s.contains("\\\\"), "backslash must be escaped: {s}");
+        assert!(s.contains("\\n"), "newline must be escaped: {s}");
+        assert!(s.contains("\\t"), "tab must be escaped: {s}");
+    }
+
     fn session_event(type_tag: &str, seq: u64, data: serde_json::Value) -> serde_json::Value {
         serde_json::json!({
             "type": "session/event",
@@ -855,7 +1009,7 @@ mod tests {
     #[test]
     fn maps_request_header_does_not_emit_session_config() {
         // `request/header` must not emit an empty `SessionConfigUpdated`,
-        // which would wipe the model control published by `emit_model_control`.
+        // which would wipe the model control published by `emit_config_controls`.
         let (sink, _rx) = test_sink();
         let frame = mux(session_event(
             "request/header",
@@ -1042,6 +1196,74 @@ mod tests {
             ClientEvent::ToolStarted { id, kind, .. } if id == "call-e" && kind == "edit"
         ));
     }
+
+    #[test]
+    fn terminal_card_view_tool_is_classified_as_read_for_file_tools() {
+        // Some dsh wraps file reads with a terminal card; the bridge must still
+        // route `view` to the read surface instead of the shell card.
+        let (sink, _rx) = test_sink();
+        let frame = mux(serde_json::json!({
+            "type": "session/event",
+            "sessionId": "s-1",
+            "event": {
+                "type": "tool/call",
+                "seq": 3,
+                "time": 0.0,
+                "data": { "turn": 1, "step": 1, "callId": "call-v-term", "name": "view", "arguments": "{\"path\":\"/a/b.rs\"}" }
+            },
+            "view": { "for": "call", "view": { "card": "terminal", "title": "view", "cwd": "/tmp" } }
+        }));
+        let mapped = map_mux_frame(&frame, &sink);
+        assert!(matches!(
+            &mapped.events[0],
+            ClientEvent::ToolStarted { id, kind, .. } if id == "call-v-term" && kind == "read"
+        ));
+    }
+
+    #[test]
+    fn terminal_result_for_str_replace_synthesizes_diff_preview() {
+        let (sink, _rx) = test_sink();
+        let call = mux(serde_json::json!({
+            "type": "session/event",
+            "sessionId": "s-1",
+            "event": {
+                "type": "tool/call",
+                "seq": 3,
+                "time": 0.0,
+                "data": { "turn": 1, "step": 1, "callId": "call-e-term", "name": "str_replace", "arguments": "{\"path\":\"/a/b.rs\",\"old_string\":\"x\",\"new_string\":\"y\"}" }
+            },
+            "view": { "for": "call", "view": { "card": "terminal", "title": "str_replace", "cwd": "/tmp" } }
+        }));
+        let _ = map_mux_frame(&call, &sink);
+        let result = mux(serde_json::json!({
+            "type": "session/event",
+            "sessionId": "s-1",
+            "event": {
+                "type": "tool/result",
+                "seq": 4,
+                "time": 0.0,
+                "data": {
+                    "turn": 1, "step": 1,
+                    "message": {
+                        "role": "user",
+                        "content": [{ "type": "tool-result", "toolCallId": "call-e-term", "content": [] }]
+                    }
+                }
+            },
+            "view": { "for": "result", "view": { "card": "terminal", "output": "ok", "exitCode": 0 } }
+        }));
+        let mapped = map_mux_frame(&result, &sink);
+        assert!(matches!(
+            &mapped.events[0],
+            ClientEvent::ToolDiff { id, path, old_text, new_text }
+                if id == "call-e-term" && path == "/a/b.rs" && old_text.as_deref() == Some("x") && new_text == "y"
+        ));
+        assert!(matches!(
+            &mapped.events[1],
+            ClientEvent::ToolCompleted { id, .. } if id == "call-e-term"
+        ));
+    }
+
 
     #[test]
     fn missing_view_still_infers_kind_from_tool_name() {
@@ -1629,5 +1851,64 @@ mod tests {
         assert!(matches!(&events[3], ClientEvent::TurnFinished { .. }));
         // last_seq ends at the final event so a re-baseline resumes past it.
         assert_eq!(sink.last_seq.load(std::sync::atomic::Ordering::Acquire), 4);
+    }
+
+    #[test]
+    fn history_replay_does_not_duplicate_text_when_chunks_and_final_share_history() {
+        let (sink, _rx) = test_sink();
+        sink.set_replaying(true);
+        let history = serde_json::json!([
+            session_event(
+                "assistant/chunk",
+                1,
+                serde_json::json!({
+                    "turn": 1, "step": 1,
+                    "chunk": { "type": "text-delta", "index": 0, "text": "Hello" }
+                })
+            ),
+            session_event(
+                "assistant/message",
+                2,
+                serde_json::json!({
+                    "turn": 1, "step": 1,
+                    "message": {
+                        "role": "assistant",
+                        "content": [{ "type": "text", "text": "Hello world" }]
+                    }
+                })
+            ),
+            session_event(
+                "turn/end",
+                3,
+                serde_json::json!({ "turn": 1, "reason": { "kind": "completed" } })
+            ),
+        ]);
+        let frames: Vec<MuxFrame> = history
+            .as_array()
+            .unwrap()
+            .iter()
+            .cloned()
+            .map(mux)
+            .collect();
+        let mut events = Vec::new();
+        for frame in &frames {
+            events.extend(map_mux_frame(frame, &sink).events);
+        }
+        let assistant_texts: Vec<&str> = events
+            .iter()
+            .filter_map(|event| match event {
+                ClientEvent::MessageChunk {
+                    role: MessageRole::Assistant,
+                    content,
+                    ..
+                } => Some(content.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(assistant_texts, vec!["Hello"]);
+        assert!(matches!(
+            events.last(),
+            Some(ClientEvent::TurnFinished { .. })
+        ));
     }
 }

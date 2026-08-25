@@ -137,10 +137,11 @@ pub fn codebuddy_internet_environment(paths: &AppPaths) -> String {
     }
 }
 
-/// Read the persisted codebuddy proxy debug flag. When `true` the proxy
-/// appends debug lines to `~/.kodex/logs/codebuddy-proxy.log`; when `false`
-/// (the default) file logging is suppressed. Surfaced on the CodeBuddy
-/// settings page so log output is opt-in.
+/// Read the persisted codebuddy proxy debug flag. Historically this toggled
+/// file-append logging to `~/.kodex/logs/codebuddy-proxy.log`; logging is now
+/// routed through `tracing` (target `codebuddy_proxy`) and controlled by the
+/// subscriber's `EnvFilter` (e.g. `RUST_LOG=codebuddy_proxy=debug`). The flag
+/// is kept for settings-page display but no longer gates log output.
 pub fn codebuddy_debug(paths: &AppPaths) -> bool {
     let secrets = load_provider_secrets(paths);
     matches!(

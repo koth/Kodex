@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest";
 import type { ToolInvocation } from "../../types";
 import { deriveToolPresentation } from "./tool-presentation";
+import {
+  classifyTool,
+  rawInputHasEditPayload,
+  diffPreviewFromRawInput,
+} from "./tool-card-analysis";
 
 function makeTool(overrides: Partial<ToolInvocation> = {}): ToolInvocation {
   return {
@@ -215,5 +220,96 @@ describe("deriveToolPresentation", () => {
 
     expect(presentation.headerLabel).toBe("已中断");
     expect(presentation.footerStatus).toEqual({ label: "已中断", tone: "warning" });
+  });
+  it("does not treat str_replace_editor view as a shell command", () => {
+    const presentation = deriveToolPresentation(
+      makeTool({
+        kind: "str_replace_editor",
+        name: "str_replace_editor",
+        raw_input: JSON.stringify({
+          command: "view",
+          path: "/repo/src/index.ts",
+        }),
+      }),
+    );
+
+    expect(presentation.presentationKind).toBe("generic");
+    expect(presentation.command).toBeNull();
+    expect(presentation.toolLabel).not.toBe("Shell");
+  });
+
+  it("does not treat str_replace_editor str_replace as a shell command", () => {
+    const presentation = deriveToolPresentation(
+      makeTool({
+        kind: "str_replace_editor",
+        name: "str_replace_editor",
+        raw_input: JSON.stringify({
+          command: "str_replace",
+          path: "/repo/src/index.ts",
+          old_str: "const x = 1;",
+          new_str: "const x = 2;",
+        }),
+      }),
+    );
+
+    expect(presentation.presentationKind).toBe("generic");
+    expect(presentation.command).toBeNull();
+    expect(presentation.toolLabel).not.toBe("Shell");
+  });
+});
+describe("str_replace_editor classification", () => {
+  function makeEditorTool(
+    command: string,
+    extra: Record<string, unknown> = {},
+  ): ToolInvocation {
+    return makeTool({
+      kind: "str_replace_editor",
+      name: "str_replace_editor",
+      raw_input: JSON.stringify({ command, path: "/repo/src/index.ts", ...extra }),
+    });
+  }
+
+  it("classifies view as exploring", () => {
+    const tool = makeEditorTool("view");
+    expect(classifyTool(tool)).toBe("exploring");
+  });
+
+  it("classifies str_replace as editing", () => {
+    const tool = makeEditorTool("str_replace", {
+      old_str: "const x = 1;",
+      new_str: "const x = 2;",
+    });
+    expect(rawInputHasEditPayload(tool)).toBe(true);
+    expect(classifyTool(tool)).toBe("editing");
+  });
+
+  it("classifies create as editing", () => {
+    const tool = makeEditorTool("create", { file_text: "new content" });
+    expect(rawInputHasEditPayload(tool)).toBe(true);
+    expect(classifyTool(tool)).toBe("editing");
+  });
+
+  it("classifies insert as editing", () => {
+    const tool = makeEditorTool("insert", { insert_line: 5, new_str: "inserted" });
+    expect(rawInputHasEditPayload(tool)).toBe(true);
+    expect(classifyTool(tool)).toBe("editing");
+  });
+
+  it("generates diff preview from str_replace old_str/new_str", () => {
+    const tool = makeEditorTool("str_replace", {
+      old_str: "const x = 1;",
+      new_str: "const x = 2;",
+    });
+    const preview = diffPreviewFromRawInput(tool);
+    expect(preview).not.toBeNull();
+    expect(preview!.path).toBe("/repo/src/index.ts");
+    expect(preview!.hunks.length).toBeGreaterThan(0);
+  });
+
+  it("generates diff preview from create file_text", () => {
+    const tool = makeEditorTool("create", { file_text: "line one\nline two" });
+    const preview = diffPreviewFromRawInput(tool);
+    expect(preview).not.toBeNull();
+    expect(preview!.path).toBe("/repo/src/index.ts");
   });
 });

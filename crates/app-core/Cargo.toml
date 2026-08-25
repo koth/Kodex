@@ -23,6 +23,7 @@ similar.workspace = true
 session-store = { path = "../session-store" }
 tokio.workspace = true
 toml_edit.workspace = true
+tracing.workspace = true
 uuid.workspace = true
 workspace-model = { path = "../workspace-model" }
 

@@ -40,6 +40,16 @@ export function deriveToolPresentation(tool: ToolInvocation): ToolPresentation {
   };
 }
 
+/**
+ * Tools that carry a `command` parameter as a sub-command selector (e.g.
+ * `str_replace_editor` with `view`/`create`/`str_replace`/`insert`) rather
+ * than a shell command.  These must never be treated as shell/command tools
+ * just because `hasCommandInRawInput` finds the `command` field.
+ */
+const NON_SHELL_TOOLS_WITH_COMMAND_PARAM = new Set([
+  "str_replace_editor",
+]);
+
 export function isCommandLikeTool(tool: ToolInvocation): boolean {
   const kind = tool.kind.trim().toLowerCase();
   const name = tool.name.trim().toLowerCase();
@@ -52,7 +62,10 @@ export function isCommandLikeTool(tool: ToolInvocation): boolean {
     kind === "terminal" ||
     name === "command" ||
     name === "terminal" ||
-    hasCommandInRawInput(tool.raw_input)
+    // Only fall back to raw-input sniffing for tools that are not known
+    // non-shell tools with a `command` sub-command selector.
+    (!NON_SHELL_TOOLS_WITH_COMMAND_PARAM.has(name) &&
+      hasCommandInRawInput(tool.raw_input))
   );
 }
 

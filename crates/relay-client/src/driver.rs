@@ -12,14 +12,6 @@ use anyhow::Result;
 use relay_protocol::{ControlRequest, ControlResponse, Envelope, Message, PairingConfirm};
 use std::sync::{Arc, Mutex};
 
-/// Optional diagnostic sink (release GUI builds have no usable stderr, so
-/// the desktop shell writes these lines to a log file).
-pub type DriverLogger = Arc<dyn Fn(&str) + Send + Sync>;
-
-fn noop_logger() -> DriverLogger {
-    Arc::new(|_| {})
-}
-
 use crate::connection::RelayConnection;
 use crate::crypto::SessionKey;
 use crate::RelayTransport;
@@ -62,7 +54,6 @@ pub struct RelayDriver<T: RelayTransport, H: ControlHandler, E: EventSource, P: 
     events: E,
     pairing: P,
     session_sink: Arc<Mutex<Option<(SessionKey, String)>>>,
-    log: DriverLogger,
 }
 
 impl<T: RelayTransport, H: ControlHandler, E: EventSource, P: PairingHandler> RelayDriver<T, H, E, P> {
@@ -92,25 +83,14 @@ impl<T: RelayTransport, H: ControlHandler, E: EventSource, P: PairingHandler> Re
             events,
             pairing,
             session_sink,
-            log: noop_logger(),
         }
-    }
-
-    /// Attach a diagnostic logger. Called lines are short and single-line.
-    pub fn with_logger(mut self, log: DriverLogger) -> Self {
-        self.log = log;
-        self
-    }
-
-    fn log_line(&self, line: &str) {
-        (self.log)(line);
     }
 
     /// Run the inbound + outbound loops until the connection closes or
     /// errors. Returns Ok on clean close, Err on a connection failure
     /// (caller may reconnect).
     pub async fn run(mut self) -> Result<()> {
-        self.log_line("driver run started");
+        tracing::debug!(target: "remote_control", "driver run started");
         let mut outbound_done = false;
         // Heartbeats are always sent as plaintext Envelope JSON, never
         // encrypted into an EncryptedEnvelope. The relay treats any frame
@@ -133,11 +113,11 @@ impl<T: RelayTransport, H: ControlHandler, E: EventSource, P: PairingHandler> Re
                     inbound = self.conn.recv_envelope() => {
                         match inbound {
                             Ok(None) => {
-                                self.log_line("recv: connection closed by peer");
+                                tracing::debug!(target: "remote_control", "recv: connection closed by peer");
                                 return Ok(());
                             }
                             Err(e) => {
-                                self.log_line(&format!("recv error: {e:#}"));
+                                tracing::warn!(target: "remote_control", error = %e, "recv error");
                                 return Err(e);
                             }
                             Ok(Some(envelope)) => {
@@ -148,7 +128,7 @@ impl<T: RelayTransport, H: ControlHandler, E: EventSource, P: PairingHandler> Re
                     }
                     _ = heartbeat_tick.tick() => {
                         if let Some(heartbeat) = &heartbeat {
-                            self.log_line("heartbeat sent");
+                            tracing::trace!(target: "remote_control", "heartbeat sent");
                             self.conn.send_heartbeat(heartbeat).await?;
                         }
                     }
@@ -158,11 +138,11 @@ impl<T: RelayTransport, H: ControlHandler, E: EventSource, P: PairingHandler> Re
                     inbound = self.conn.recv_envelope() => {
                         match inbound {
                             Ok(None) => {
-                                self.log_line("recv: connection closed by peer");
+                                tracing::debug!(target: "remote_control", "recv: connection closed by peer");
                                 return Ok(());
                             }
                             Err(e) => {
-                                self.log_line(&format!("recv error: {e:#}"));
+                                tracing::warn!(target: "remote_control", error = %e, "recv error");
                                 return Err(e);
                             }
                             Ok(Some(envelope)) => {
@@ -179,7 +159,7 @@ impl<T: RelayTransport, H: ControlHandler, E: EventSource, P: PairingHandler> Re
                     }
                     _ = heartbeat_tick.tick() => {
                         if let Some(heartbeat) = &heartbeat {
-                            self.log_line("heartbeat sent");
+                            tracing::trace!(target: "remote_control", "heartbeat sent");
                             self.conn.send_heartbeat(heartbeat).await?;
                         }
                     }
@@ -216,12 +196,12 @@ impl<T: RelayTransport, H: ControlHandler, E: EventSource, P: PairingHandler> Re
         match message {
             Message::ControlRequest(request) => {
                 let has_key = self.conn.has_session_key();
-                eprintln!("[remote-control] received ControlRequest op={:?} has_key={}", std::mem::discriminant(&request), has_key);
-                self.log_line(&format!(
-                    "received ControlRequest op={:?} has_key={}",
-                    std::mem::discriminant(&request),
-                    has_key
-                ));
+                tracing::debug!(
+                    target: "remote_control",
+                    op = ?std::mem::discriminant(&request),
+                    has_key,
+                    "received ControlRequest"
+                );
                 // Detach the handler: desktop handlers take a blocking
                 // registry mutex and can stall on slow paths (session-store
                 // IO, ACP reconnect). Holding the driver loop hostage means
@@ -236,7 +216,7 @@ impl<T: RelayTransport, H: ControlHandler, E: EventSource, P: PairingHandler> Re
                 let mut handle = tokio::task::spawn_blocking(move || {
                     futures::executor::block_on(handler.handle(request))
                 });
-                eprintln!("[remote-control] handler detached to blocking thread");
+                tracing::debug!(target: "remote_control", "handler detached to blocking thread");
                 let response = loop {
                     let tick = heartbeat_tick.as_deref_mut().expect(
                         "ControlRequest arm requires the loop's heartbeat interval",
@@ -272,24 +252,24 @@ impl<T: RelayTransport, H: ControlHandler, E: EventSource, P: PairingHandler> Re
                 };
                 let reply =
                     Envelope::from_message(Some(request_id), &Message::ControlResponse(response))?;
-                eprintln!("[remote-control] sending ControlResponse");
-                self.log_line("sending ControlResponse");
+                tracing::debug!(target: "remote_control", "sending ControlResponse");
                 self.conn.send_envelope(&reply).await
             }
             Message::PairingConfirm(confirm) => {
-                eprintln!("[remote-control] received PairingConfirm: phone={}, pc={}, material_len={}", confirm.phone_device_id, confirm.pc_device_id, confirm.session_key_material.len());
-                self.log_line(&format!(
-                    "received PairingConfirm error={:?} pc={}",
-                    confirm.error,
-                    confirm.pc_device_id
-                ));
+                tracing::info!(
+                    target: "remote_control",
+                    phone_device_id = %confirm.phone_device_id,
+                    pc_device_id = %confirm.pc_device_id,
+                    material_len = confirm.session_key_material.len(),
+                    error = ?&confirm.error,
+                    "received PairingConfirm"
+                );
                 // Failure reply (e.g. from a PairingResume the relay could
                 // not complete): nothing to derive, drop any stale session
                 // key so the next reconnect re-pairs instead of installing
                 // a mismatched key and failing to decrypt every frame.
                 if let Some(error) = &confirm.error {
-                    eprintln!("[remote-control] pairing error from relay: {error}");
-                    self.log_line(&format!("pairing error from relay: {error}"));
+                    tracing::warn!(target: "remote_control", error = %error, "pairing error from relay");
                     self.conn.clear_session_key();
                     if let Ok(mut guard) = self.session_sink.lock() {
                         *guard = None;
@@ -302,12 +282,11 @@ impl<T: RelayTransport, H: ControlHandler, E: EventSource, P: PairingHandler> Re
                 let (key, peer_device_id) = match self.pairing.derive_session_key(confirm).await {
                     Ok(v) => v,
                     Err(e) => {
-                        eprintln!("[remote-control] pairing key derivation failed: {e}");
+                        tracing::error!(target: "remote_control", error = %e, "pairing key derivation failed");
                         return Err(e);
                     }
                 };
-                eprintln!("[remote-control] installed session key, peer={}", peer_device_id);
-                self.log_line(&format!("installed session key, peer={peer_device_id}"));
+                tracing::info!(target: "remote_control", peer = %peer_device_id, "installed session key");
                 self.conn.install_session_key(key, peer_device_id);
                 if let Ok(mut guard) = self.session_sink.lock() {
                     *guard = self

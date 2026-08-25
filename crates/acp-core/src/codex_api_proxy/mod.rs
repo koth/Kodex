@@ -4,6 +4,7 @@ use futures::StreamExt;
 use http_body_util::{BodyExt, Full, StreamBody, combinators::BoxBody};
 use hyper::body::{Frame, Incoming};
 use hyper::header::CONTENT_TYPE;
+use reqwest::header::ACCEPT_LANGUAGE;
 use hyper::service::service_fn;
 use hyper::{Method, Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
@@ -1243,6 +1244,7 @@ async fn proxy_native_responses_request(
         client
             .post(upstream_url)
             .header(CONTENT_TYPE, "application/json")
+            .header(ACCEPT_LANGUAGE, "zh-CN")
             .bearer_auth(api_key)
             .body(serde_json::to_vec(&payload)?),
     )
@@ -1453,7 +1455,8 @@ async fn proxy_chat_completions_passthrough_forward(
     let client = upstream_client();
     let request = client
         .post(upstream_url)
-        .header(CONTENT_TYPE, "application/json");
+        .header(CONTENT_TYPE, "application/json")
+        .header(ACCEPT_LANGUAGE, "zh-CN");
     let request = if normalize_proxy_provider(provider) == "timiai" {
         with_timiai_headers(request, api_key, session_id)
     } else {
@@ -1512,7 +1515,8 @@ async fn proxy_chat_completions_codex_responses_request(
     let client = upstream_client();
     let request = client
         .post(upstream_url)
-        .header(CONTENT_TYPE, "application/json");
+        .header(CONTENT_TYPE, "application/json")
+        .header(ACCEPT_LANGUAGE, "zh-CN");
     let request = if normalize_proxy_provider(provider) == "timiai" {
         with_timiai_headers(request, api_key, session_id.unwrap_or_default())
     } else {
@@ -1655,7 +1659,8 @@ async fn proxy_native_codex_responses_compact_request(
         with_timiai_headers(
             client
                 .post(TIMIAI_RESPONSES_COMPACT_URL)
-                .header(CONTENT_TYPE, "application/json"),
+                .header(CONTENT_TYPE, "application/json")
+                .header(ACCEPT_LANGUAGE, "zh-CN"),
             &api_key,
             &session_id,
         )
@@ -1839,6 +1844,7 @@ async fn proxy_responses_to_anthropic_messages_request(
         client
             .post(upstream_url)
             .header(CONTENT_TYPE, "application/json")
+            .header(ACCEPT_LANGUAGE, "zh-CN")
             .bearer_auth(api_key)
             .body(serde_json::to_vec(&responses_payload)?),
     )
@@ -2072,7 +2078,8 @@ async fn proxy_completion_to_anthropic_messages_request_with_url(
     let client = upstream_client();
     let request = client
         .post(upstream_url)
-        .header(CONTENT_TYPE, "application/json");
+        .header(CONTENT_TYPE, "application/json")
+        .header(ACCEPT_LANGUAGE, "zh-CN");
     let request = if normalize_proxy_provider(provider) == "timiai" {
         with_timiai_headers(request, api_key, session_id)
     } else {
@@ -5286,30 +5293,9 @@ fn full_body(bytes: Bytes) -> ProxyBody {
     Full::new(bytes).map_err(|never| match never {}).boxed()
 }
 
-#[cfg(not(test))]
 fn append_codex_api_proxy_log(line: &str) {
-    let Some(home) = std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME")) else {
-        return;
-    };
-    let path = std::path::PathBuf::from(home)
-        .join(".kodex")
-        .join("logs")
-        .join("codex-api-proxy.log");
-    if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    if let Ok(mut file) = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)
-    {
-        use std::io::Write;
-        let _ = writeln!(file, "{line}");
-    }
+    tracing::debug!(target: "codex_api_proxy", "{}", line);
 }
-
-#[cfg(test)]
-fn append_codex_api_proxy_log(_line: &str) {}
 
 #[cfg(test)]
 mod tests;

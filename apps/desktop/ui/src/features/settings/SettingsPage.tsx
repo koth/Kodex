@@ -1186,6 +1186,22 @@ export function SettingsPage({
       cancelled = true;
     };
   }, [activeAgentTab, dshPresets]);
+  // dsh 的已安装版本不再随每次 settings snapshot 探测（避免启动时多跑一次
+  // `dsh --version`）。打开 dsh 设置页时按需拉取当前/最新版本用于展示。
+  useEffect(() => {
+    if (activeAgentTab !== "deepseek-harness" || dshVersionInfo !== null) return;
+    let cancelled = false;
+    settingsCheckDshUpdate()
+      .then((info) => {
+        if (!cancelled) setDshVersionInfo(info);
+      })
+      .catch(() => {
+        if (!cancelled) setDshVersionInfo(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [activeAgentTab, dshVersionInfo]);
   const handleSelectDshPreset = useCallback(async (presetId: string) => {
     setDshPresetSaving(true);
     setError(null);

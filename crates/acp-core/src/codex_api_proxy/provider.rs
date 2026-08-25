@@ -24,6 +24,7 @@ pub(super) fn anthropic_messages_base_request(
     client
         .post(url)
         .header(CONTENT_TYPE, "application/json")
+        .header(reqwest::header::ACCEPT_LANGUAGE, "zh-CN")
         .header("User-Agent", "claude-code/0.2.0")
         .header(ANTHROPIC_VERSION_HEADER.0, ANTHROPIC_VERSION_HEADER.1)
 }

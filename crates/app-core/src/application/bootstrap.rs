@@ -1381,28 +1381,15 @@ base_url = "http://localhost:17851/v1"
     }
 
     fn smoke_runtime_logs(app_paths: &AppPaths) -> String {
+        // ACP notification logs are now routed through `tracing` (target
+        // `acp_notifications`) into the host subscriber's output (e.g.
+        // `~/.kodex/logs/app.log` on the desktop). The per-session
+        // `acp-notifications-*.log` files no longer exist, so there is
+        // nothing to read here; surface the tracing log path instead.
         let logs_dir = app_paths.logs_dir();
-        let Ok(entries) = std::fs::read_dir(&logs_dir) else {
-            return format!("<no logs at {}>", logs_dir.display());
-        };
-        let mut logs = Vec::new();
-        for entry in entries.flatten() {
-            let path = entry.path();
-            let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
-                continue;
-            };
-            if !name.starts_with("acp-notifications-") {
-                continue;
-            }
-            match std::fs::read_to_string(&path) {
-                Ok(content) => logs.push(format!("{}:\n{}", name, content)),
-                Err(error) => logs.push(format!("{}: <read failed: {}>", name, error)),
-            }
-        }
-        if logs.is_empty() {
-            format!("<no acp notification logs at {}>", logs_dir.display())
-        } else {
-            logs.join("\n---\n")
-        }
+        format!(
+            "<ACP notification logs are now in tracing output at {}/app.log (target `acp_notifications`)>",
+            logs_dir.display()
+        )
     }
 }

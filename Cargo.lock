@@ -24,6 +24,7 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tokio-util",
+ "tracing",
  "uuid",
  "windows-sys 0.61.2",
  "workspace-model",
@@ -175,6 +176,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "toml_edit 0.22.27",
+ "tracing",
  "uuid",
  "workspace-model",
 ]
@@ -575,6 +577,8 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
+ "tracing",
+ "tracing-subscriber",
  "uuid",
 ]
 
@@ -1633,6 +1637,7 @@ dependencies = [
  "serde",
  "similar",
  "tempfile",
+ "tracing",
  "workspace-model",
 ]
 
@@ -2525,6 +2530,8 @@ dependencies = [
  "tauri-plugin-updater",
  "terminal-service",
  "tokio",
+ "tracing",
+ "tracing-subscriber",
  "uuid",
  "workspace-model",
 ]
@@ -3587,6 +3594,7 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tokio-tungstenite",
+ "tracing",
  "uuid",
  "workspace-model",
  "x25519-dalek",
@@ -4194,6 +4202,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
+ "tracing",
  "uuid",
  "workspace-model",
 ]

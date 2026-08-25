@@ -123,7 +123,7 @@ impl CodebuddyProxyManager {
         let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
         let handle = tauri::async_runtime::spawn(async move {
             if let Err(e) = codebuddy_proxy::server::run(proxy_cfg, shutdown_rx).await {
-                eprintln!("[codebuddy-proxy] server error: {e}");
+                tracing::error!(target: "codebuddy_proxy", error = %e, "server error");
             }
         });
         if let Ok(mut g) = self.task.lock() { *g = Some(handle); }

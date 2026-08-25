@@ -58,9 +58,20 @@ impl DshChild {
     pub fn enable_kill_on_drop_job(&mut self) {
         if let Ok(guard) = self.inner.lock()
             && let Some(child) = guard.as_ref()
-            && let Ok(job) = WindowsKillOnDropJob::for_child(child)
         {
-            self.kill_on_drop_job = Some(job);
+            match WindowsKillOnDropJob::for_child(child) {
+                Ok(job) => self.kill_on_drop_job = Some(job),
+                // A failure here (common when Kodex is already inside a job that
+                // disallows nesting) silently removes the only crash-path safety
+                // net: a shim's orphaned `node` then survives app exit. Log it so
+                // the port-kill fallback in `HarnessHost::teardown` is the known
+                // last line of defense rather than an invisible gap.
+                Err(err) => tracing::warn!(
+                    target: "dsh-bridge::spawn",
+                    error = %err,
+                    "kill-on-close job not attached; dsh tree relies on port-kill fallback",
+                ),
+            }
         }
     }
 
@@ -72,8 +83,16 @@ impl DshChild {
 
 /// Kill a spawned child: first close stdin (grace), then kill. Idempotent.
 pub fn kill_child(child: DshChild) -> std::io::Result<()> {
+    kill_child_reaped(child).map(|_| ())
+}
+
+/// Kill a spawned child and report whether the direct child was reaped;
+/// callers may use `false` to decide whether to run the slower port-owner
+/// fallback.
+pub fn kill_child_reaped(child: DshChild) -> std::io::Result<bool> {
     #[cfg(windows)]
     let kill_on_drop_job = child.kill_on_drop_job;
+    let mut reaped = false;
     if let Ok(mut guard) = child.inner.lock() {
         if let Some(mut proc) = guard.take() {
             // Closing stdin signals a graceful shutdown to the Node process;
@@ -87,7 +106,10 @@ pub fn kill_child(child: DshChild) -> std::io::Result<()> {
             let _ = proc.start_kill();
             for _ in 0..40 {
                 match proc.try_wait() {
-                    Ok(Some(_)) => break,
+                    Ok(Some(_)) => {
+                        reaped = true;
+                        break;
+                    }
                     Ok(None) => std::thread::sleep(Duration::from_millis(25)),
                     Err(_) => break,
                 }
@@ -99,8 +121,95 @@ pub fn kill_child(child: DshChild) -> std::io::Result<()> {
     // shim (e.g. the node process behind `volta run dsh`).
     #[cfg(windows)]
     drop(kill_on_drop_job);
-    Ok(())
+    Ok(reaped)
 }
+
+/// Reap whatever process still holds the harness loopback port. This is the
+/// last-resort fallback used after [`kill_child`] when the kill-on-close job
+/// could not be attached and the `dsh` shim (`cmd.exe`/volta) has already
+/// exited, leaving the real `node` server orphaned with no parent handle to
+/// kill. No-op when the direct kill already freed the port.
+///
+/// Implemented via `netstat` + `taskkill` (no unsafe FFI). The exact
+/// `127.0.0.1:<port>` local-address token is matched to avoid terminating an
+/// unrelated process that happens to share a port prefix.
+#[cfg(windows)]
+pub(crate) fn kill_port_owner(port: u16) {
+    let out = match std::process::Command::new("netstat")
+        .args(["-ano", "-p", "tcp"])
+        .output()
+    {
+        Ok(out) => out,
+        Err(err) => {
+            tracing::debug!(
+                target: "dsh-bridge::spawn",
+                error = %err,
+                "netstat failed for port-kill"
+            );
+            return;
+        }
+    };
+    let text = String::from_utf8_lossy(&out.stdout);
+    let local = format!("127.0.0.1:{port}");
+    // netstat lists both LISTENING and ESTABLISHED rows for the same port/PID;
+    // kill each owning PID at most once.
+    let mut killed = std::collections::HashSet::new();
+    for line in text.lines() {
+        let mut it = line.split_whitespace();
+        let proto = it.next();
+        let Some(laddr) = it.next() else {
+            continue;
+        };
+        if proto != Some("TCP") || laddr != local {
+            continue;
+        }
+        // `netstat -ano` lists the owning PID as the last whitespace token.
+        let Some(pid_token) = it.last() else { continue };
+        let Ok(pid) = pid_token.parse::<u32>() else {
+            continue;
+        };
+        if pid == 0 || killed.contains(&pid) {
+            continue;
+        }
+        match std::process::Command::new("taskkill")
+            .args(["/F", "/T", "/PID"])
+            .arg(pid.to_string())
+            .output()
+        {
+            Ok(o) if o.status.success() => {
+                killed.insert(pid);
+                tracing::info!(
+                    target: "dsh-bridge::spawn",
+                    port,
+                    pid,
+                    "killed orphan owning harness port"
+                );
+            }
+            Ok(o) => {
+                let stderr = String::from_utf8_lossy(&o.stderr);
+                tracing::debug!(
+                    target: "dsh-bridge::spawn",
+                    port,
+                    pid,
+                    stderr = stderr.trim(),
+                    "taskkill non-success for port owner"
+                );
+            }
+            Err(err) => {
+                tracing::debug!(
+                    target: "dsh-bridge::spawn",
+                    port,
+                    pid,
+                    error = %err,
+                    "taskkill failed for port owner"
+                );
+            }
+        }
+    }
+}
+
+#[cfg(not(windows))]
+pub(crate) fn kill_port_owner(_port: u16) {}
 
 /// Configuration for spawning a Kodex-managed `dsh web` process.
 pub struct SpawnDshWebConfig {
@@ -140,6 +249,27 @@ pub async fn spawn_dsh_web(config: SpawnDshWebConfig) -> anyhow::Result<(String,
         anyhow!("dsh CLI not found on PATH; install it with `npm i -g @deepseek-ai/dsh`")
     })?;
 
+    // On Windows, bypass the shim when possible. `dsh` on PATH is usually a
+    // `.cmd` shim (`npm` or `volta`); launching it via `cmd.exe /C` with
+    // `CREATE_NO_WINDOW` hides cmd.exe but the shim then re-launches a console
+    // grandchild (`volta.exe`/`node.exe`). That grandchild has no parent console
+    // (its parent was created with `CREATE_NO_WINDOW`), so Windows allocates a
+    // fresh visible console — the "window that flashes by". Resolving the real
+    // `node <dsh entry>` and spawning node directly keeps the console-subsystem
+    // process itself under `CREATE_NO_WINDOW` (no grandchild, no flash).
+    #[cfg(windows)]
+    if let Some((node, entry)) = resolve_dsh_direct_command(&dsh) {
+        tracing::info!(
+            target: "dsh-bridge::spawn",
+            node = %node.display(),
+            entry = %entry.display(),
+            "launching dsh web via node directly (bypassing shim)",
+        );
+        let mut cmd = Command::new(node);
+        cmd.arg(entry);
+        return spawn_with_args(cmd, &dsh, &["web", "--port", "0", "--no-open"], config).await;
+    }
+
     // `--port 0` lets the OS pick a free loopback port; the readiness line
     // reports the actual bound port.
     //
@@ -149,6 +279,11 @@ pub async fn spawn_dsh_web(config: SpawnDshWebConfig) -> anyhow::Result<(String,
     // and ignores shebangs on Unix, so wrap the same way kodex's ACP spawn
     // does (`agent_spawn_command`).
     let mut cmd = if cfg!(windows) && is_windows_batch_script(&dsh) {
+        tracing::warn!(
+            target: "dsh-bridge::spawn",
+            dsh = %dsh.display(),
+            "falling back to shim launch (direct node resolution unavailable)",
+        );
         let mut wrapper = Command::new("cmd.exe");
         wrapper.arg("/C").arg(&dsh);
         wrapper
@@ -370,6 +505,113 @@ fn find_dsh_binary() -> Option<std::path::PathBuf> {
     find_binary("dsh")
 }
 
+/// Resolve the real `node <dsh entry>` launch for the installed `dsh` CLI on
+/// this machine, bypassing the npm/volta shim. Returns `(node, entry)` when
+/// resolvable. Used by callers that must run a `dsh` subcommand (e.g. a version
+/// check) without letting the shim chain (`cmd.exe → volta.exe → node`) open a
+/// visible console window.
+pub fn resolve_dsh_launch() -> Option<(std::path::PathBuf, std::path::PathBuf)> {
+    let dsh = find_dsh_binary()?;
+    #[cfg(windows)]
+    {
+        if let Some(direct) = resolve_dsh_direct_command(&dsh) {
+            return Some(direct);
+        }
+    }
+    None
+}
+
+/// Resolve the real `node <npm-cli.js>` launch behind the npm shim, so the npm
+/// registry query can run without letting the npm/Volta shim chain open a
+/// visible console window on Windows.
+#[cfg(windows)]
+pub fn resolve_npm_launch() -> Option<(std::path::PathBuf, std::path::PathBuf)> {
+    let npm = search_paths()
+        .iter()
+        .map(|dir| dir.join("npm.cmd"))
+        .find(|candidate| candidate.is_file())?;
+    let text = std::fs::read_to_string(&npm).ok()?;
+
+    let node = if is_volta_npm_shim(&text, &npm) {
+        find_volta_node().or_else(|| find_binary("node"))
+    } else {
+        find_binary("node").or_else(find_volta_node)
+    }?;
+
+    // npm-style shim: extract the `node_modules/.../npm-cli.js` path from the
+    // shim text, if present.
+    if let Some(entry) = parse_npm_shim_entry(&text, &npm) {
+        return Some((node, entry));
+    }
+
+    // Volta's npm launcher is a tiny `npm.exe` (not a batch file with an npm
+    // JS path in it). Locate the npm installation that Volta manages.
+    if is_volta_npm_shim(&text, &npm) {
+        let entry = resolve_volta_npm_entry()?;
+        return Some((node, entry));
+    }
+
+    None
+}
+
+/// Whether `npm.cmd` is a Volta launcher shim rather than the standard npm shim.
+#[cfg(windows)]
+fn is_volta_npm_shim(text: &str, shim: &std::path::Path) -> bool {
+    text.contains("volta")
+        || text.contains("%~dpn0.exe")
+        || shim.to_string_lossy().contains("Volta")
+}
+
+/// Locate the npm CLI entry managed by Volta under
+/// `%LOCALAPPDATA%\Volta\tools\image\npm\<version>\bin\npm-cli.js`.
+#[cfg(windows)]
+fn resolve_volta_npm_entry() -> Option<std::path::PathBuf> {
+    let mut roots: Vec<std::path::PathBuf> = Vec::new();
+    if let Some(local) = std::env::var_os("LOCALAPPDATA") {
+        roots.push(
+            std::path::PathBuf::from(local)
+                .join("Volta")
+                .join("tools")
+                .join("image")
+                .join("npm"),
+        );
+    }
+    if let Some(program_files) = std::env::var_os("ProgramFiles") {
+        roots.push(
+            std::path::PathBuf::from(program_files)
+                .join("Volta")
+                .join("tools")
+                .join("image")
+                .join("npm"),
+        );
+    }
+    for npm_root in roots {
+        let Ok(rd) = std::fs::read_dir(&npm_root) else {
+            continue;
+        };
+        let mut versions: Vec<std::path::PathBuf> = rd
+            .flatten()
+            .map(|entry| entry.path())
+            .filter(|p| p.is_dir())
+            .collect();
+        versions.sort();
+        for version in versions.into_iter().rev() {
+            let entry = version.join("bin").join("npm-cli.js");
+            if entry.is_file() {
+                return Some(entry);
+            }
+        }
+    }
+    None
+}
+
+/// No-op on non-Windows; npm on Unix can be spawned directly without a
+/// console-window shim.
+#[cfg(not(windows))]
+pub fn resolve_npm_launch() -> Option<(std::path::PathBuf, std::path::PathBuf)> {
+    None
+}
+
 /// Whether `path` is a Windows batch script (`.cmd`/`.bat`), which cannot be
 /// executed directly by `Command::new` and must go through `cmd.exe /C`.
 #[cfg(windows)]
@@ -403,6 +645,177 @@ fn is_script_file(path: &std::path::Path) -> bool {
 #[cfg(windows)]
 fn is_script_file(_path: &std::path::Path) -> bool {
     false
+}
+
+/// Resolve the real `node <dsh entry>` invocation behind a Windows shim, so the
+/// console-subsystem `node` can be spawned directly under `CREATE_NO_WINDOW`
+/// instead of through the shim chain (which lets `volta.exe`/`node.exe` allocate
+/// a fresh visible console). Returns `None` when the shim cannot be resolved —
+/// the caller then falls back to the shim path.
+///
+/// Handles the two common npm/volta shim shapes:
+/// - npm `.cmd`: the entry `.js` path is spelled out in the shim text.
+/// - volta `.cmd`: `volta run <name>`, resolved via Volta's package layout.
+#[cfg(windows)]
+fn resolve_dsh_direct_command(dsh: &std::path::Path) -> Option<(std::path::PathBuf, std::path::PathBuf)> {
+    if !is_windows_batch_script(dsh) {
+        return None;
+    }
+    let text = std::fs::read_to_string(dsh).ok()?;
+    // For a volta shim, prefer Volta's real node image over `node` on PATH:
+    // `C:\Program Files\Volta\node.exe` is itself a small shim that re-launches
+    // the real node, which would allocate a fresh visible console (the flash)
+    // just like the dsh shim does. The real node lives under
+    // `%LOCALAPPDATA%\Volta\tools\image\node\<ver>\node.exe`.
+    let node = if text.contains("volta") {
+        find_volta_node().or_else(|| find_binary("node"))
+    } else {
+        find_binary("node").or_else(find_volta_node)
+    }?;
+
+    // npm-style shim: extract the `node_modules/.../bin.js` path from the text.
+    if let Some(entry) = parse_npm_shim_entry(&text, dsh) {
+        return Some((node, entry));
+    }
+
+    // volta-style shim: `volta run dsh ...` — locate the installed package by
+    // its bin name under Volta's image package layout.
+    if text.contains("volta") {
+        let name = dsh.file_stem()?.to_str()?.to_string();
+        let entry = resolve_volta_package_entry(&name)?;
+        return Some((node, entry));
+    }
+
+    None
+}
+
+/// Extract the `node_modules/<pkg>/<entry>.js` path an npm `.cmd` shim invokes.
+/// The shim text uses `%~dp0` for the shim's directory, which we expand.
+#[cfg(windows)]
+fn parse_npm_shim_entry(text: &str, shim: &std::path::Path) -> Option<std::path::PathBuf> {
+    let dir = shim.parent()?;
+    let parts: Vec<&str> = text.split('"').collect();
+    // After split on `"`, odd indices are the quoted token contents.
+    for token in parts.iter().skip(1).step_by(2) {
+        if !token.ends_with(".js") || !token.contains("node_modules") {
+            continue;
+        }
+        let expanded = token.replace("%~dp0", dir.to_string_lossy().as_ref());
+        let candidate = std::path::PathBuf::from(expanded.trim());
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
+/// Resolve a Volta-installed global package's entry file for the given shim
+/// name. Volta stores packages under `%LOCALAPPDATA%\Volta\tools\image\packages`
+/// in two shapes:
+/// - unscoped: `packages\<name>\node_modules\<name>\package.json`
+/// - scoped:   `packages\<scope>\<name>\node_modules\<scope>\<name>\package.json`
+/// We only probe those two exact slots — never descending into dependency
+/// `node_modules` — then read `package.json`'s `bin.<name>` entry.
+#[cfg(windows)]
+fn resolve_volta_package_entry(name: &str) -> Option<std::path::PathBuf> {
+    let local = std::env::var_os("LOCALAPPDATA")?;
+    let root = std::path::PathBuf::from(local)
+        .join("Volta")
+        .join("tools")
+        .join("image")
+        .join("packages");
+
+    // Unscoped package: packages\<name>\node_modules\<name>\package.json
+    let unscoped = root
+        .join(name)
+        .join("node_modules")
+        .join(name)
+        .join("package.json");
+    if let Some(entry) = bin_entry_from_package_json(&unscoped, name) {
+        return Some(entry);
+    }
+
+    // Scoped package: iterate `@scope` directories under `packages`.
+    let rd = std::fs::read_dir(&root).ok()?;
+    for scope_entry in rd.flatten() {
+        let scope = scope_entry.path();
+        let is_scope = scope
+            .file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|n| n.starts_with('@'));
+        if !scope.is_dir() || !is_scope {
+            continue;
+        }
+        let pkg_json = scope
+            .join(name)
+            .join("node_modules")
+            .join(scope.file_name()?)
+            .join(name)
+            .join("package.json");
+        if let Some(entry) = bin_entry_from_package_json(&pkg_json, name) {
+            return Some(entry);
+        }
+    }
+    None
+}
+
+/// Read `package.json` and return the absolute path of the `bin.<name>` entry.
+#[cfg(windows)]
+fn bin_entry_from_package_json(pkg_json: &std::path::Path, name: &str) -> Option<std::path::PathBuf> {
+    let raw = std::fs::read_to_string(pkg_json).ok()?;
+    let value: serde_json::Value = serde_json::from_str(&raw).ok()?;
+    let entry = match value.get("bin")? {
+        serde_json::Value::String(s) => s.clone(),
+        serde_json::Value::Object(map) => map.get(name)?.as_str()?.to_string(),
+        _ => return None,
+    };
+    let candidate = pkg_json.parent()?.join(entry.as_str());
+    candidate.is_file().then_some(candidate)
+}
+
+/// Locate Volta's real `node.exe` under `%LOCALAPPDATA%\Volta\tools\image\node`
+/// (falling back to `%ProgramFiles%\Volta\tools\image\node`). This is the actual
+/// node binary, not the `C:\Program Files\Volta\node.exe` shim that re-launches
+/// it. Volta names version dirs like `22.22.1`; the newest is preferred.
+#[cfg(windows)]
+fn find_volta_node() -> Option<std::path::PathBuf> {
+    let mut roots: Vec<std::path::PathBuf> = Vec::new();
+    if let Some(local) = std::env::var_os("LOCALAPPDATA") {
+        roots.push(
+            std::path::PathBuf::from(local)
+                .join("Volta")
+                .join("tools")
+                .join("image")
+                .join("node"),
+        );
+    }
+    if let Some(program_files) = std::env::var_os("ProgramFiles") {
+        roots.push(
+            std::path::PathBuf::from(program_files)
+                .join("Volta")
+                .join("tools")
+                .join("image")
+                .join("node"),
+        );
+    }
+    for node_root in roots {
+        let Ok(rd) = std::fs::read_dir(&node_root) else {
+            continue;
+        };
+        let mut versions: Vec<std::path::PathBuf> = rd
+            .flatten()
+            .map(|entry| entry.path())
+            .filter(|p| p.is_dir())
+            .collect();
+        versions.sort();
+        for v in versions.into_iter().rev() {
+            let node = v.join("node.exe");
+            if node.is_file() {
+                return Some(node);
+            }
+        }
+    }
+    None
 }
 
 fn find_binary(binary: &str) -> Option<std::path::PathBuf> {

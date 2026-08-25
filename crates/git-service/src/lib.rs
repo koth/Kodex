@@ -1,4 +1,4 @@
-use anyhow::{Context, bail};
+﻿use anyhow::{Context, bail};
 use git2::{Repository, Status, StatusOptions};
 use similar::{ChangeTag, TextDiff};
 use std::path::Component;
@@ -137,9 +137,10 @@ impl GitService {
             // 静默返回会让前端误以为成功（"点击暂存但没反应"）。
             // 请求的路径在 git status 中无任何匹配时打日志，便于定位
             // 路径规范化/状态过滤的边界问题。
-            eprintln!(
-                "[git-service] stage_status_paths: 请求的路径在 git status 中无匹配: {:?}",
-                requested
+            tracing::warn!(
+                target: "git_service",
+                requested = ?requested,
+                "stage_status_paths: requested paths have no match in git status"
             );
             return Ok(());
         }

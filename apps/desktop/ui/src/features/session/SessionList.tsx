@@ -18,6 +18,7 @@ import { onSessionStatus } from "../../lib/events";
 import { open } from "@tauri-apps/plugin-dialog";
 import { RemoteOpenPanel } from "../workbench/RemoteOpenPanel";
 import { AccountButton } from "../account/AccountButton";
+import { AgentIcon, resolveAgentKind } from "./AgentIcon";
 import "./SessionList.css";
 import { appConfirm, archiveWorkspaceConfirmRequest } from "../../lib/confirm";
 
@@ -1219,6 +1220,12 @@ function ThreadRow({
           title={indicatorLabel}
           aria-label={indicatorLabel}
         />
+        <span className="sl-agent-badge" title={agentLabel ?? undefined}>
+          {/* Empty badge for unknown agents keeps every row's title aligned. */}
+          {resolveAgentKind(session.agent_cli) !== "unknown" && (
+            <AgentIcon agentCli={session.agent_cli} />
+          )}
+        </span>
         <span className="sl-item-main">
           <span className="sl-item-title" title={sessionTooltip}>{session.title}</span>
         </span>
@@ -1257,6 +1264,7 @@ function formatAgentLabel(value?: string | null): string | null {
   const raw = value?.trim();
   if (!raw) return "未知";
   const normalized = raw.toLowerCase();
+  if (normalized.includes("deepseek")) return "DeepSeek";
   if (normalized.includes("codebuddy")) return "CodeBuddy";
   if (normalized.includes("claude")) return "Claude";
   if (normalized.includes("codex")) return "Codex";

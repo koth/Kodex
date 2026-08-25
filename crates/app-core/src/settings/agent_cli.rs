@@ -18,12 +18,40 @@ fn npm_program() -> &'static str {
 /// Read the installed `dsh` CLI version via `dsh --version`, parsing the first
 /// semver-looking token from stdout (e.g. `dsh 1.2.3` → `1.2.3`).
 fn dsh_current_version(binary_path: &Path) -> Option<String> {
-    let output = Command::new(binary_path).arg("--version").output().ok()?;
+    let output = dsh_version_command(binary_path).output().ok()?;
     if !output.status.success() {
         return None;
     }
     let stdout = String::from_utf8_lossy(&output.stdout);
     parse_version_token(&stdout)
+}
+
+/// Build the `dsh --version` command. On Windows, run the real `node` + dsh
+/// entry directly (no npm/volta shim) with `CREATE_NO_WINDOW` so the shim chain
+/// (`cmd.exe → volta.exe → node.exe`) does not open a visible console window —
+/// the "window that flashes by" seen at agent startup. Falls back to the shim
+/// path when the direct launch cannot be resolved.
+#[cfg(windows)]
+fn dsh_version_command(binary_path: &Path) -> Command {
+    use std::os::windows::process::CommandExt;
+    if let Some((node, entry)) = dsh_bridge::resolve_dsh_launch() {
+        let mut command = Command::new(node);
+        command.arg(entry).arg("--version");
+        command.creation_flags(0x08000000); // CREATE_NO_WINDOW
+        command
+    } else {
+        let mut command = Command::new(binary_path);
+        command.arg("--version");
+        command.creation_flags(0x08000000); // CREATE_NO_WINDOW
+        command
+    }
+}
+
+#[cfg(not(windows))]
+fn dsh_version_command(binary_path: &Path) -> Command {
+    let mut command = Command::new(binary_path);
+    command.arg("--version");
+    command
 }
 
 /// Extract the first semver-looking token (`1.2.3`, `v1.2.3`) from version
@@ -38,12 +66,32 @@ fn parse_version_token(output: &str) -> Option<String> {
         .map(|token| token.trim_start_matches('v').to_string())
 }
 
-/// Query the npm registry for the latest published `dsh` version.
-fn dsh_latest_version() -> Option<String> {
-    // Resolve npm to an absolute path and inject the augmented search PATH:
-    // GUI-launched apps (Finder/Dock) inherit a minimal PATH without
-    // /opt/homebrew/bin or version-manager dirs, so a bare `Command::new("npm")`
-    // fails to locate npm and the version check silently returns None.
+/// Build the `npm view` command used for the latest-version check.
+///
+/// Resolve npm to an absolute path and inject the augmented search PATH:
+/// GUI-launched apps (Finder/Dock) inherit a minimal PATH without
+/// /opt/homebrew/bin or version-manager dirs, so a bare `Command::new("npm")`
+/// fails to locate npm and the version check silently returns None.
+/// On Windows, prefer running the real `node` + `npm-cli.js` directly so the
+/// npm command-line wrapper (`.cmd`/Volta shim) does not flash a console
+/// window during the settings version check. The shim fallback is also
+/// created with `CREATE_NO_WINDOW` for systems where the direct launch cannot
+/// be resolved.
+fn npm_view_command() -> Command {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        if let Some((node, entry)) = dsh_bridge::resolve_npm_launch() {
+            let mut command = Command::new(node);
+            command.arg(entry);
+            if let Ok(joined) = std::env::join_paths(search_paths()) {
+                command.env("PATH", joined);
+            }
+            command.creation_flags(0x08000000); // CREATE_NO_WINDOW
+            return command;
+        }
+    }
+
     let resolved = search_paths()
         .iter()
         .map(|dir| dir.join(npm_program()))
@@ -53,7 +101,19 @@ fn dsh_latest_version() -> Option<String> {
     if let Ok(joined) = std::env::join_paths(search_paths()) {
         command.env("PATH", joined);
     }
-    let output = command
+
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(0x08000000); // CREATE_NO_WINDOW
+    }
+
+    command
+}
+
+/// Query the npm registry for the latest published `dsh` version.
+fn dsh_latest_version() -> Option<String> {
+    let output = npm_view_command()
         .args(["view", DSH_NPM_PACKAGE, "version"])
         .output()
         .ok()?;
@@ -207,16 +267,10 @@ pub fn command_for_agent_with_paths(agent: AgentCliId, paths: &AppPaths) -> Opti
 pub fn detect_agent(agent: AgentCliId) -> AgentCliStatus {
     let definition = definition(agent).expect("supported agent id");
     let detected_path = find_binary(definition.binary);
-    // DeepSeek Harness: surface the installed version so the settings page can
-    // show it. `latest_version` stays None here — it requires an npm registry
-    // round-trip, so it is only fetched on an explicit update check
-    // (`dsh_version_info`) rather than on every settings snapshot.
-    let (current_version, latest_version) =
-        if agent == AgentCliId::DeepSeekHarness {
-            (detected_path.as_deref().and_then(dsh_current_version), None)
-        } else {
-            (None, None)
-        };
+    // DeepSeek Harness: do NOT spawn `dsh --version` here. The settings page
+    // fetches the installed version on demand (when the dsh tab is opened) via
+    // `dsh_version_info`, so a plain settings snapshot / app startup does not
+    // pay for an extra subprocess + npm registry round-trip.
     AgentCliStatus {
         id: definition.id,
         label: definition.label.to_string(),
@@ -224,8 +278,8 @@ pub fn detect_agent(agent: AgentCliId) -> AgentCliStatus {
         installed: detected_path.is_some(),
         detected_path,
         selected: false,
-        current_version,
-        latest_version,
+        current_version: None,
+        latest_version: None,
     }
 }
 

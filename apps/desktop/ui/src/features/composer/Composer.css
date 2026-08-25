@@ -1,4 +1,4 @@
-.composer {
+﻿.composer {
   flex-shrink: 0;
   width: min(var(--conversation-column-width), var(--conversation-composer-max));
   min-width: min(var(--conversation-column-min), 100%);
@@ -2172,6 +2172,31 @@
   font-weight: 650;
   max-width: 160px;
 }
+
+  /* Read-only mode display (dsh harness): no dropdown, no chevron, static pill. */
+  .composer-control-select.is-readonly {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    min-height: 40px;
+    padding: 0 12px;
+    border: 1px solid color-mix(in srgb, var(--border-strong) 40%, transparent);
+    border-radius: 13px;
+    background:
+      linear-gradient(
+        180deg,
+        color-mix(in srgb, var(--text-strong) 4%, transparent) 0%,
+        color-mix(in srgb, var(--text-strong) 2%, transparent) 100%
+      );
+    box-shadow: inset 0 1px 0 color-mix(in srgb, var(--text-strong) 5%, transparent);
+    cursor: default;
+    pointer-events: none;
+  }
+
+  .composer-control-select.is-readonly .composer-control-value {
+    font-size: 14px;
+    font-weight: 650;
+  }
 
 .composer-control-icon-slot {
   display: inline-grid;

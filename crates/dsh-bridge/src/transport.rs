@@ -297,6 +297,19 @@ impl SseStream {
                 };
                 match msg {
                     tokio_tungstenite::tungstenite::Message::Text(text) => {
+                        // Debug aid for the mojibake hunt: log a content
+                        // fingerprint of any frame carrying assistant text so a
+                        // corrupted payload can be traced back to its source
+                        // (dsh host vs. our own mapping).
+                        if text.contains("assistant/chunk") || text.contains("assistant/message") {
+                            tracing::debug!(
+                                target: "dsh-bridge::ws",
+                                bytes = text.len(),
+                                fffd = text.matches('\u{FFFD}').count(),
+                                latin1 = text.matches('Ã').count(),
+                                "assistant frame fingerprint"
+                            );
+                        }
                         match serde_json::from_str::<ServerRequest>(&text) {
                             Ok(req) => Some(req),
                             Err(err) => {

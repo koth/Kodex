@@ -22,6 +22,33 @@ use tauri::Manager;
 const KODEX_SSH_ASKPASS_ENV: &str = "KODEX_SSH_ASKPASS";
 const KODEX_SSH_ASKPASS_PASSWORD_ENV: &str = "KODEX_SSH_ASKPASS_PASSWORD";
 
+/// Install a file-backed tracing subscriber so `tracing` output from the
+/// desktop app and its dependencies (e.g. `dsh-bridge`) lands in
+/// `~/.kodex/logs/app.log` instead of being dropped by the default no-op
+/// subscriber. Honours `RUST_LOG` when set.
+fn init_tracing() {
+    let log_path = app_core::AppPaths::resolve()
+        .map(|paths| paths.logs_dir().join("app.log"))
+        .unwrap_or_else(|_| std::env::temp_dir().join("kodex-app.log"));
+    if let Some(parent) = log_path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let Ok(file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)
+    else {
+        return;
+    };
+    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_writer(move || file.try_clone().expect("clone app.log handle"))
+        .with_ansi(false)
+        .try_init();
+}
+
 fn main() {
     if std::env::var_os(KODEX_SSH_ASKPASS_ENV).as_deref() == Some(std::ffi::OsStr::new("1")) {
         if let Some(password) = std::env::var_os(KODEX_SSH_ASKPASS_PASSWORD_ENV) {
@@ -33,6 +60,7 @@ fn main() {
         return;
     }
 
+    init_tracing();
     app_core::startup_perf::start_run("maju-desktop");
     app_core::startup_perf::mark("desktop/main_enter", "");
     install_panic_logger();
@@ -150,7 +178,6 @@ fn main() {
             commands::fs::fs_delete_file,
             commands::fs::fs_reveal,
             commands::fs::fs_path_exists,
-            commands::fs::debug_log_event,
             commands::fs::fs_find_by_name,
             commands::fs::fs_mention_suggest,
             commands::fs::companion_stage_model,
@@ -332,25 +359,17 @@ fn start_remote_control_driver(app: tauri::AppHandle) {
                     conn
                 }
                 Err(e) => {
-                    app_for_loop
-                        .state::<AppState>()
-                        .remote_control()
-                        .log_driver_event(&format!("relay dial failed: {e:#}; retry in {backoff:?}"));
+                    tracing::warn!(
+                        target: "remote_control",
+                        error = %e,
+                        backoff = ?backoff,
+                        "relay dial failed; retrying"
+                    );
                     tokio::time::sleep(backoff).await;
                     backoff = (backoff * 2).min(Duration::from_secs(60));
                     continue;
                 }
             };
-            {
-                let manager_for_err = app_for_loop.state::<AppState>().remote_control();
-                conn.set_error_log(Arc::new(move |line: &str| {
-                    manager_for_err.log_driver_event(line);
-                }));
-                let manager_for_send = app_for_loop.state::<AppState>().remote_control();
-                conn.set_send_log(Arc::new(move |line: &str| {
-                    manager_for_send.log_driver_event(line);
-                }));
-            }
             // Authenticate with the device identity (Ed25519 signature), then
             // register the current pairing code so a scanning phone's
             // PairingInitiate can be routed to this PC. Both are fail-open:
@@ -377,11 +396,7 @@ fn start_remote_control_driver(app: tauri::AppHandle) {
                 None => false,
             };
             if !authenticated {
-                eprintln!("[remote-control] relay auth failed; reconnecting");
-                app_for_loop
-                    .state::<AppState>()
-                    .remote_control()
-                    .log_driver_event("relay auth failed; reconnecting");
+                tracing::warn!(target: "remote_control", "relay auth failed; reconnecting");
                 let _ = conn.close().await;
                 app_for_loop
                     .state::<AppState>()
@@ -415,10 +430,7 @@ fn start_remote_control_driver(app: tauri::AppHandle) {
                             .state::<AppState>()
                             .remote_control()
                             .mark_pairing_registered();
-                        app_for_loop
-                            .state::<AppState>()
-                            .remote_control()
-                            .log_driver_event("pairing code registered with relay");
+                        tracing::info!(target: "remote_control", "pairing code registered with relay");
                     }
                 }
             }
@@ -426,10 +438,7 @@ fn start_remote_control_driver(app: tauri::AppHandle) {
                 .state::<AppState>()
                 .remote_control()
                 .set_connected(true);
-            app_for_loop
-                .state::<AppState>()
-                .remote_control()
-                .log_driver_event("connected to relay; driver starting");
+            tracing::info!(target: "remote_control", "connected to relay; driver starting");
             // Run the control-request router + event pusher. Select against
             // `pairing_notify` so a freshly minted pairing code interrupts the
             // run, drops this connection, and reconnects to re-register the
@@ -440,17 +449,13 @@ fn start_remote_control_driver(app: tauri::AppHandle) {
                 crate::remote_control_bridge::AppUpdateEventSource::new(app_for_loop.clone());
             let pairing =
                 crate::remote_control_bridge::DesktopPairingHandler::new(app_for_loop.clone());
-            let manager_for_log = app_for_loop.state::<AppState>().remote_control();
             let driver = RelayDriver::new_with_session_sink(
                 conn,
                 handler,
                 events,
                 pairing,
                 session_sink.clone(),
-            )
-            .with_logger(Arc::new(move |line: &str| {
-                manager_for_log.log_driver_event(line);
-            }));
+            );
             let run_fut = driver.run();
             tokio::pin!(run_fut);
             tokio::select! {
@@ -459,17 +464,10 @@ fn start_remote_control_driver(app: tauri::AppHandle) {
                         Ok(()) => "clean close".to_string(),
                         Err(e) => format!("error: {e:#}"),
                     };
-                    app_for_loop
-                        .state::<AppState>()
-                        .remote_control()
-                        .log_driver_event(&format!("driver run ended: {detail}"));
+                    tracing::info!(target: "remote_control", detail = %detail, "driver run ended");
                 }
                 _ = pairing_notify.notified() => {
-                    eprintln!("[remote-control] pairing code minted; reconnecting to register");
-                    app_for_loop
-                        .state::<AppState>()
-                        .remote_control()
-                        .log_driver_event("pairing code minted; reconnecting to register");
+                    tracing::info!(target: "remote_control", "pairing code minted; reconnecting to register");
                 }
             }
             app_for_loop

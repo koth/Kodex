@@ -99,6 +99,11 @@ vi.mock("../../lib/tauri", async () => {
     settingsSaveCustomProvider: vi.fn(),
     settingsSaveLspServer: vi.fn(),
     settingsResetLspServer: vi.fn(),
+    settingsCheckDshUpdate: vi.fn().mockResolvedValue({
+      current_version: null,
+      latest_version: null,
+      update_available: false,
+    }),
     usageGetSummary: vi.fn(),
     usageGetDailySeries: vi.fn().mockResolvedValue([]),
     usageGetRequestCount: vi.fn().mockResolvedValue(0),

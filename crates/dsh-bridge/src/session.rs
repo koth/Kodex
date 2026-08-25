@@ -118,23 +118,13 @@ pub fn run_harness_session(
         session_id: session_id.clone(),
     });
 
-    // Publish the model selector: fetch `session.models` and translate it into
-    // a `SessionConfigUpdated` carrying a Model control so the composer's
-    // model dropdown renders instead of spinning.
-    let models_start = Instant::now();
-    emit_model_control(&client, &host, &session_id, &tx_events);
-    tracing::info!(
-        target: "dsh-bridge::session",
-        elapsed_ms = models_start.elapsed().as_millis() as u64,
-        session_id = %session_id,
-        "session.models published",
     // Persist/restore the session's actual preset so reconnect/resume shows
     // the correct preset instead of falling back to the global default.
     // - New session: dsh acks `session.create` with the actual preset.
     // - Resume: dsh does not echo the preset back and we don't send one (to
     //   avoid `agent-preset-conflict`), but the session's own preset is still
     //   known from the store — re-emit it so the UI restores correctly.
-    let preset_to_publish = create_value
+    let mut session_preset: Option<String> = create_value
         .agent_preset
         .as_deref()
         .filter(|p| !p.is_empty())
@@ -143,24 +133,39 @@ pub fn run_harness_session(
             // `config.agent_preset` even though dsh's `session.create` must
             // not receive it.
             config.agent_preset.as_deref().filter(|p| !p.is_empty())
-        });
-    if let Some(preset) = preset_to_publish {
+        })
+        .map(|p| p.to_string());
+    if let Some(preset) = &session_preset {
         let _ = tx_events.send(ClientEvent::SessionConfigValueChanged {
             control_id: "agent_preset".to_string(),
-            value_id: preset.to_string(),
+            value_id: preset.clone(),
             value_label: None,
         });
     }
 
     // Publish the config selectors: fetch `session.models` and `agentPreset.list`
-    // and translate them into a `SessionConfigUpdated` carrying the Model and
-    // Mode (agent-preset) controls so the composer dropdowns render.
+    // and translate them into a single `SessionConfigUpdated` carrying the
+    // Model and Mode (agent-preset) controls so the composer dropdowns render.
+    // Pass `session_preset` so the Mode control immediately shows the
+    // session's actual preset instead of the deployment default. Previously
+    // a separate `emit_model_control(None)` call first published the default
+    // preset, then `emit_config_controls` corrected it — but during resume the
+    // `restore_pending_model_selection` flow sends a `SetModel` whose reply
+    // also re-published with `None`, racing the correct value and leaving the
+    // Mode control stuck on the default after a session switch-back.
+    let models_start = Instant::now();
     emit_config_controls(
         &client,
         &host,
         &session_id,
-        preset_to_publish,
+        session_preset.as_deref(),
         &tx_events,
+    );
+    tracing::info!(
+        target: "dsh-bridge::session",
+        elapsed_ms = models_start.elapsed().as_millis() as u64,
+        session_id = %session_id,
+        "session.models + agentPreset.list published",
     );
     // Declare prompt capabilities. The harness `session/prompt` RPC accepts
     // `mode: "steer"` (an in-flight prompt can be steered mid-turn), so kodex
@@ -380,9 +385,17 @@ pub fn run_harness_session(
                 let events = match result {
                     Ok(_) => {
                         // Re-publish the model selector so the dropdown reflects
-                        // the new selection.
+                        // the new selection. Pass `session_preset` so the Mode
+                        // control preserves the session's actual preset instead
+                        // of resetting to the deployment default.
                         let mut refreshed = Vec::new();
-                        emit_model_control_into(&client, &host, &session_id, None, &mut refreshed);
+                        emit_model_control_into(
+                            &client,
+                            &host,
+                            &session_id,
+                            session_preset.as_deref(),
+                            &mut refreshed,
+                        );
                         refreshed
                     }
                     Err(err) => vec![ClientEvent::Interrupted {
@@ -435,7 +448,13 @@ pub fn run_harness_session(
                     {
                         Ok(_) => {
                             let mut refreshed = Vec::new();
-                            emit_model_control_into(&client, &host, &session_id, None, &mut refreshed);
+                            emit_model_control_into(
+                                &client,
+                                &host,
+                                &session_id,
+                                session_preset.as_deref(),
+                                &mut refreshed,
+                            );
                             refreshed
                         }
                         Err(err) => vec![ClientEvent::Interrupted {
@@ -487,6 +506,11 @@ pub fn run_harness_session(
                     .block_on(client.agent_preset_select(Uuid::new_v4().to_string(), &payload))
                 {
                     Ok(value) => {
+                        // Track the new preset so subsequent
+                        // `emit_model_control_into` calls (e.g. from a
+                        // SetModel reply) preserve it instead of resetting
+                        // the Mode control to the deployment default.
+                        session_preset = Some(value.agent_preset.clone());
                         let mut refreshed = Vec::new();
                         emit_model_control_into(
                             &client,
@@ -565,21 +589,6 @@ async fn replay_history(
     }
     sink.set_replaying(false);
     Ok(())
-}
-
-/// Fetch `session.models` and send a `SessionConfigUpdated` carrying a Model
-/// control, so the composer's model dropdown renders the dsh model catalog.
-fn emit_model_control(
-    client: &crate::transport::HttpClient,
-    host: &crate::host::HarnessHost,
-    session_id: &SessionId,
-    tx_events: &mpsc::Sender<ClientEvent>,
-) {
-    let mut events = Vec::new();
-    emit_model_control_into(client, host, session_id, None, &mut events);
-    for event in events {
-        let _ = tx_events.send(event);
-    }
 }
 
 /// Emit both config controls (Model + agent-preset Mode) in one update.

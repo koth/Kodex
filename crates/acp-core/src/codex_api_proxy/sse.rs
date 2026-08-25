@@ -456,6 +456,57 @@ pub(super) fn streaming_chat_sse_response(
     response
 }
 
+#[cfg(test)]
+mod tests {
+    use super::drain_utf8_complete;
+
+    /// 3-byte CJK char split across two chunks must reassemble cleanly
+    /// (no U+FFFD `` from a lossy per-chunk decode).
+    #[test]
+    fn split_multibyte_char_reassembles_without_replacement() {
+        let bytes = "中".as_bytes();
+        assert_eq!(bytes.len(), 3);
+        let mut pending = Vec::new();
+        // First chunk: only the leading byte arrives — nothing decodable yet.
+        let head = drain_utf8_complete(&mut pending, &bytes[..1]);
+        assert_eq!(head, "");
+        assert_eq!(pending.len(), 1);
+        // Second chunk: remaining bytes complete the char.
+        let tail = drain_utf8_complete(&mut pending, &bytes[1..]);
+        assert_eq!(tail, "中");
+        assert!(pending.is_empty());
+    }
+
+    /// 4-byte emoji split 2+2 must also reassemble cleanly.
+    #[test]
+    fn split_four_byte_char_reassembles_without_replacement() {
+        let bytes = "😀".as_bytes();
+        assert_eq!(bytes.len(), 4);
+        let mut pending = Vec::new();
+        let head = drain_utf8_complete(&mut pending, &bytes[..2]);
+        assert_eq!(head, "");
+        assert_eq!(pending.len(), 2);
+        let tail = drain_utf8_complete(&mut pending, &bytes[2..]);
+        assert_eq!(tail, "😀");
+        assert!(pending.is_empty());
+    }
+
+    /// ASCII prefix + truncated multi-byte tail: only the ASCII part decodes,
+    /// the tail stays pending for the next chunk.
+    #[test]
+    fn partial_tail_stays_pending() {
+        let mut input = b"hello".to_vec();
+        input.extend_from_slice("中".as_bytes());
+        let split = input.len() - 1; // cut the last byte of 中
+        let mut pending = Vec::new();
+        let out = drain_utf8_complete(&mut pending, &input[..split]);
+        assert_eq!(out, "hello");
+        assert_eq!(pending.len(), 2);
+        let out2 = drain_utf8_complete(&mut pending, &input[split..]);
+        assert_eq!(out2, "中");
+    }
+}
+
 pub(super) fn streaming_chat_sse_to_anthropic_response(
     upstream: reqwest::Response,
     status: StatusCode,
@@ -538,9 +589,35 @@ pub(super) fn streaming_passthrough_response(
     response
 }
 
+/// Decode as much of `pending` (with `chunk` appended) as is valid UTF-8,
+/// leaving any incomplete trailing multi-byte sequence in `pending` for the
+/// next call. Upstream SSE bytes can split a multi-byte UTF-8 character
+/// across two HTTP chunks; decoding each chunk with `from_utf8_lossy` would
+/// replace the half-character with U+FFFD (``) and produce mojibake.
+fn drain_utf8_complete(pending: &mut Vec<u8>, chunk: &[u8]) -> String {
+    pending.extend_from_slice(chunk);
+    let mut split = pending.len();
+    if split > 0 {
+        while split > 0 && std::str::from_utf8(&pending[..split]).is_err() {
+            split -= 1;
+            // A truncated tail can be at most 3 bytes for UTF-8 (max 4-byte
+            // sequence). If we had to step back further the head is genuinely
+            // invalid — fall back to a lossy decode of everything so the
+            // converter still makes progress.
+            if pending.len() - split > 3 {
+                split = pending.len();
+                break;
+            }
+        }
+    }
+    let head: Vec<u8> = pending.drain(..split).collect();
+    String::from_utf8_lossy(&head).into_owned()
+}
+
 #[cfg(test)]
 #[derive(Debug, Default)]
 pub(super) struct TimiaiResponsesSseSanitizer {
+    pending: Vec<u8>,
     buffer: String,
     removed_reasoning_events: usize,
 }
@@ -548,7 +625,7 @@ pub(super) struct TimiaiResponsesSseSanitizer {
 #[cfg(test)]
 impl TimiaiResponsesSseSanitizer {
     pub(super) fn push_chunk(&mut self, chunk: &[u8]) -> Vec<u8> {
-        self.buffer.push_str(&String::from_utf8_lossy(chunk));
+        self.buffer.push_str(&drain_utf8_complete(&mut self.pending, chunk));
         let mut output = String::new();
         while let Some((event, consumed)) = next_sse_event(&self.buffer) {
             self.buffer.drain(..consumed);
@@ -563,6 +640,11 @@ impl TimiaiResponsesSseSanitizer {
     }
 
     pub(super) fn finish(&mut self) -> Vec<u8> {
+        // Flush any bytes still pending in the UTF-8 boundary buffer.
+        let flushed = drain_utf8_complete(&mut self.pending, &[]);
+        if !flushed.is_empty() {
+            self.buffer.push_str(&flushed);
+        }
         let trailing = std::mem::take(&mut self.buffer);
         let mut output = String::new();
         if !trailing.trim().is_empty() {
@@ -722,6 +804,7 @@ fn remove_reasoning_output_items(value: &mut Value) {
 
 #[derive(Debug)]
 pub(super) struct ChatSseStreamConverter {
+    pending: Vec<u8>,
     buffer: String,
     state: ChatStreamState,
 }
@@ -729,6 +812,7 @@ pub(super) struct ChatSseStreamConverter {
 impl ChatSseStreamConverter {
     pub(super) fn new(session_id: &str) -> Self {
         Self {
+            pending: Vec::new(),
             buffer: String::new(),
             state: ChatStreamState {
                 response_id: "resp_proxy".to_string(),
@@ -741,7 +825,7 @@ impl ChatSseStreamConverter {
     }
 
     pub(super) fn push_chunk(&mut self, chunk: &[u8]) -> Vec<u8> {
-        self.buffer.push_str(&String::from_utf8_lossy(chunk));
+        self.buffer.push_str(&drain_utf8_complete(&mut self.pending, chunk));
         let mut output = String::new();
         while let Some((event, consumed)) = next_sse_event(&self.buffer) {
             self.buffer.drain(..consumed);
@@ -751,6 +835,10 @@ impl ChatSseStreamConverter {
     }
 
     pub(super) fn finish(&mut self) -> Vec<u8> {
+        let flushed = drain_utf8_complete(&mut self.pending, &[]);
+        if !flushed.is_empty() {
+            self.buffer.push_str(&flushed);
+        }
         let trailing = std::mem::take(&mut self.buffer);
         let mut output = String::new();
         if !trailing.trim().is_empty() {
@@ -771,6 +859,7 @@ pub(super) fn chat_sse_to_anthropic_sse(body: &[u8]) -> Vec<u8> {
 
 #[derive(Debug)]
 struct ChatAnthropicSseStreamConverter {
+    pending: Vec<u8>,
     buffer: String,
     state: ChatStreamState,
 }
@@ -778,6 +867,7 @@ struct ChatAnthropicSseStreamConverter {
 impl ChatAnthropicSseStreamConverter {
     pub(super) fn new(session_id: &str) -> Self {
         Self {
+            pending: Vec::new(),
             buffer: String::new(),
             state: ChatStreamState {
                 response_id: "msg_proxy".to_string(),
@@ -790,7 +880,7 @@ impl ChatAnthropicSseStreamConverter {
     }
 
     pub(super) fn push_chunk(&mut self, chunk: &[u8]) -> Vec<u8> {
-        self.buffer.push_str(&String::from_utf8_lossy(chunk));
+        self.buffer.push_str(&drain_utf8_complete(&mut self.pending, chunk));
         let mut output = String::new();
         while let Some((event, consumed)) = next_sse_event(&self.buffer) {
             self.buffer.drain(..consumed);
@@ -800,6 +890,10 @@ impl ChatAnthropicSseStreamConverter {
     }
 
     pub(super) fn finish(&mut self) -> Vec<u8> {
+        let flushed = drain_utf8_complete(&mut self.pending, &[]);
+        if !flushed.is_empty() {
+            self.buffer.push_str(&flushed);
+        }
         let trailing = std::mem::take(&mut self.buffer);
         let mut output = String::new();
         if !trailing.trim().is_empty() {
@@ -1138,6 +1232,7 @@ impl AnthropicToResponsesState {
 
 #[derive(Debug)]
 pub(super) struct AnthropicSseToResponsesConverter {
+    pending: Vec<u8>,
     buffer: String,
     state: AnthropicToResponsesState,
 }
@@ -1145,6 +1240,7 @@ pub(super) struct AnthropicSseToResponsesConverter {
 impl AnthropicSseToResponsesConverter {
     pub(super) fn new(session_id: &str) -> Self {
         Self {
+            pending: Vec::new(),
             buffer: String::new(),
             state: AnthropicToResponsesState {
                 response_id: "resp_proxy".to_string(),
@@ -1157,7 +1253,7 @@ impl AnthropicSseToResponsesConverter {
     }
 
     pub(super) fn push_chunk(&mut self, chunk: &[u8]) -> Vec<u8> {
-        self.buffer.push_str(&String::from_utf8_lossy(chunk));
+        self.buffer.push_str(&drain_utf8_complete(&mut self.pending, chunk));
         let mut output = String::new();
         while let Some((event, consumed)) = next_sse_event(&self.buffer) {
             self.buffer.drain(..consumed);
@@ -1167,6 +1263,10 @@ impl AnthropicSseToResponsesConverter {
     }
 
     pub(super) fn finish(&mut self) -> Vec<u8> {
+        let flushed = drain_utf8_complete(&mut self.pending, &[]);
+        if !flushed.is_empty() {
+            self.buffer.push_str(&flushed);
+        }
         let trailing = std::mem::take(&mut self.buffer);
         let mut output = String::new();
         if !trailing.trim().is_empty() {
@@ -1753,6 +1853,7 @@ struct ResponsesToAnthropicState {
 
 #[derive(Debug)]
 pub(super) struct ResponsesSseToAnthropicConverter {
+    pending: Vec<u8>,
     buffer: String,
     state: ResponsesToAnthropicState,
 }
@@ -1760,6 +1861,7 @@ pub(super) struct ResponsesSseToAnthropicConverter {
 impl ResponsesSseToAnthropicConverter {
     pub(super) fn new(session_id: &str) -> Self {
         Self {
+            pending: Vec::new(),
             buffer: String::new(),
             state: ResponsesToAnthropicState {
                 message_id: "msg_proxy".to_string(),
@@ -1772,7 +1874,7 @@ impl ResponsesSseToAnthropicConverter {
     }
 
     pub(super) fn push_chunk(&mut self, chunk: &[u8]) -> Vec<u8> {
-        self.buffer.push_str(&String::from_utf8_lossy(chunk));
+        self.buffer.push_str(&drain_utf8_complete(&mut self.pending, chunk));
         let mut output = String::new();
         while let Some((event, consumed)) = next_sse_event(&self.buffer) {
             self.buffer.drain(..consumed);
@@ -1782,6 +1884,10 @@ impl ResponsesSseToAnthropicConverter {
     }
 
     pub(super) fn finish(&mut self) -> Vec<u8> {
+        let flushed = drain_utf8_complete(&mut self.pending, &[]);
+        if !flushed.is_empty() {
+            self.buffer.push_str(&flushed);
+        }
         let trailing = std::mem::take(&mut self.buffer);
         let mut output = String::new();
         if !trailing.trim().is_empty() {

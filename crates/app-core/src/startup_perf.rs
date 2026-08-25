@@ -1,11 +1,7 @@
-use std::io::Write;
-use std::path::PathBuf;
-use std::sync::{Mutex, OnceLock};
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::sync::OnceLock;
+use std::time::Instant;
 
 static START: OnceLock<Instant> = OnceLock::new();
-static LOG_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-static LOG_PATH: OnceLock<Option<PathBuf>> = OnceLock::new();
 
 pub fn start_run(component: &str) {
     if cfg!(test) {
@@ -47,42 +43,16 @@ where
 }
 
 fn append_line(stage: &str, detail: &str) {
-    let Some(log_path) = log_path() else {
-        return;
-    };
-    let lock = LOG_LOCK.get_or_init(|| Mutex::new(()));
-    let Ok(_guard) = lock.lock() else {
-        return;
-    };
-    if let Some(parent) = log_path.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    let epoch_ms = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_millis())
-        .unwrap_or_default();
     let elapsed_ms = START
         .get()
         .map(|start| start.elapsed().as_millis())
         .unwrap_or(0);
-    let safe_detail = detail.replace('\r', " ").replace('\n', " ");
-    let line = format!(
-        "[{epoch_ms} +{elapsed_ms}ms pid={}] {stage} {safe_detail}\n",
-        std::process::id()
+    tracing::info!(
+        target: "startup_perf",
+        stage = stage,
+        detail = %detail.replace('\r', " ").replace('\n', " "),
+        elapsed_ms,
+        pid = std::process::id(),
+        "startup mark"
     );
-    let _ = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(log_path)
-        .and_then(|mut file| file.write_all(line.as_bytes()));
-}
-
-fn log_path() -> Option<&'static PathBuf> {
-    LOG_PATH
-        .get_or_init(|| {
-            crate::paths::AppPaths::resolve()
-                .ok()
-                .map(|paths| paths.logs_dir().join("kodex-startup.log"))
-        })
-        .as_ref()
 }

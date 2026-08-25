@@ -7,12 +7,10 @@ use agent_client_protocol::schema::{
     SessionNotification, SessionUpdate, StopReason, ToolCall, ToolCallContent, ToolCallStatus,
     ToolCallUpdate, ToolCallUpdateFields, UsageUpdate,
 };
-use anyhow::{Context, anyhow};
+use anyhow::anyhow;
 use serde_json::Value;
-use std::fs::{self, OpenOptions};
-use std::io::Write;
 use std::path::PathBuf;
-use std::sync::{OnceLock, mpsc};
+use std::sync::mpsc;
 use workspace_model::{
     AgentPlanEntry, AgentPlanEntryPriority, AgentPlanEntryStatus, AvailableCommand, DiffHunk,
     DiffLine, DiffLineKind, MessageRole, PermissionOption, SessionConfigCategory,
@@ -39,15 +37,6 @@ const BUILD_MODE_ID: &str = "build";
 const FULL_ACCESS_MODE_ID: &str = "full-access";
 const KODEX_CONTEXT_COMPACTION_META_KEY: &str = "kodex.ai/contextCompaction";
 const KODEX_CONTEXT_COMPACTED_META_KEY: &str = "kodex.ai/contextCompacted";
-const NOTIFICATION_LOG_CHANNEL_SIZE: usize = 1024;
-
-struct NotificationLogRecord {
-    log_path: PathBuf,
-    method: String,
-    payload: Value,
-}
-
-static NOTIFICATION_LOG_TX: OnceLock<mpsc::SyncSender<NotificationLogRecord>> = OnceLock::new();
 
 pub(crate) fn emit_notification(
     tx: &mpsc::Sender<ClientEvent>,
@@ -120,7 +109,14 @@ pub(crate) fn append_notification_log(
     method: &str,
     payload: &Value,
 ) -> anyhow::Result<()> {
-    append_notification_log_owned(config, method, payload.clone())
+    tracing::debug!(
+        target: "acp_notifications",
+        log_id = %config.log_id,
+        method = method,
+        payload = %payload,
+        "session notification"
+    );
+    Ok(())
 }
 
 pub(crate) fn append_runtime_event_log(
@@ -128,63 +124,23 @@ pub(crate) fn append_runtime_event_log(
     label: &str,
     payload: &Value,
 ) -> anyhow::Result<()> {
-    append_notification_log(config, label, payload)
+    tracing::debug!(
+        target: "acp_notifications",
+        log_id = %config.log_id,
+        method = label,
+        payload = %payload,
+        "runtime event"
+    );
+    Ok(())
 }
 
 pub fn notification_log_path(config: &SessionConfig) -> PathBuf {
+    // No longer a real file; kept for API compatibility. Returns the
+    // historical path so external tooling that referenced it degrades
+    // gracefully (the file simply won't be created).
     PathBuf::from(&config.app_data_root)
         .join("logs")
         .join(format!("acp-notifications-{}.log", config.log_id))
-}
-
-fn append_notification_log_owned(
-    config: &SessionConfig,
-    method: &str,
-    payload: Value,
-) -> anyhow::Result<()> {
-    let record = NotificationLogRecord {
-        log_path: notification_log_path(config),
-        method: method.to_string(),
-        payload,
-    };
-
-    match notification_log_tx().try_send(record) {
-        Ok(()) => Ok(()),
-        Err(mpsc::TrySendError::Full(_)) => Ok(()),
-        Err(mpsc::TrySendError::Disconnected(record)) => write_notification_log_record(record),
-    }
-}
-
-fn notification_log_tx() -> &'static mpsc::SyncSender<NotificationLogRecord> {
-    NOTIFICATION_LOG_TX.get_or_init(|| {
-        let (tx, rx) = mpsc::sync_channel::<NotificationLogRecord>(NOTIFICATION_LOG_CHANNEL_SIZE);
-        let _ = std::thread::Builder::new()
-            .name("kodex-acp-log-writer".into())
-            .spawn(move || {
-                while let Ok(record) = rx.recv() {
-                    let _ = write_notification_log_record(record);
-                }
-            });
-        tx
-    })
-}
-
-fn write_notification_log_record(record: NotificationLogRecord) -> anyhow::Result<()> {
-    if let Some(parent) = record.log_path.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("failed to create log directory {}", parent.display()))?;
-    }
-
-    let mut file = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&record.log_path)
-        .with_context(|| format!("failed to open log file {}", record.log_path.display()))?;
-
-    writeln!(file, "=== {} ===", record.method)?;
-    writeln!(file, "{}", format_json(&record.payload))?;
-    writeln!(file)?;
-    Ok(())
 }
 
 pub(crate) fn format_stop_reason(reason: StopReason) -> String {

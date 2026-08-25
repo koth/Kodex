@@ -1,4 +1,4 @@
-use anyhow::{Context, Result};
+﻿use anyhow::{Context, Result};
 use rusqlite::{Connection, OptionalExtension, ToSql, params, params_from_iter};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
@@ -2792,9 +2792,11 @@ fn session_usage_snapshot_from_events(events: &[StoredUsageEvent]) -> SessionUsa
             .first()
             .map(|event| event.session_id.as_str())
             .unwrap_or("?");
-        eprintln!(
-            "[kodex/usage] session {sid} has only a legacy context_snapshot total ({total}); \
-             no SessionTotal/TurnDelta events were persisted — figure may be stale"
+        tracing::warn!(
+            target: "session_store",
+            sid = %sid,
+            total,
+            "session has only a legacy context_snapshot total; no SessionTotal/TurnDelta events were persisted; figure may be stale"
         );
         snapshot.session_total.total_tokens = Some(total);
     }

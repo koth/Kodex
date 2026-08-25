@@ -157,6 +157,7 @@ pub(super) fn edit_input_before_text(input: &serde_json::Value) -> Option<&str> 
     input
         .get("before")
         .or_else(|| input.get("old_string"))
+        .or_else(|| input.get("old_str"))
         .or_else(|| input.get("oldString"))
         .and_then(|value| value.as_str())
 }
@@ -165,6 +166,7 @@ pub(super) fn edit_input_after_text(input: &serde_json::Value) -> Option<&str> {
     input
         .get("after")
         .or_else(|| input.get("new_string"))
+        .or_else(|| input.get("new_str"))
         .or_else(|| input.get("newString"))
         .or_else(|| input.get("new_text"))
         .or_else(|| input.get("newText"))

@@ -21,6 +21,7 @@ shell-words.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
+tracing.workspace = true
 uuid.workspace = true
 workspace-model = { path = "../workspace-model" }
 windows-sys.workspace = true

@@ -51,7 +51,7 @@ impl PairingHandler for DesktopPairingHandler {
             .iter()
             .map(|b| format!("{b:02x}"))
             .collect();
-        manager.log_driver_event(&format!("derived pairing session key prefix={prefix}"));
+        tracing::debug!(target: "remote_control", key_prefix = %prefix, "derived pairing session key");
         // The phone's device id is the peer for E2E AAD.
         Ok((key, confirm.phone_device_id))
     }
@@ -64,14 +64,12 @@ impl PairingHandler for DesktopPairingHandler {
 #[derive(Clone)]
 pub struct DesktopControlHandler {
     control: DesktopRemoteControl,
-    app: AppHandle,
 }
 
 impl DesktopControlHandler {
     pub fn new(app: AppHandle) -> Self {
         Self {
-            control: DesktopRemoteControl::new(app.clone()),
-            app,
+            control: DesktopRemoteControl::new(app),
         }
     }
 }
@@ -83,22 +81,13 @@ impl ControlHandler for DesktopControlHandler {
         let is_switch_session = matches!(&request, ControlRequest::SwitchSession { .. });
         let is_get_state = matches!(&request, ControlRequest::GetState { .. });
         if is_list_sessions {
-            self.app
-                .state::<AppState>()
-                .remote_control()
-                .log_driver_event(&format!("handling ListSessions request_id={}", request_id));
+            tracing::debug!(target: "remote_control", request_id = %request_id, "handling ListSessions");
         }
         if is_switch_session {
-            self.app
-                .state::<AppState>()
-                .remote_control()
-                .log_driver_event(&format!("handling SwitchSession request_id={}", request_id));
+            tracing::debug!(target: "remote_control", request_id = %request_id, "handling SwitchSession");
         }
         if is_get_state {
-            self.app
-                .state::<AppState>()
-                .remote_control()
-                .log_driver_event(&format!("handling GetState request_id={}", request_id));
+            tracing::debug!(target: "remote_control", request_id = %request_id, "handling GetState");
         }
         let result = match request {
             ControlRequest::ListSessions { .. } => self
@@ -168,22 +157,13 @@ impl ControlHandler for DesktopControlHandler {
                 .map(|_| ControlResponse::StopTool { request_id }),
         };
         if is_list_sessions {
-            self.app
-                .state::<AppState>()
-                .remote_control()
-                .log_driver_event(&format!("ListSessions finished request_id={}", request_id));
+            tracing::debug!(target: "remote_control", request_id = %request_id, "ListSessions finished");
         }
         if is_switch_session {
-            self.app
-                .state::<AppState>()
-                .remote_control()
-                .log_driver_event(&format!("SwitchSession finished request_id={}", request_id));
+            tracing::debug!(target: "remote_control", request_id = %request_id, "SwitchSession finished");
         }
         if is_get_state {
-            self.app
-                .state::<AppState>()
-                .remote_control()
-                .log_driver_event(&format!("GetState finished request_id={}", request_id));
+            tracing::debug!(target: "remote_control", request_id = %request_id, "GetState finished");
         }
         match result {
             Ok(response) => response,

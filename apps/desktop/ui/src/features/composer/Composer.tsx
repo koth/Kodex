@@ -1,7 +1,6 @@
-import { useState, useRef, useCallback, useMemo, useEffect } from "react";
+﻿import { useState, useRef, useCallback, useMemo, useEffect } from "react";
 import type { AvailableCommand, SessionConfigControl, UiSnapshot, UserPromptContent } from "../../types";
 import { editorGetContent, sessionCancel, sessionSendPrompt, sessionReconnect, sessionSetConfigControl } from "../../lib/tauri";
-import { invoke } from "@tauri-apps/api/core";
 import { composerDraftKey, useComposerDraft, type ComposerAttachmentDraft } from "./composer-draft-store";
 import { MentionMenu } from "./MentionMenu";
 import { useMention, type MentionKind } from "./use-mention";
@@ -102,6 +101,10 @@ export function Composer({
     () => controls.find((control) => control.category === "Mode"),
     [controls],
   );
+  // dsh harness sessions are managed entirely by the harness; mode changes
+  // are not supported once the session has started, so the mode control is
+  // displayed read-only (label only, no dropdown).
+  const modeReadOnly = snapshot.session.agent_cli?.toLowerCase() === "deepseek harness";
   const extraControls = useMemo(
     () => controls.filter(
       (control) =>
@@ -403,14 +406,6 @@ export function Composer({
     setControlError(null);
     try {
       const nextAttachments = await Promise.all(files.map(readAttachment));
-      invoke("debug_log_event", {
-        tag: "paste-write",
-        payload: JSON.stringify({
-          workspaceRoot: snapshot.workspace.root,
-          sessionId: snapshot.session.id,
-          draftOwnerKey,
-        }),
-      }).catch(() => undefined);
       setAttachmentsRef.current((current) => [...current, ...nextAttachments]);
     } catch (error) {
       setControlError(String(error));
@@ -683,8 +678,9 @@ export function Composer({
                 open={openControlId === modeControl.id}
                 onOpenChange={(open) => setOpenControlId(open ? modeControl.id : null)}
                 onChange={handleControlChange}
-              />
-            )}
+                  readOnly={modeReadOnly}
+                />
+              )}
             {extraControls.map((control) => (
               <SessionControlSelect
                 key={control.id}
@@ -1403,6 +1399,7 @@ function SessionControlSelect({
   onOpenChange,
   onChange,
   icon,
+  readOnly = false,
 }: {
   control: SessionConfigControl;
   disabled: boolean;
@@ -1411,6 +1408,7 @@ function SessionControlSelect({
   onOpenChange: (open: boolean) => void;
   onChange: (control: SessionConfigControl, valueId: string) => void;
   icon?: React.ReactNode;
+  readOnly?: boolean;
 }) {
   const rootRef = useRef<HTMLDivElement>(null);
   const choices = useMemo(() => dedupeControlChoices(control.choices), [control.choices]);
@@ -1445,6 +1443,20 @@ function SessionControlSelect({
     choices[0];
   const label = displayControlLabel(control);
   const selectedLabel = displayChoiceLabel(control, selected);
+
+  if (readOnly) {
+    return (
+      <div
+        className="composer-control-select is-readonly"
+        data-control-id={control.id}
+        data-control-category={control.category}
+      >
+        {icon && <span className="composer-control-icon-slot" aria-hidden="true">{icon}</span>}
+        {label && <span className="composer-control-label">{label}</span>}
+        <span className="composer-control-value">{selectedLabel}</span>
+      </div>
+    );
+  }
 
   return (
     <div

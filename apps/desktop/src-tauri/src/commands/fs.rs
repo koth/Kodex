@@ -97,20 +97,6 @@ pub fn fs_reveal(state: State<'_, AppState>, path: String, select: bool) -> Resu
     })
 }
 
-#[tauri::command]
-pub fn debug_log_event(tag: String, payload: String) -> Result<(), String> {
-    use std::io::Write;
-    let paths = app_core::AppPaths::resolve().map_err(|e| e.to_string())?;
-    paths.ensure_standard_dirs().map_err(|e| e.to_string())?;
-    let file = paths.logs_dir().join("paste-diag.log");
-    let mut handle = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&file)
-        .map_err(|e| format!("Cannot open diag log: {e}"))?;
-    writeln!(handle, "[{tag}] {payload}").map_err(|e| format!("Cannot write diag log: {e}"))
-}
-
 /// Cheap existence check used by the chat renderer to decide whether an
 /// inline-code span is a real, openable workspace file before rendering it
 /// as a clickable link. Returns false for anything outside the workspace,

@@ -234,7 +234,13 @@ export function extractCommandDetail(tool: ToolInvocation, trackedDiffPaths: str
     try {
       const input = JSON.parse(tool.raw_input);
 
-      if (input.command) {
+      // For tools like `str_replace_editor` the `command` field is a
+      // sub-command selector (view/create/str_replace/insert), not a shell
+      // command — skip it and prefer the path field.
+      const isSubCommandSelector =
+        tool.name.trim().toLowerCase() === "str_replace_editor";
+
+      if (input.command && !isSubCommandSelector) {
         return normalizeToolCommand(String(input.command));
       }
 
@@ -718,14 +724,17 @@ export function rawInputHasEditPayload(tool: ToolInvocation): boolean {
       "oldString",
       "before",
       "oldText",
+      "old_str",
       "new_string",
       "newString",
       "after",
       "newText",
+      "new_str",
       "content",
       "new_content",
       "newContent",
       "replacement",
+      "file_text",
     );
   }
 
@@ -733,9 +742,9 @@ export function rawInputHasEditPayload(tool: ToolInvocation): boolean {
   if (!path) return false;
 
   return (
-    stringField(input, "old_string", "oldString", "before", "oldText") != null ||
-    stringField(input, "new_string", "newString", "after", "newText") != null ||
-    stringField(input, "content", "new_content", "newContent", "replacement") != null
+    stringField(input, "old_string", "oldString", "before", "oldText", "old_str") != null ||
+    stringField(input, "new_string", "newString", "after", "newText", "new_str") != null ||
+    stringField(input, "content", "new_content", "newContent", "replacement", "file_text") != null
   );
 }
 
@@ -1615,9 +1624,16 @@ export function diffPreviewFromRawInput(tool: ToolInvocation): ToolDiffPreview |
   if (!tool.raw_input) return null;
   try {
     const input = JSON.parse(tool.raw_input);
-    const oldText = stringField(input, "old_string", "oldString", "before", "oldText");
-    const newText = stringField(input, "new_string", "newString", "after", "newText");
+    const oldText = stringField(input, "old_string", "oldString", "before", "oldText", "old_str");
+    const newText = stringField(input, "new_string", "newString", "after", "newText", "new_str", "file_text");
     const path = stringField(input, "file_path", "filePath", "path") ?? tool.diff_paths[0] ?? tool.name;
+    // For `create` (file_text with no old text), show the entire new content as added.
+    if (oldText == null && newText != null) {
+      return {
+        path,
+        hunks: compactTextDiffToHunks("", newText),
+      };
+    }
     if (oldText == null || newText == null || oldText === newText) return null;
     if (looksLikeFragmentToWholeFile(oldText, newText)) return null;
     return {

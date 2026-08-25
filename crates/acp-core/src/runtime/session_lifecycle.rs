@@ -248,6 +248,7 @@ mod tests {
             }),
             mcp_servers: Vec::new(),
             harness_endpoint: None,
+            agent_preset: None,
         }
     }
 

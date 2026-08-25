@@ -1,4 +1,5 @@
 use super::*;
+use std::fs;
 
 pub(super) fn emit_codebuddy_diff_content(
     tx: &mpsc::Sender<ClientEvent>,

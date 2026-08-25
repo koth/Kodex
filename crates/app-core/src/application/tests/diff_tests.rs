@@ -4295,3 +4295,98 @@ fn lightweight_snapshot_strips_review_and_turn_diff_text() {
     assert_eq!(app.ui.review_changes[0].new_text, "after\n");
     assert_eq!(app.ui.turn_changes[0].changes[0].new_text, "after\n");
 }
+
+#[test]
+fn dsh_str_replace_editor_old_str_populates_review_changes() {
+    // Reproduce the dsh `str_replace_editor` flow: the tool sends
+    // `old_str`/`new_str` (not CodeBuddy's `old_string`/`new_string`), and
+    // the result card is not a diff view so the bridge synthesizes a ToolDiff.
+    // Without `old_str` support in `edit_input_before_text`, the completed
+    // tool could not reconstruct an exact edit, `apply_tracker_changes` never
+    // ran, and the review panel stayed empty even though the conversation
+    // showed a diff on the tool card.
+    let dir = tempfile::tempdir().unwrap();
+    let relative_path = "crates/app-core/src/image_capability.rs";
+    let file_path = dir.path().join(relative_path);
+    fs::create_dir_all(file_path.parent().unwrap()).unwrap();
+    let before = "pub fn classify_image_input(input: &str) -> bool {\n    input.starts_with(\"image\")\n}\n";
+    let after = "pub fn classify_image_input(input: &str) -> ImageInputKind {\n    if input.starts_with(\"image\") {\n        ImageInputKind::Image\n    } else {\n        ImageInputKind::Other\n    }\n}\n";
+    fs::write(&file_path, after).unwrap();
+
+    let mut app = test_app(&dir);
+    let user_id = uuid::Uuid::new_v4();
+    let assistant_id = uuid::Uuid::new_v4();
+    app.ui.messages.push(ChatMessage {
+        id: user_id,
+        role: MessageRole::User,
+        body: "edit".into(),
+        created_at: "2026-06-28T00:00:00Z".into(),
+        ..Default::default()
+    });
+    app.ui.messages.push(ChatMessage {
+        id: assistant_id,
+        role: MessageRole::Assistant,
+        body: "done".into(),
+        created_at: "2026-06-28T00:00:01Z".into(),
+        ..Default::default()
+    });
+    app.ui.timeline.push(TimelineItem::Message(user_id));
+    app.ui.timeline.push(TimelineItem::Message(assistant_id));
+    app.current_turn_user_message_id = Some(user_id);
+
+    let raw_input = serde_json::json!({
+        "command": "str_replace",
+        "path": relative_path,
+        "old_str": "pub fn classify_image_input(input: &str) -> bool {\n    input.starts_with(\"image\")\n}\n",
+        "new_str": "pub fn classify_image_input(input: &str) -> ImageInputKind {\n    if input.starts_with(\"image\") {\n        ImageInputKind::Image\n    } else {\n        ImageInputKind::Other\n    }\n}\n",
+    })
+    .to_string();
+    app.apply_runtime_events_with_file_tracking(vec![ClientEvent::ToolStarted {
+        id: "edit-img".into(),
+        parent_id: None,
+        name: "str_replace_editor".into(),
+        kind: "edit".into(),
+        summary: format!("已编辑 {relative_path}"),
+        is_subagent: false,
+        raw_input: Some(raw_input),
+    }]);
+
+    let result = app.apply_runtime_events_with_file_tracking(vec![ClientEvent::ToolCompleted {
+        id: "edit-img".into(),
+        name: Some("str_replace_editor".into()),
+        outcome: format!("已编辑 {relative_path}"),
+        raw_output: None,
+        terminal_output: None,
+    }]);
+
+    // ToolCompleted alone may defer detection; advance the clock and retry.
+    app.advance_runtime_clock(Duration::from_secs(1));
+    let _ = app.retry_pending_tool_write_detections();
+
+    assert!(
+        !app.ui.review_changes.is_empty(),
+        "review_changes must be populated for dsh str_replace_editor (old_str/new_str)"
+    );
+    assert!(
+        !app.ui.session_changes.is_empty(),
+        "session_changes must capture the dsh str_replace_editor write"
+    );
+    assert!(app.review_changes_started);
+    assert!(result.had_file_changes || !app.ui.review_changes.is_empty());
+    assert_eq!(app.ui.review_changes[0].path, relative_path);
+    assert_eq!(app.ui.review_changes[0].new_text, after);
+
+    let _ = app.persist_current_turn_file_changes();
+    let turn_sets = app
+        .store
+        .list_change_sets(
+            Some(&app.ui.session.id.to_string()),
+            Some(ChangeSetSource::AgentTurn),
+        )
+        .unwrap();
+    let completed = turn_sets
+        .iter()
+        .find(|summary| summary.status == ChangeSetStatus::Complete)
+        .expect("turn change set must be persisted as Complete");
+    assert_eq!(completed.file_count, 1);
+}
