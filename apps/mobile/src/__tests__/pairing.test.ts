@@ -43,6 +43,38 @@ describe("qr parsing", () => {
   expect(() => parsePairingQr(raw)).toThrow();
   expect(() => parsePairingQr(raw, true)).not.toThrow();
   });
+
+  it("accepts plain ws:// to dev-shaped targets (bare IP / localhost / .local)", () => {
+  // The PC emits ws://<relay-ip> during the no-domain dev window; these
+  // targets have no TLS identity to protect, so they parse without any
+  // build-time env flag (which raw gradlew bundles never received).
+  for (const host of ["120.48.49.190", "localhost", "relay.local"]) {
+  const raw = JSON.stringify({
+  relay_endpoint: `ws://${host}`,
+  pairing_code: "ABC123XY",
+  pc_device_pubkey: encodeBase64UrlNoPad(getPublicKey(PC_SECRET)),
+  });
+  expect(() => parsePairingQr(raw)).not.toThrow();
+  }
+  // Hostname with a port still counts as dev-shaped.
+  const withPort = JSON.stringify({
+  relay_endpoint: "ws://192.168.1.10:8080",
+  pairing_code: "ABC123XY",
+  pc_device_pubkey: encodeBase64UrlNoPad(getPublicKey(PC_SECRET)),
+  });
+  expect(() => parsePairingQr(withPort)).not.toThrow();
+  });
+
+  it("still rejects plain ws:// to real hostnames without the debug flag", () => {
+  for (const host of ["relay.example.com", "relay.kodex.app", "sub.example.local.evil.com"]) {
+  const raw = JSON.stringify({
+  relay_endpoint: `ws://${host}`,
+  pairing_code: "ABC123XY",
+  pc_device_pubkey: encodeBase64UrlNoPad(getPublicKey(PC_SECRET)),
+  });
+  expect(() => parsePairingQr(raw)).toThrow(/refusing non-TLS/);
+  }
+  });
 });
 
 describe("pairing handshake", () => {

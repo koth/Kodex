@@ -53,11 +53,14 @@ npx expo run:ios            # or run:android
 
 ## Relay endpoint
 
-The relay endpoint is supplied by the PC's pairing QR (`relay_endpoint`), which
-must be `wss://`. The `WsTransport` rejects `ws://` unless an explicit debug
-flag is passed. To allow insecure `ws://` for local development, set the
-env var `KODEX_RELAY_ALLOW_INSECURE_WS=1` before launching Expo, or pass the
-debug flag through `pairFromTransport(transport, qrJson, true)`.
+The relay endpoint is supplied by the PC's pairing QR (`relay_endpoint`). It
+must be `wss://` except for dev-shaped plain-`ws://` targets (bare IP
+literals, `localhost`, `*.local`) which are accepted without any flag — these
+are what the PC emits during the no-domain development window and they have no
+TLS identity to protect anyway. Real hostnames keep requiring `wss://` unless
+the env var `EXPO_PUBLIC_RELAY_ALLOW_INSECURE_WS=1` is set (Expo inlines
+`EXPO_PUBLIC_*` vars at bundle time; raw `gradlew` builds do NOT read
+`.env*` files, so set it in the shell if you need it there).
 
 ## Security notes
 

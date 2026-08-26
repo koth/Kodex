@@ -1,4 +1,5 @@
 import type { Envelope, EncryptedEnvelope } from "../types/relay-protocol";
+import { isInsecureDevEndpoint } from "../pairing/qr-parse";
 import { diagnostics } from "../util/diagnostics";
 
 /** Hard cap for a single inbound WS text frame (4 MiB). Frames above this
@@ -15,10 +16,12 @@ export interface RelayTransport {
   close(): Promise<void>;
 }
 
-/** Reject non-TLS endpoints unless the debug flag is explicitly set. */
+/** Reject non-TLS endpoints unless the debug flag is set or the endpoint is
+ * a dev-shaped plain-`ws://` target (bare IP / localhost / *.local) that has
+ * no TLS identity to protect anyway. Mirrors `parsePairingQr`. */
 export function assertTlsEndpoint(url: string, allowInsecureDebug: boolean): void {
   if (url.startsWith("wss://")) return;
-  if (url.startsWith("ws://") && allowInsecureDebug) return;
+  if (url.startsWith("ws://") && (allowInsecureDebug || isInsecureDevEndpoint(url))) return;
   throw new Error(`refusing non-TLS relay endpoint: ${url}`);
 }
 
