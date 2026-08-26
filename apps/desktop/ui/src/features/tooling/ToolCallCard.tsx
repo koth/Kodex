@@ -52,11 +52,33 @@ const SNAPSHOT_RAW_OUTPUT_CAP_CHARS = 8 * 1024;
 const toolDetailCache = new Map<string, ToolInvocation>();
 const toolDetailInflight = new Map<string, Promise<void>>();
 
+/**
+ * The backend marks truncated snapshot payloads so short-but-incomplete
+ * copies still get rehydrated on expand:
+ *   - `raw_input` keeps priority fields and is re-serialized with a
+ *     `"_truncated": true` marker (see `cap_snapshot_tool_raw_input`), so a
+ *     file-create payload that dropped its `file_text` can be far shorter
+ *     than the 4K length gate yet still be incomplete.
+ *   - `raw_output` / `detail_text` are plain char-capped and carry
+ *     `"... omitted N chars ..."` or a trailing `"\n..."` sentinel.
+ */
+function snapshotPayloadLooksTruncated(value: string | null | undefined): boolean {
+  if (!value) return false;
+  return value.includes('"_truncated"') || value.includes("omitted ") || value.endsWith("\n...");
+}
+
 function toolDetailLooksCapped(tool: ToolInvocation): boolean {
   return (
     (tool.raw_input?.length ?? 0) >= SNAPSHOT_RAW_INPUT_CAP_CHARS ||
     (tool.raw_output?.length ?? 0) >= SNAPSHOT_RAW_OUTPUT_CAP_CHARS ||
-    tool.detail_text.length >= SNAPSHOT_RAW_INPUT_CAP_CHARS
+    tool.detail_text.length >= SNAPSHOT_RAW_INPUT_CAP_CHARS ||
+    // The length gates above miss smart-compacted payloads that are short but
+    // still incomplete (e.g. a create call whose `file_text` was stripped).
+    // Honor the truncation markers so expanding still pulls the full record
+    // and the diff surface can rebuild the whole-file preview.
+    snapshotPayloadLooksTruncated(tool.raw_input) ||
+    snapshotPayloadLooksTruncated(tool.raw_output) ||
+    snapshotPayloadLooksTruncated(tool.detail_text)
   );
 }
 

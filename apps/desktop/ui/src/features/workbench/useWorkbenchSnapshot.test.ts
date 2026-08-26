@@ -218,4 +218,22 @@ describe("applySnapshotPatch", () => {
       { message_id: "steer-1", body: "追加：先看日志" },
     ]);
   });
+  it("clears thinking_status when the patch carries null", () => {
+    // A session that was thinking (Active) receives a patch from an idle
+    // turn with thinking_status: null. The snapshot must reflect null, not
+    // retain the stale "Active" value.
+    const snapshot = makeSnapshot({
+      thinking_status: "Active",
+      thinking_text: "some reasoning text",
+    });
+    const patch = makePatch(snapshot, {
+      thinking_status: null,
+      thinking_text: "",
+    });
+
+    const next = applySnapshotPatch(snapshot, patch);
+
+    expect(next.thinking_status).toBeNull();
+    expect(next.thinking_text).toBe("");
+  });
 });

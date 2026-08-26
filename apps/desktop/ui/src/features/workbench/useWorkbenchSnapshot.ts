@@ -329,7 +329,11 @@ export function useWorkbenchSnapshot() {
             revision: Math.max(prev.revision, patch.revision),
             session: patch.session,
             session_config: patch.session_config ?? prev.session_config,
-            thinking_status: patch.thinking_status ?? prev.thinking_status,
+            // `thinking_status` is `ThinkingStatus | null`; the backend always
+            // sends it (even as null for an idle turn). Using `??` would treat
+            // `null` as nullish and keep the previous "Active" state, leaking
+            // a stale thinking indicator. Accept the patch value verbatim.
+            thinking_status: patch.thinking_status,
             thinking_text: patch.thinking_text ?? prev.thinking_text,
             pending_steers: patch.pending_steers ?? prev.pending_steers,
           });

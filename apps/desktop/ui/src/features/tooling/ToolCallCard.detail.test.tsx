@@ -119,4 +119,32 @@ describe("ToolCallCard – lazy tool detail", () => {
     // The capped snapshot copy still renders; no crash, no empty panel.
     expect(container.textContent).toContain("zzzz");
   });
+  it("fetches the full detail when raw_input carries the _truncated marker", async () => {
+    // The backend smart-compacts large raw_input payloads: it keeps
+    // priority fields, drops heavy ones (e.g. a create call's `file_text`),
+    // and re-serializes with a `"_truncated": true` marker. The compacted
+    // payload can be far shorter than the 4K length gate, so the marker is
+    // the only signal that the snapshot is incomplete and the full stored
+    // record must be pulled on expand to rebuild the diff surface.
+    const compactedInput =
+      '{"command":"create","path":"/a/b.tsx","_truncated":true}';
+    const tool = makeTool({
+      name: "str_replace_editor",
+      kind: "edit",
+      raw_input: compactedInput,
+      diff_paths: ["/a/b.tsx"],
+    });
+    const fullInput =
+      '{"command":"create","path":"/a/b.tsx","file_text":"export const X = 1;\\n"}';
+    mockedGetToolDetail.mockResolvedValue(
+      makeTool({ name: "str_replace_editor", kind: "edit", raw_input: fullInput }),
+    );
+
+    const { container } = renderCard(tool);
+    expandCard(container);
+
+    await waitFor(() => {
+      expect(mockedGetToolDetail).toHaveBeenCalledWith("tool-1");
+    });
+  });
 });
