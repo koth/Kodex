@@ -737,6 +737,42 @@ fn synthetic_edit_diff(
         .or_else(|| args.get("path"))
         .or_else(|| args.get("filePath"))?
         .as_str()?;
+
+    // `str_replace_editor` with `command: "create"` (or any write tool whose
+    // arguments carry `file_text` / `content` with no old text) creates a new
+    // file: emit a whole-file-added diff so the workbench renders the diff
+    // surface instead of a shell fallback card. The reducer treats an empty
+    // `old_text` as a trustworthy "create" baseline (vs. `None`, which it
+    // cannot trust for fragment detection).
+    let create_text = args
+        .get("file_text")
+        .or_else(|| args.get("content"))
+        .or_else(|| args.get("new_content"))
+        .or_else(|| args.get("newContent"))
+        .and_then(serde_json::Value::as_str);
+    let command = args
+        .get("command")
+        .and_then(serde_json::Value::as_str)
+        .map(|c| c.trim().to_lowercase());
+    let has_old = args
+        .get("old_string")
+        .or_else(|| args.get("old_str"))
+        .or_else(|| args.get("oldString"))
+        .or_else(|| args.get("before"))
+        .or_else(|| args.get("oldText"))
+        .is_some();
+    let is_create =
+        matches!(command.as_deref(), Some("create")) || (create_text.is_some() && !has_old);
+    if is_create {
+        let new_text = create_text?;
+        return Some(ClientEvent::ToolDiff {
+            id: call_id.to_string(),
+            path: path.to_string(),
+            old_text: Some(String::new()),
+            new_text: new_text.to_string(),
+        });
+    }
+
     let old = args
         .get("old_string")
         .or_else(|| args.get("old_str"))
@@ -1261,6 +1297,54 @@ mod tests {
         assert!(matches!(
             &mapped.events[1],
             ClientEvent::ToolCompleted { id, .. } if id == "call-e-term"
+        ));
+    }
+
+    #[test]
+    fn generic_result_for_create_synthesizes_whole_file_diff() {
+        // A `str_replace_editor` `create` call carries the new file body in
+        // `file_text` with no old/new pair. Without a diff view from dsh the
+        // bridge must still synthesize a whole-file-added `ToolDiff` (empty
+        // `old_text` => trustworthy "create" baseline) so the workbench shows
+        // the diff surface instead of a shell fallback card.
+        let (sink, _rx) = test_sink();
+        let call = mux(serde_json::json!({
+            "type": "session/event",
+            "sessionId": "s-1",
+            "event": {
+                "type": "tool/call",
+                "seq": 3,
+                "time": 0.0,
+                "data": { "turn": 1, "step": 1, "callId": "call-c", "name": "str_replace_editor", "arguments": "{\"command\":\"create\",\"path\":\"/a/b.tsx\",\"file_text\":\"import React from 'react';\\n\\nexport const X = () => null;\\n\"}" }
+            },
+            "view": { "for": "call", "view": { "card": "generic", "title": "str_replace_editor /a/b.tsx" } }
+        }));
+        let _ = map_mux_frame(&call, &sink);
+        let result = mux(serde_json::json!({
+            "type": "session/event",
+            "sessionId": "s-1",
+            "event": {
+                "type": "tool/result",
+                "seq": 4,
+                "time": 0.0,
+                "data": {
+                    "turn": 1, "step": 1,
+                    "message": {
+                        "role": "user",
+                        "content": [{ "type": "tool-result", "toolCallId": "call-c", "content": [] }]
+                    }
+                }
+            },
+            "view": { "for": "result", "view": { "card": "generic" } }
+        }));
+        let mapped = map_mux_frame(&result, &sink);
+        assert!(matches!(
+            &mapped.events[0],
+            ClientEvent::ToolDiff { id, path, old_text, new_text }
+                if id == "call-c"
+                    && path == "/a/b.tsx"
+                    && old_text.as_deref() == Some("")
+                    && new_text == "import React from 'react';\n\nexport const X = () => null;\n"
         ));
     }
 

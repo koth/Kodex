@@ -1276,6 +1276,63 @@ fn session_switch_keeps_history_window_fields_per_session() {
 }
 
 #[test]
+fn new_session_does_not_inherit_thinking_state() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = test_app(&dir);
+    wait_for_control(&mut app, SessionConfigCategory::Model);
+
+    // Simulate the visible session being mid-think.
+    app.apply_event_with_dirty_tracking(&ClientEvent::ThinkingActivity { active: true });
+    app.apply_event_with_dirty_tracking(&ClientEvent::ThinkingChunk {
+        text: "æ­£å¨æè...".into(),
+    });
+    assert_eq!(app.ui.thinking_status, Some(ThinkingStatus::Active));
+    assert!(!app.ui.thinking_text.is_empty());
+
+    // Creating a new session must NOT carry over the thinking indicator/text.
+    app.session_create(None, None).unwrap();
+    wait_for_control(&mut app, SessionConfigCategory::Model);
+    assert_eq!(app.ui.thinking_status, None);
+    assert!(app.ui.thinking_text.is_empty());
+    assert!(app.ui.pending_steers.is_empty());
+}
+
+#[test]
+fn stored_session_does_not_inherit_thinking_state_on_switch() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = test_app(&dir);
+    wait_for_control(&mut app, SessionConfigCategory::Model);
+    let first_session_id = app.ui.session.id.to_string();
+
+    // Create a second session so we have a stored session to switch back to.
+    app.session_create(None, None).unwrap();
+    wait_for_control(&mut app, SessionConfigCategory::Model);
+    let second_session_id = app.ui.session.id.to_string();
+
+    // Switch back to the first session and simulate it being mid-think.
+    app.session_switch(&first_session_id).unwrap();
+    wait_for_control(&mut app, SessionConfigCategory::Model);
+    app.apply_event_with_dirty_tracking(&ClientEvent::ThinkingActivity { active: true });
+    app.apply_event_with_dirty_tracking(&ClientEvent::ThinkingChunk {
+        text: "thinking...".into(),
+    });
+    assert_eq!(app.ui.thinking_status, Some(ThinkingStatus::Active));
+
+    // Retire the second session's background runtime so the next switch goes
+    // through `runtime_for_stored_session` (which clones `self.ui`).
+    if let Some(mut runtime) = app.runtime_registry.remove(&second_session_id) {
+        runtime.session.shutdown();
+    }
+
+    // Switching back to the second (idle) session must NOT leak the first
+    // session's thinking indicator or text.
+    app.session_switch(&second_session_id).unwrap();
+    wait_for_control(&mut app, SessionConfigCategory::Model);
+    assert_eq!(app.ui.thinking_status, None);
+    assert!(app.ui.thinking_text.is_empty());
+}
+
+#[test]
 fn switched_away_in_flight_prompt_completes_under_original_session() {
     let dir = tempfile::tempdir().unwrap();
     let mut app = test_app(&dir);

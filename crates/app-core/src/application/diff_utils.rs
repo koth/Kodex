@@ -1529,6 +1529,78 @@ fn kind_and_name_tokens<'a>(kind: &'a str, name: &'a str) -> impl Iterator<Item 
         .map(str::to_ascii_lowercase)
 }
 
+pub(super) fn is_shell_command_tool_label(value: &str) -> bool {
+    let normalized = value.trim().to_ascii_lowercase();
+    matches!(
+        normalized.as_str(),
+        "bash"
+            | "shell"
+            | "execute"
+            | "exec"
+            | "terminal"
+            | "cmd"
+            | "powershell"
+            | "pwsh"
+            | "local_shell"
+            | "local-shell"
+            | "shell_command"
+            | "shell-command"
+            | "run_shell_command"
+            | "run-shell-command"
+            | "exec_command"
+            | "exec-command"
+    ) || normalized.contains("shell")
+        || normalized.starts_with("bash ")
+        || normalized.starts_with("sh ")
+        || normalized.starts_with("zsh ")
+        || normalized.starts_with("pwsh")
+        || normalized.starts_with("powershell")
+}
+
+/// Whether the tool is explicitly a read-only exploration tool (view/read/
+/// search/list-shaped kinds or names). Such tools never mutate the workspace,
+/// so the file tracker must not open a recording window for them — otherwise
+/// external writes that race with the read get misattributed to the read tool
+/// and show up as agent edits in the review panel.
+pub(super) fn is_read_only_tool_identity(kind: &str, name: &str) -> bool {
+    if is_file_write_tool_identity(kind, name) {
+        return false;
+    }
+    kind_and_name_tokens(kind, name).any(|token| {
+        matches!(
+            token.as_str(),
+            "read" | "view" | "open" | "cat" | "search" | "grep" | "glob" | "find" | "list" | "ls" | "query"
+        )
+    })
+}
+
+/// Whether a tool that just started should get a file-tracking recording
+/// window. Read-only exploration tools are excluded so dsh-harness `view`/
+/// search calls never attribute unrelated workspace edits to themselves.
+/// Shell-shaped tools always record (they can write via redirects/scripts);
+/// everything else records only when its raw input carries an explicit write
+/// payload (old/new pairs, change maps, file content) or a shell write hint.
+pub(super) fn tool_start_should_record_write_baseline(
+    kind: &str,
+    name: &str,
+    raw_input: Option<&str>,
+) -> bool {
+    if is_read_only_tool_identity(kind, name) {
+        return false;
+    }
+    if is_file_write_tool_identity(kind, name) {
+        return true;
+    }
+    let shell_shaped = [kind, name]
+        .iter()
+        .any(|value| is_shell_command_tool_label(value));
+    if shell_shaped {
+        return true;
+    }
+    raw_input_has_write_payload(raw_input)
+        || !tool_command_write_hint_paths(raw_input).is_empty()
+}
+
 fn canonical_unavailable_diff(
     quality: DiffQuality,
     old_text: Option<String>,

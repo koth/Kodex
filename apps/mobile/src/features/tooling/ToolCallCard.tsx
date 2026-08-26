@@ -1,7 +1,7 @@
 import { memo, useState } from "react";
 import { View, Text, Pressable } from "react-native";
 import type { ToolInvocation } from "../../types";
-import { styles, colors, spacing } from "../theme";
+import { styles, colors, spacing, radius, shadows } from "../theme";
 
 interface Props {
   tool: ToolInvocation;
@@ -24,6 +24,15 @@ function tabDisabled(tool: ToolInvocation, tab: Tab): boolean {
   return false;
 }
 
+function statusTint(status: string): { color: string; bg: string; border: string } {
+  if (status === "Succeeded") return { color: colors.success, bg: colors.successTint, border: colors.success };
+  if (status === "Failed" || status === "Interrupted")
+    return { color: colors.danger, bg: colors.dangerTint, border: colors.danger };
+  if (status === "Pending" || status === "Running")
+    return { color: colors.warn, bg: colors.warnTint, border: colors.warn };
+  return { color: colors.textDim, bg: colors.surfaceAlt, border: colors.border };
+}
+
 // Fold/expand tool invocation card: summary + status, expandable diff
 // previews, logs, and raw input/output. Ported from the desktop ToolCallCard
 // but rendered with RN primitives (no Monaco/diff lib in the mobile MVP).
@@ -31,38 +40,38 @@ function ToolCallCardImpl({ tool, onStop }: Props) {
   const [expanded, setExpanded] = useState(false);
   const [section, setSection] = useState<Tab>("summary");
   const running = tool.status === "Pending" || tool.status === "Running";
-  const statusColor =
-    tool.status === "Succeeded"
-      ? colors.success
-      : tool.status === "Failed" || tool.status === "Interrupted"
-        ? colors.danger
-        : running
-          ? colors.warn
-          : colors.textDim;
+  const tint = statusTint(tool.status);
 
   const tabs: Tab[] = ["summary", "diff", "logs", "raw"];
 
   return (
-    <View style={[styles.card, { padding: spacing.sm }]}>
-      <Pressable style={styles.rowBetween} onPress={() => setExpanded((e) => !e)}>
+    <View style={[styles.card, { padding: spacing.md, marginHorizontal: 0, marginVertical: spacing.xs, ...shadows.card }]}>
+      <Pressable
+        style={({ pressed }) => [styles.rowBetween, { opacity: pressed ? 0.7 : 1 }]}
+        onPress={() => setExpanded((e) => !e)}
+      >
         <View style={[styles.row, { flex: 1, flexWrap: "wrap" }]}>
-          <Text style={[styles.textDim, { fontFamily: "monospace", fontSize: 12 }]}>{tool.name}</Text>
+          <Text style={{ color: colors.text, fontFamily: "monospace", fontSize: 12, fontWeight: "700" }}>{tool.name}</Text>
           {tool.kind && tool.kind !== "permission" ? (
-            <Text style={[styles.badge, { marginLeft: spacing.xs, fontSize: 11 }]}>{tool.kind}</Text>
+            <View style={[styles.chip, { marginLeft: spacing.xs, backgroundColor: colors.surfaceAlt, borderColor: colors.border }]}>
+              <Text style={{ color: colors.textDim, fontSize: 10, fontWeight: "600", textTransform: "uppercase", letterSpacing: 0.4 }}>{tool.kind}</Text>
+            </View>
           ) : null}
         </View>
-        <Text style={[styles.text, { fontSize: 12, color: statusColor }]}>{tool.status}</Text>
+        <View style={[styles.chip, { backgroundColor: tint.bg, borderColor: tint.border }]}>
+          <Text style={{ color: tint.color, fontSize: 10, fontWeight: "700", textTransform: "uppercase", letterSpacing: 0.4 }}>{tool.status}</Text>
+        </View>
       </Pressable>
 
       {tool.summary ? (
         <Pressable onPress={() => setExpanded((e) => !e)}>
-          <Text style={[styles.text, { marginTop: spacing.xs, fontSize: 14 }]}>{tool.summary}</Text>
+          <Text style={[styles.text, { marginTop: spacing.xs, fontSize: 14, lineHeight: 20 }]}>{tool.summary}</Text>
         </Pressable>
       ) : null}
 
       {expanded ? (
-        <View style={{ marginTop: spacing.sm }}>
-          <View style={[styles.row, { marginBottom: spacing.xs, flexWrap: "wrap" }]}>
+        <View style={{ marginTop: spacing.md }}>
+          <View style={[styles.row, { marginBottom: spacing.sm, flexWrap: "wrap" }]}>
             {tabs.map((tab) => {
               const active = section === tab;
               const disabled = tabDisabled(tool, tab);
@@ -71,9 +80,13 @@ function ToolCallCardImpl({ tool, onStop }: Props) {
                   key={tab}
                   onPress={() => setSection(tab)}
                   disabled={disabled}
-                  style={[styles.badge, active && { backgroundColor: colors.accent }, { marginRight: spacing.xs, marginBottom: spacing.xs }, disabled && { opacity: 0.4 }]}
+                  style={[
+                    styles.chip,
+                    { marginRight: spacing.xs, marginBottom: spacing.xs, backgroundColor: active ? colors.accent : colors.surfaceAlt, borderColor: active ? colors.accent : colors.border },
+                    disabled && { opacity: 0.35 },
+                  ]}
                 >
-                  <Text style={[styles.text, { fontSize: 12 }, active && { color: "#fff" }]}>{tabLabel(tool, tab)}</Text>
+                  <Text style={{ color: active ? "#fff" : colors.textDim, fontSize: 11, fontWeight: "600" }}>{tabLabel(tool, tab)}</Text>
                 </Pressable>
               );
             })}
@@ -83,17 +96,21 @@ function ToolCallCardImpl({ tool, onStop }: Props) {
             <Text style={styles.textDim}>{tool.detail_text}</Text>
           ) : null}
           {section === "summary" && tool.error ? (
-            <Text style={[styles.textDim, { color: colors.danger, marginTop: spacing.xs }]}>{tool.error}</Text>
+            <View style={[styles.chip, { marginTop: spacing.xs, backgroundColor: colors.dangerTint, borderColor: colors.danger, alignSelf: "flex-start" }]}>
+              <Text style={{ color: colors.danger, fontSize: 12 }}>{tool.error}</Text>
+            </View>
           ) : null}
 
           {section === "diff"
             ? tool.diff_previews.map((preview) => (
                 <View key={preview.path} style={{ marginTop: spacing.xs }}>
-                  <Text style={[styles.mono, { color: colors.textDim }]}>{preview.path}</Text>
+                  <View style={[styles.row, { backgroundColor: colors.surfaceAlt, borderRadius: radius.sm, paddingHorizontal: spacing.sm, paddingVertical: 4 }]}>
+                    <Text style={[styles.mono, { color: colors.textDim, fontSize: 12 }]}>{preview.path}</Text>
+                  </View>
                   {preview.hunks.map((hunk, hi) => (
                     <View key={`${preview.path}:${hi}`} style={{ marginTop: spacing.xs }}>
                       {hunk.heading ? (
-                        <Text style={[styles.mono, { color: colors.textDim }]}>{hunk.heading}</Text>
+                        <Text style={[styles.mono, { color: colors.textFaint, fontSize: 11 }]}>{hunk.heading}</Text>
                       ) : null}
                       {hunk.lines.map((line, li) => (
                         <Text
@@ -102,6 +119,8 @@ function ToolCallCardImpl({ tool, onStop }: Props) {
                             styles.mono,
                             {
                               color: line.kind === "Added" ? colors.success : line.kind === "Removed" ? colors.danger : colors.textDim,
+                              fontSize: 12,
+                              lineHeight: 18,
                             },
                           ]}
                         >
@@ -117,9 +136,9 @@ function ToolCallCardImpl({ tool, onStop }: Props) {
 
           {section === "logs"
             ? tool.logs.map((entry, idx) => (
-                <View key={`log:${idx}`} style={{ marginTop: spacing.xs }}>
-                  <Text style={[styles.text, { fontWeight: "600", fontSize: 12 }]}>{entry.title}</Text>
-                  {entry.body ? <Text style={styles.mono}>{entry.body}</Text> : null}
+                <View key={`log:${idx}`} style={{ marginTop: spacing.xs, backgroundColor: colors.surfaceAlt, borderRadius: radius.sm, padding: spacing.sm }}>
+                  <Text style={[styles.text, { fontWeight: "700", fontSize: 12 }]}>{entry.title}</Text>
+                  {entry.body ? <Text style={[styles.mono, { marginTop: 4 }]}>{entry.body}</Text> : null}
                 </View>
               ))
             : null}
@@ -128,14 +147,14 @@ function ToolCallCardImpl({ tool, onStop }: Props) {
             <View>
               {tool.raw_input ? (
                 <View style={{ marginTop: spacing.xs }}>
-                  <Text style={[styles.textDim, { fontSize: 12 }]}>input</Text>
-                  <Text style={styles.mono}>{tool.raw_input}</Text>
+                  <Text style={[styles.textFaint, { fontSize: 11, fontWeight: "700", textTransform: "uppercase", letterSpacing: 0.5 }]}>input</Text>
+                  <Text style={[styles.mono, { marginTop: 2 }]}>{tool.raw_input}</Text>
                 </View>
               ) : null}
               {tool.raw_output ? (
                 <View style={{ marginTop: spacing.xs }}>
-                  <Text style={[styles.textDim, { fontSize: 12 }]}>output</Text>
-                  <Text style={styles.mono}>{tool.raw_output}</Text>
+                  <Text style={[styles.textFaint, { fontSize: 11, fontWeight: "700", textTransform: "uppercase", letterSpacing: 0.5 }]}>output</Text>
+                  <Text style={[styles.mono, { marginTop: 2 }]}>{tool.raw_output}</Text>
                 </View>
               ) : null}
             </View>
@@ -143,10 +162,10 @@ function ToolCallCardImpl({ tool, onStop }: Props) {
 
           {running && tool.can_stop && onStop ? (
             <Pressable
-              style={[styles.buttonGhost, { marginTop: spacing.md, alignSelf: "flex-start" }]}
+              style={({ pressed }) => [styles.buttonGhost, { marginTop: spacing.md, alignSelf: "flex-start", opacity: pressed ? 0.7 : 1 }]}
               onPress={() => onStop(tool.call_id)}
             >
-              <Text style={[styles.text, { color: colors.danger }]}>Stop</Text>
+              <Text style={[styles.text, { color: colors.danger, fontWeight: "600" }]}>Stop</Text>
             </Pressable>
           ) : null}
         </View>

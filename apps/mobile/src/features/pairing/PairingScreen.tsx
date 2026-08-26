@@ -6,7 +6,7 @@ import * as ImagePicker from "expo-image-picker";
 import { useAppController, useConnectionState } from "../../app/AppServicesContext";
 import { WsTransport } from "../../relay/transport";
 import { parsePairingQr } from "../../pairing/qr-parse";
-import { styles, colors, spacing } from "../theme";
+import { styles, colors, spacing, radius, shadows } from "../theme";
 
 type Phase = "idle" | "dialing" | "authenticating" | "pairing" | "connected" | "error";
 
@@ -82,43 +82,79 @@ export function PairingScreen({
   const busy = phase === "dialing" || phase === "authenticating" || phase === "pairing" || connState === "connecting" || connState === "authenticating" || connState === "paired/e2e";
 
   return (
-    <ScrollView style={styles.screen} contentContainerStyle={{ padding: spacing.md }}>
-      <Text style={styles.title}>Pair with Maju PC</Text>
-      <Text style={styles.subtitle}>
-        Scan the QR code shown on the PC, or paste the pairing payload below.
-        Pairing uses end-to-end encryption (X25519 + ChaCha20-Poly1305).
-      </Text>
+    <ScrollView style={styles.screen} contentContainerStyle={{ padding: spacing.lg, paddingBottom: spacing.xxl }}>
+      <View style={{ alignItems: "center", marginTop: spacing.xl, marginBottom: spacing.xl }}>
+        <View
+          style={{
+            width: 64,
+            height: 64,
+            borderRadius: 20,
+            alignItems: "center",
+            justifyContent: "center",
+            backgroundColor: colors.accentDim,
+            borderWidth: 1,
+            borderColor: colors.borderStrong,
+            ...shadows.glow,
+          }}
+        >
+          <Text style={{ color: colors.accent, fontSize: 30, fontWeight: "800" }}>M</Text>
+        </View>
+        <Text style={[styles.title, { textAlign: "center", marginTop: spacing.lg, marginBottom: spacing.xs }]}>
+          Pair with Maju PC
+        </Text>
+        <Text style={[styles.subtitle, { textAlign: "center", marginBottom: 0, maxWidth: 320 }]}>
+          Scan the QR shown on your computer to link this device. Pairing runs an end-to-end encrypted handshake (X25519 + ChaCha20-Poly1305).
+        </Text>
+      </View>
 
       {!permission || permission.status !== "granted" ? (
-        <View style={styles.card}>
-          <Text style={styles.text}>Camera permission required to scan the QR.</Text>
-          <Pressable style={[styles.button, { marginTop: spacing.md }]} onPress={() => requestPermission()}>
+        <View style={[styles.card, { alignItems: "center" }]}>
+          <Text style={[styles.text, { textAlign: "center", marginBottom: spacing.md }]}>
+            Camera permission is required to scan the QR code.
+          </Text>
+          <Pressable
+            style={({ pressed }) => [styles.button, { opacity: pressed ? 0.9 : 1, minWidth: 180 }]}
+            onPress={() => requestPermission()}
+          >
             <Text style={styles.buttonText}>Grant camera</Text>
           </Pressable>
         </View>
       ) : (
-        <View style={[styles.card, { padding: 0, overflow: "hidden", height: 260 }]}>
+        <View style={[styles.card, { padding: 0, overflow: "hidden", height: 280, borderColor: colors.borderStrong, ...shadows.raised }]}>
           <CameraView
             facing="back"
             barcodeScannerSettings={{ barcodeTypes: ["qr"] }}
             onBarcodeScanned={onBarcodeScanned}
             style={{ flex: 1 }}
           />
+          <View
+            pointerEvents="none"
+            style={{
+              position: "absolute",
+              top: spacing.lg,
+              left: spacing.lg,
+              right: spacing.lg,
+              bottom: spacing.lg,
+              borderRadius: radius.lg,
+              borderWidth: 2,
+              borderColor: "rgba(255,255,255,0.35)",
+            }}
+          />
         </View>
       )}
 
-      <Text style={[styles.sectionHeader, { marginTop: spacing.lg }]}>Or upload QR image</Text>
+      <Text style={styles.sectionHeader}>Or upload a QR image</Text>
       <Pressable
-        style={[styles.button, { marginTop: spacing.sm }, busy && { opacity: 0.5 }]}
+        style={({ pressed }) => [styles.buttonGhost, { marginTop: spacing.sm, opacity: pressed ? 0.85 : 1, borderColor: colors.borderStrong }, busy && { opacity: 0.5 }]}
         disabled={busy}
         onPress={pickQrImage}
       >
-        <Text style={styles.buttonText}>Pick QR from photos</Text>
+        <Text style={[styles.text, { fontWeight: "600" }]}>Pick QR from photos</Text>
       </Pressable>
 
-      <Text style={[styles.sectionHeader, { marginTop: spacing.lg }]}>Or paste payload</Text>
+      <Text style={styles.sectionHeader}>Or paste the payload</Text>
       <TextInput
-        style={[styles.input, { minHeight: 80 }]}
+        style={[styles.input, { minHeight: 84, fontFamily: "monospace", fontSize: 13 }]}
         placeholder='{"relay_endpoint":"wss://…","pairing_code":"…","pc_device_pubkey":"…"}'
         placeholderTextColor={colors.textDim}
         value={manual}
@@ -128,18 +164,20 @@ export function PairingScreen({
         autoCorrect={false}
       />
       <Pressable
-        style={[styles.button, { marginTop: spacing.sm }, manual.trim().length === 0 && { opacity: 0.5 }]}
+        style={({ pressed }) => [styles.button, { marginTop: spacing.sm, opacity: pressed ? 0.9 : 1 }, manual.trim().length === 0 && { opacity: 0.5 }]}
         disabled={busy || manual.trim().length === 0}
         onPress={() => pairFromJson(manual.trim())}
       >
-        <Text style={styles.buttonText}>Pair</Text>
+        <Text style={styles.buttonText}>Pair device</Text>
       </Pressable>
 
-      <View style={{ marginTop: spacing.lg, alignItems: "center" }}>
+      <View style={{ marginTop: spacing.xl, alignItems: "center" }}>
         {busy && <ActivityIndicator color={colors.accent} />}
         <Text style={styles.status}>{phase === "idle" ? `state: ${connState}` : `phase: ${phase}`}</Text>
         {error && (
-          <Text style={[styles.textDim, { color: colors.danger, marginTop: spacing.xs }]}>{error}</Text>
+          <View style={[styles.chip, { marginTop: spacing.sm, backgroundColor: colors.dangerTint, borderColor: colors.danger }]}>
+            <Text style={{ color: colors.danger, fontSize: 12 }}>{error}</Text>
+          </View>
         )}
         {phase === "connected" && (
           <Text style={[styles.text, { color: colors.success, marginTop: spacing.sm }]}>
@@ -152,8 +190,11 @@ export function PairingScreen({
           </Text>
         )}
         {onOpenDiagnostics ? (
-          <Pressable style={{ marginTop: spacing.md, padding: spacing.sm }} onPress={onOpenDiagnostics}>
-            <Text style={[styles.text, { color: colors.accent }]}>View diagnostics log</Text>
+          <Pressable
+            style={({ pressed }) => ({ marginTop: spacing.md, padding: spacing.sm, opacity: pressed ? 0.7 : 1 })}
+            onPress={onOpenDiagnostics}
+          >
+            <Text style={[styles.text, { color: colors.textDim, fontSize: 13 }]}>View diagnostics log</Text>
           </Pressable>
         ) : null}
       </View>

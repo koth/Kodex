@@ -1,6 +1,6 @@
 import { View, Text, Pressable, Alert } from "react-native";
 import { useAppController, useConnectionState, useSubscriptionState } from "../../app/AppServicesContext";
-import { styles, colors, spacing } from "../theme";
+import { styles, colors, spacing, radius } from "../theme";
 
 // Settings: connection state, device id, subscription status, unbind/re-pair,
 // and a kill switch (disconnect). All state comes from the controller.
@@ -40,44 +40,66 @@ export function SettingsScreen({
   };
 
   const subStatus = subscription.active
-    ? `active · ${subscription.plan ?? "—"}`
+    ? `active \u00b7 ${subscription.plan ?? "\u2014"}`
     : "free / inactive";
+  const connTint =
+    connState === "connected"
+      ? { color: colors.success, bg: colors.successTint, border: colors.success }
+      : { color: colors.warn, bg: colors.warnTint, border: colors.warn };
 
   return (
     <View style={styles.screen}>
-      <View style={{ padding: spacing.md }}>
+      <View style={{ padding: spacing.lg }}>
         <Text style={styles.title}>Settings</Text>
+        <Text style={styles.subtitle}>Manage the link between this device and your Maju PC.</Text>
 
+        <Text style={styles.sectionHeader}>Connection</Text>
         <View style={styles.card}>
-          <Text style={styles.textDim}>Connection</Text>
-          <Text style={styles.text}>{connState}</Text>
+          <View style={styles.rowBetween}>
+            <Text style={styles.textDim}>Status</Text>
+            <View style={[styles.chip, { backgroundColor: connTint.bg, borderColor: connTint.border }]}>
+              <Text style={{ color: connTint.color, fontSize: 11, fontWeight: "700" }}>{connState}</Text>
+            </View>
+          </View>
         </View>
 
+        <Text style={styles.sectionHeader}>Device</Text>
         <View style={styles.card}>
           <Text style={styles.textDim}>Device id</Text>
-          <Text style={styles.mono}>{controller.deviceIdValue ?? "(generating)"}</Text>
+          <Text style={[styles.mono, { marginTop: spacing.xs, fontSize: 12, color: colors.text }]}>
+            {controller.deviceIdValue ?? "(generating)"}
+          </Text>
         </View>
 
+        <Text style={styles.sectionHeader}>Subscription</Text>
         <View style={styles.card}>
-          <Text style={styles.textDim}>Subscription</Text>
-          <Text style={styles.text}>{subStatus}</Text>
+          <Text style={styles.textDim}>Plan</Text>
+          <Text style={[styles.text, { marginTop: spacing.xs, fontWeight: "600" }]}>{subStatus}</Text>
           {subscription.expiresAt ? (
-            <Text style={styles.textDim}>expires {new Date(subscription.expiresAt).toLocaleDateString()}</Text>
+            <Text style={[styles.textFaint, { marginTop: spacing.xs }]}>
+              {`expires ${new Date(subscription.expiresAt).toLocaleDateString()}`}
+            </Text>
           ) : null}
         </View>
 
-        <Pressable style={[styles.buttonGhost, { marginTop: spacing.md }]} onPress={unbind}>
-          <Text style={[styles.text, { color: colors.danger }]}>Unbind & re-pair</Text>
+        <Pressable
+          style={({ pressed }) => [styles.buttonGhost, { marginTop: spacing.lg, borderColor: colors.danger, opacity: pressed ? 0.7 : 1 }]}
+          onPress={unbind}
+        >
+          <Text style={[styles.text, { color: colors.danger, fontWeight: "600" }]}>Unbind & re-pair</Text>
         </Pressable>
         {onOpenDiagnostics ? (
           <Pressable
-            style={[styles.buttonGhost, { marginTop: spacing.sm }]}
+            style={({ pressed }) => [styles.buttonGhost, { marginTop: spacing.sm, opacity: pressed ? 0.7 : 1 }]}
             onPress={onOpenDiagnostics}
           >
-            <Text style={styles.text}>Diagnostics log</Text>
+            <Text style={[styles.text, { fontWeight: "600" }]}>Diagnostics log</Text>
           </Pressable>
         ) : null}
-        <Pressable style={[styles.buttonDanger, { marginTop: spacing.sm }]} onPress={kill}>
+        <Pressable
+          style={({ pressed }) => [styles.buttonDanger, { marginTop: spacing.sm, opacity: pressed ? 0.9 : 1 }]}
+          onPress={kill}
+        >
           <Text style={styles.buttonText}>Disconnect (kill switch)</Text>
         </Pressable>
       </View>

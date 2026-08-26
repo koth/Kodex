@@ -10,7 +10,7 @@ import { ConversationScreen } from "../features/conversation/ConversationScreen"
 import { SettingsScreen } from "../features/settings/SettingsScreen";
 import { DiagnosticsScreen } from "../features/settings/DiagnosticsScreen";
 import { AppServicesProvider, useConnectionState } from "./AppServicesContext";
-import { colors } from "../features/theme";
+import { colors, spacing } from "../features/theme";
 
 export type RootStackParamList = {
   Sessions: undefined;
@@ -27,7 +27,8 @@ function MainStack({ onRescan }: { onRescan: () => void }) {
       screenOptions={{
         headerStyle: { backgroundColor: colors.surface },
         headerTintColor: colors.text,
-        headerTitleStyle: { color: colors.text },
+        headerTitleStyle: { color: colors.text, fontWeight: "700", fontSize: 17 },
+        headerShadowVisible: false,
         contentStyle: { backgroundColor: colors.bg },
       }}
     >
@@ -38,10 +39,16 @@ function MainStack({ onRescan }: { onRescan: () => void }) {
           headerRight: () => (
             <Pressable
               onPress={() => navigation.navigate("Settings")}
-              hitSlop={8}
-              style={{ paddingHorizontal: 4 }}
+              hitSlop={10}
+              style={({ pressed }) => ({
+                paddingHorizontal: spacing.sm,
+                paddingVertical: spacing.xs,
+                borderRadius: 999,
+                backgroundColor: pressed ? colors.accentTint : "transparent",
+                opacity: pressed ? 0.85 : 1,
+              })}
             >
-              <Text style={{ color: colors.accent, fontSize: 15 }}>Settings</Text>
+              <Text style={{ color: colors.accent, fontSize: 15, fontWeight: "600" }}>Settings</Text>
             </Pressable>
           ),
         })}
@@ -99,21 +106,30 @@ function Root() {
       {showPairing ? (
         <PairingScreen onOpenDiagnostics={() => setShowDiagnostics(true)} />
       ) : showBooting ? (
-        <View style={{ flex: 1, alignItems: "center", justifyContent: "center" }}>
-          <ActivityIndicator color={colors.accent} />
-          <Text style={{ color: colors.textDim, marginTop: 12 }}>Connecting…</Text>
+        <View style={{ flex: 1, alignItems: "center", justifyContent: "center", paddingHorizontal: spacing.xl }}>
+          <ActivityIndicator size="large" color={colors.accent} />
+          <Text style={{ color: colors.text, fontSize: 16, fontWeight: "600", marginTop: spacing.lg }}>Connecting…</Text>
+          <Text style={{ color: colors.textDim, fontSize: 13, marginTop: spacing.xs }}>Establishing end-to-end relay</Text>
           <Pressable
-            style={{ marginTop: 24, padding: 12 }}
+            style={({ pressed }) => ({
+              marginTop: spacing.xxl,
+              paddingHorizontal: spacing.lg,
+              paddingVertical: spacing.sm,
+              borderRadius: 999,
+              borderWidth: 1,
+              borderColor: colors.borderStrong,
+              backgroundColor: pressed ? colors.surfaceAlt : "transparent",
+            })}
             onPress={() => setShowDiagnostics(true)}
           >
-            <Text style={{ color: colors.accent }}>View diagnostics log</Text>
+            <Text style={{ color: colors.accent, fontSize: 14, fontWeight: "600" }}>View diagnostics log</Text>
           </Pressable>
         </View>
       ) : (
         <MainStack onRescan={() => setEverConnected(false)} />
       )}
       {showDiagnostics ? (
-        <View style={{ position: "absolute", top: 0, left: 0, right: 0, bottom: 0 }}>
+        <View style={{ position: "absolute", top: 0, left: 0, right: 0, bottom: 0, backgroundColor: colors.scrim }}>
           <DiagnosticsScreen onClose={() => setShowDiagnostics(false)} />
         </View>
       ) : null}

@@ -4,7 +4,7 @@ import { useAppController, useSnapshot } from "../../app/AppServicesContext";
 import { ConversationTimeline } from "./ConversationTimeline";
 import { Composer } from "../composer/Composer";
 import { PermissionApprovalSheet } from "../permission/PermissionApprovalSheet";
-import { styles, colors, spacing } from "../theme";
+import { styles, colors, spacing, radius } from "../theme";
 
 interface Props {
   sessionId: string;
@@ -65,6 +65,12 @@ export function ConversationScreen({ sessionId, title, onBack }: Props) {
 
   const status = snapshot?.session.status ?? "Idle";
   const streaming = status === "Streaming" || status === "WaitingForTool";
+  const statusTint =
+    status === "Streaming" || status === "WaitingForTool"
+      ? { color: colors.success, bg: colors.successTint, border: colors.success }
+      : status === "Interrupted"
+        ? { color: colors.danger, bg: colors.dangerTint, border: colors.danger }
+        : { color: colors.textDim, bg: colors.surfaceAlt, border: colors.border };
 
   return (
     <KeyboardAvoidingView
@@ -73,43 +79,65 @@ export function ConversationScreen({ sessionId, title, onBack }: Props) {
       keyboardVerticalOffset={Platform.OS === "ios" ? 88 : 0}
       enabled={Platform.OS === "ios"}
     >
-    <View style={styles.screen}>
-      <View style={[styles.rowBetween, { padding: spacing.sm, borderBottomWidth: 1, borderBottomColor: colors.border }]}>
-        <Pressable onPress={onBack} hitSlop={8}>
-          <Text style={[styles.text, { color: colors.accent }]}>‹ Sessions</Text>
-        </Pressable>
-        <View style={{ flex: 1, marginHorizontal: spacing.sm }}>
-          <Text style={[styles.text, { fontWeight: "600" }]} numberOfLines={1}>{title}</Text>
-          <Text style={styles.status}>{status}</Text>
-        </View>
-        {canceling ? (
-          <ActivityIndicator color={colors.accent} />
-        ) : (
-          <Pressable style={[styles.buttonGhost, { paddingVertical: spacing.xs, paddingHorizontal: spacing.sm }]} onPress={handleCancel} disabled={!streaming && status !== "Interrupted"}>
-            <Text style={[styles.text, { fontSize: 13, color: colors.danger }]}>Cancel</Text>
+      <View style={styles.screen}>
+        <View style={[styles.rowBetween, { padding: spacing.md, borderBottomWidth: 1, borderBottomColor: colors.border }]}>
+          <Pressable
+            onPress={onBack}
+            hitSlop={10}
+            style={({ pressed }) => ({
+              flexDirection: "row",
+              alignItems: "center",
+              paddingVertical: spacing.xs,
+              paddingHorizontal: spacing.sm,
+              borderRadius: radius.pill,
+              opacity: pressed ? 0.7 : 1,
+            })}
+          >
+            <Text style={{ color: colors.accent, fontSize: 22, fontWeight: "300", marginRight: 2 }}>{"\u2039"}</Text>
+            <Text style={{ color: colors.accent, fontSize: 15, fontWeight: "600" }}>Sessions</Text>
           </Pressable>
+          <View style={{ flex: 1, marginHorizontal: spacing.sm, minWidth: 0 }}>
+            <Text style={[styles.text, { fontWeight: "700", fontSize: 15 }]} numberOfLines={1}>{title}</Text>
+            <View style={[styles.row, { marginTop: 2 }]}>
+              <View style={[styles.chip, { backgroundColor: statusTint.bg, borderColor: statusTint.border, paddingVertical: 2 }]}>
+                <Text style={{ color: statusTint.color, fontSize: 10, fontWeight: "700", textTransform: "uppercase", letterSpacing: 0.4 }}>
+                  {streaming ? "live" : status.toLowerCase()}
+                </Text>
+              </View>
+            </View>
+          </View>
+          {canceling ? (
+            <ActivityIndicator color={colors.accent} />
+          ) : (
+            <Pressable
+              style={({ pressed }) => [styles.buttonGhost, { paddingVertical: spacing.xs + 1, paddingHorizontal: spacing.md, opacity: pressed ? 0.7 : 1 }]}
+              onPress={handleCancel}
+              disabled={!streaming && status !== "Interrupted"}
+            >
+              <Text style={[styles.text, { fontSize: 13, fontWeight: "600", color: colors.danger }]}>Cancel</Text>
+            </Pressable>
+          )}
+        </View>
+
+        {snapshot ? (
+          <ConversationTimeline snapshot={snapshot} onStopTool={handleStop} />
+        ) : sendError ? (
+          <View style={styles.center}>
+            <Text style={[styles.text, { color: colors.danger, textAlign: "center" }]}>
+              {sendError}
+            </Text>
+          </View>
+        ) : (
+          <View style={styles.center}>
+            <ActivityIndicator color={colors.accent} />
+            <Text style={[styles.textDim, { marginTop: spacing.sm }]}>{"Syncing session\u2026"}</Text>
+          </View>
         )}
+
+        <Composer onSend={handleSend} disabled={!snapshot} error={sendError} />
+
+        <PermissionApprovalSheet />
       </View>
-
-      {snapshot ? (
-        <ConversationTimeline snapshot={snapshot} onStopTool={handleStop} />
-      ) : sendError ? (
-        <View style={styles.center}>
-          <Text style={[styles.text, { color: colors.danger, textAlign: "center" }]}>
-            {sendError}
-          </Text>
-        </View>
-      ) : (
-        <View style={styles.center}>
-          <ActivityIndicator color={colors.accent} />
-          <Text style={[styles.textDim, { marginTop: spacing.sm }]}>Syncing session…</Text>
-        </View>
-      )}
-
-      <Composer onSend={handleSend} disabled={!snapshot} error={sendError} />
-
-      <PermissionApprovalSheet />
-    </View>
     </KeyboardAvoidingView>
   );
 }

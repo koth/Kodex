@@ -2,6 +2,7 @@ use super::diff_utils::{
     CanonicalTextDiff, ExactEditText, canonical_text_diff, edit_input_after_text,
     edit_input_before_text, edit_input_change_type_for_path, edit_input_content_for_path,
     edit_input_unified_diff_for_path, is_file_write_tool_identity,
+    is_shell_command_tool_label,
     looks_like_fragment_to_full_file_text, looks_like_whole_file_addition_hunks,
     normalize_diff_text_for_session_change, reverse_apply_diff_hunks, reverse_apply_unified_diff,
     tool_command_write_hint_paths, tool_diff_hunks_for_detected_write, tool_event_change_paths,
@@ -1170,34 +1171,6 @@ impl Application {
 
         None
     }
-}
-
-fn is_shell_command_tool_label(value: &str) -> bool {
-    let normalized = value.trim().to_ascii_lowercase();
-    matches!(
-        normalized.as_str(),
-        "bash"
-            | "shell"
-            | "execute"
-            | "exec"
-            | "terminal"
-            | "cmd"
-            | "powershell"
-            | "pwsh"
-            | "local_shell"
-            | "local-shell"
-            | "shell_command"
-            | "shell-command"
-            | "run_shell_command"
-            | "run-shell-command"
-            | "exec_command"
-            | "exec-command"
-    ) || normalized.contains("shell")
-        || normalized.starts_with("bash ")
-        || normalized.starts_with("sh ")
-        || normalized.starts_with("zsh ")
-        || normalized.starts_with("pwsh")
-        || normalized.starts_with("powershell")
 }
 
 fn tool_raw_input_looks_like_shell_command(raw_input: Option<&str>) -> bool {

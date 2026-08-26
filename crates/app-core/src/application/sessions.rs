@@ -889,6 +889,16 @@ impl Application {
         ui.session_changes.clear();
         ui.review_changes.clear();
         ui.turn_changes.clear();
+        // Transient per-turn state must NOT be inherited from the currently
+        // visible session: `thinking_status`/`thinking_text` are live-run-only
+        // fields (never persisted, never reconstructed on resume), and
+        // `pending_steers` belong to the originating session's active turn.
+        // Without clearing, switching to a stored session while another session
+        // is mid-think leaks that session's thinking indicator and text into
+        // the freshly loaded (idle) session's UI.
+        ui.thinking_status = None;
+        ui.thinking_text.clear();
+        ui.pending_steers.clear();
         ui.usage = self
             .store
             .load_session_usage_snapshot(id)
@@ -1021,6 +1031,11 @@ impl Application {
         ui.session_changes.clear();
         ui.review_changes.clear();
         ui.turn_changes.clear();
+        // Transient per-turn state must NOT be inherited from the currently
+        // visible session (same rationale as `runtime_for_stored_session`).
+        ui.thinking_status = None;
+        ui.thinking_text.clear();
+        ui.pending_steers.clear();
         ui.usage = Default::default();
 
         let _ = self.store.update_session_model_mode(

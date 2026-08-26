@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { View, Text, TextInput, Pressable, ActivityIndicator, Keyboard } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
-import { styles, colors, spacing } from "../theme";
+import { styles, colors, spacing, radius } from "../theme";
 
 interface Props {
   onSend: (text: string) => void | Promise<void>;
@@ -54,31 +54,57 @@ export function Composer({ onSend, disabled, error }: Props) {
         borderTopColor: colors.border,
         paddingBottom:
           keyboardHeight > 0
-            ? Math.max(0, keyboardHeight - insets.bottom) + 16
-            : 0,
+            ? Math.max(0, keyboardHeight - insets.bottom) + 12
+            : insets.bottom > 0
+              ? 0
+              : 8,
       }}
     >
       {error ? (
-        <Text style={{ color: colors.danger, paddingHorizontal: spacing.sm, paddingTop: spacing.xs }}>
-          {error}
-        </Text>
+        <View style={{ paddingHorizontal: spacing.md, paddingTop: spacing.xs + 2 }}>
+          <View style={[styles.chip, { backgroundColor: colors.dangerTint, borderColor: colors.danger, alignSelf: "flex-start" }]}>
+            <Text style={{ color: colors.danger, fontSize: 12 }}>{error}</Text>
+          </View>
+        </View>
       ) : null}
-      <View style={{ flexDirection: "row", alignItems: "flex-end", padding: spacing.sm }}>
+      <View style={{ flexDirection: "row", alignItems: "flex-end", padding: spacing.sm, gap: spacing.sm }}>
         <TextInput
-          style={[styles.input, { flex: 1, minHeight: 44, maxHeight: 140 }]}
-          placeholder="Message the agent…"
-          placeholderTextColor={colors.textDim}
+          style={[
+            styles.input,
+            {
+              flex: 1,
+              minHeight: 46,
+              maxHeight: 140,
+              borderRadius: radius.pill,
+              paddingHorizontal: spacing.lg,
+              fontSize: 15,
+            },
+          ]}
+          placeholder={"Message the agent\u2026"}
+          placeholderTextColor={colors.textFaint}
           value={text}
           onChangeText={setText}
           multiline
           editable={!disabled}
         />
         <Pressable
-          style={[styles.button, { marginLeft: spacing.sm, alignSelf: "stretch", justifyContent: "center" }, !canSend && { opacity: 0.5 }]}
+          style={({ pressed }) => [
+            styles.pillButton,
+            {
+              width: 46,
+              minHeight: 46,
+              height: "100%",
+              opacity: canSend ? (pressed ? 0.85 : 1) : 0.4,
+            },
+          ]}
           disabled={!canSend}
           onPress={handleSend}
         >
-          {sending ? <ActivityIndicator color="#fff" /> : <Text style={styles.buttonText}>Send</Text>}
+          {sending ? (
+            <ActivityIndicator color="#fff" size="small" />
+          ) : (
+            <Text style={{ color: "#fff", fontSize: 18, fontWeight: "800", lineHeight: 20 }}>{"\u2191"}</Text>
+          )}
         </Pressable>
       </View>
     </View>

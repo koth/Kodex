@@ -1,41 +1,52 @@
 import Markdown from "react-native-markdown-display";
-import { colors, spacing } from "../theme";
+import { colors, spacing, radius } from "../theme";
 
 // Renders assistant/user message bodies as markdown on React Native. The
 // desktop uses a custom markdown-it renderer; here we use the RN markdown
-// component with a dark-first style sheet so output is legible on mobile.
+// component with a refined dark-first style sheet so output reads premium on
+// mobile. Inline code and fences get hairline borders + soft fills.
 const markdownStyles: Record<string, object> = {
   body: { color: colors.text, fontSize: 15, lineHeight: 22 },
   paragraph: { marginTop: 0, marginBottom: spacing.sm },
-  heading1: { color: colors.text, fontSize: 20, fontWeight: "700" },
-  heading2: { color: colors.text, fontSize: 17, fontWeight: "700" },
-  heading3: { color: colors.text, fontSize: 15, fontWeight: "600" },
+  heading1: { color: colors.text, fontSize: 22, fontWeight: "800", letterSpacing: -0.3, marginTop: spacing.sm, marginBottom: spacing.xs },
+  heading2: { color: colors.text, fontSize: 18, fontWeight: "700", marginTop: spacing.sm, marginBottom: spacing.xs },
+  heading3: { color: colors.text, fontSize: 16, fontWeight: "700", marginTop: spacing.xs, marginBottom: 2 },
+  heading4: { color: colors.text, fontSize: 15, fontWeight: "700" },
+  heading5: { color: colors.textDim, fontSize: 14, fontWeight: "700" },
+  heading6: { color: colors.textDim, fontSize: 13, fontWeight: "700", textTransform: "uppercase", letterSpacing: 0.6 },
   code_inline: {
-    color: colors.text,
-    backgroundColor: colors.surfaceAlt,
+    color: colors.accentBright,
+    backgroundColor: colors.accentTint,
     fontFamily: "monospace",
     fontSize: 13,
+    paddingHorizontal: 5,
+    paddingVertical: 1,
+    borderRadius: 5,
   },
   fence: {
     color: colors.text,
-    backgroundColor: colors.surfaceAlt,
+    backgroundColor: colors.bg,
     fontFamily: "monospace",
     fontSize: 13,
-    padding: spacing.sm,
-    borderRadius: 6,
+    padding: spacing.md,
+    borderRadius: radius.md,
+    borderWidth: 1,
+    borderColor: colors.border,
     marginTop: spacing.xs,
     marginBottom: spacing.sm,
   },
   bullet_list: { marginVertical: spacing.xs },
+  ordered_list: { marginVertical: spacing.xs },
   list_item: { marginVertical: 2 },
-  strong: { fontWeight: "700" },
+  strong: { fontWeight: "800" },
   em: { fontStyle: "italic" },
-  link: { color: colors.accent },
+  link: { color: colors.accent, fontWeight: "600" },
   blockquote: {
     borderLeftWidth: 3,
-    borderLeftColor: colors.border,
-    paddingLeft: spacing.sm,
+    borderLeftColor: colors.accent,
+    paddingLeft: spacing.md,
     marginVertical: spacing.sm,
+    opacity: 0.9,
   },
 };
 

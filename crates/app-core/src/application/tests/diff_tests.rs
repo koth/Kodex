@@ -2400,6 +2400,147 @@ fn completed_command_waits_for_settled_disk_snapshot_before_review_diff() {
 }
 
 #[test]
+fn dsh_read_tool_does_not_record_write_baseline() {
+    // dsh harness renders file reads as `view`/`read`-kind tools whose raw
+    // input carries a `path`. The tracker must not open a recording window for
+    // them, otherwise a write that races with the read (e.g. another tool, a
+    // formatter, or the user editing) gets attributed to the read tool and the
+    // file shows up in the review panel as an agent change.
+    let dir = tempfile::tempdir().unwrap();
+    let relative_path = "crates/app-core/src/lib.rs";
+    let file_path = dir.path().join(relative_path);
+    fs::create_dir_all(file_path.parent().unwrap()).unwrap();
+    fs::write(&file_path, "pub fn before() {}\n").unwrap();
+
+    let mut app = test_app(&dir);
+    app.apply_runtime_events_with_file_tracking(vec![ClientEvent::ToolStarted {
+        id: "call-view".into(),
+        parent_id: None,
+        name: "view".into(),
+        kind: "read".into(),
+        summary: format!("view {relative_path}"),
+        is_subagent: false,
+        raw_input: Some(
+            serde_json::json!({ "path": relative_path, "view_range": [1, 40] }).to_string(),
+        ),
+    }]);
+    assert_eq!(
+        app.file_tracker
+            .get_baseline_text("call-view", relative_path),
+        None,
+        "read-only tools must not capture a write baseline"
+    );
+
+    // A racing write lands while the read tool is still running.
+    fs::write(&file_path, "pub fn after() {}\n").unwrap();
+    let result = app.apply_runtime_events_with_file_tracking(vec![ClientEvent::ToolCompleted {
+        id: "call-view".into(),
+        name: Some("view".into()),
+        outcome: "completed".into(),
+        raw_output: Some("pub fn after() {}".into()),
+        terminal_output: None,
+    }]);
+    assert!(!result.had_file_changes);
+
+    app.advance_runtime_clock(Duration::from_secs(1));
+    assert!(!app.retry_pending_tool_write_detections());
+    assert!(app.ui.session_changes.is_empty());
+    assert!(app.ui.review_changes.is_empty());
+}
+
+#[test]
+fn dsh_search_tool_does_not_claim_racing_external_write() {
+    let dir = tempfile::tempdir().unwrap();
+    let relative_path = "src/feature.rs";
+    let file_path = dir.path().join(relative_path);
+    fs::create_dir_all(file_path.parent().unwrap()).unwrap();
+    fs::write(&file_path, "fn before() {}\n").unwrap();
+
+    let mut app = test_app(&dir);
+    app.apply_runtime_events_with_file_tracking(vec![ClientEvent::ToolStarted {
+        id: "call-grep".into(),
+        parent_id: None,
+        name: "grep".into(),
+        kind: "search".into(),
+        summary: "grep before".into(),
+        is_subagent: false,
+        raw_input: Some(
+            serde_json::json!({ "pattern": "before", "path": relative_path }).to_string(),
+        ),
+    }]);
+
+    fs::write(&file_path, "fn after() {}\n").unwrap();
+    let result = app.apply_runtime_events_with_file_tracking(vec![ClientEvent::ToolCompleted {
+        id: "call-grep".into(),
+        name: Some("grep".into()),
+        outcome: "completed".into(),
+        raw_output: Some("1:fn before() {}".into()),
+        terminal_output: None,
+    }]);
+    assert!(!result.had_file_changes);
+
+    app.advance_runtime_clock(Duration::from_secs(1));
+    assert!(!app.retry_pending_tool_write_detections());
+    assert!(app.ui.session_changes.is_empty());
+    assert!(app.ui.review_changes.is_empty());
+}
+
+#[test]
+fn dsh_edit_tool_still_records_write_baseline() {
+    // Guard against the gate being too strict: dsh `str_replace`-style edits
+    // (kind `edit`) must keep capturing the tool-start baseline so the review
+    // panel shows real agent edits.
+    let dir = tempfile::tempdir().unwrap();
+    let relative_path = "src/feature.rs";
+    let file_path = dir.path().join(relative_path);
+    fs::create_dir_all(file_path.parent().unwrap()).unwrap();
+    let before = "fn before() {}\n";
+    let after = "fn after() {}\n";
+    fs::write(&file_path, before).unwrap();
+
+    let mut app = test_app(&dir);
+    app.apply_runtime_events_with_file_tracking(vec![ClientEvent::ToolStarted {
+        id: "call-edit".into(),
+        parent_id: None,
+        name: "str_replace".into(),
+        kind: "edit".into(),
+        summary: format!("str_replace {relative_path}"),
+        is_subagent: false,
+        raw_input: Some(
+            serde_json::json!({
+                "path": relative_path,
+                "old_str": "fn before() {}",
+                "new_str": "fn after() {}",
+            })
+            .to_string(),
+        ),
+    }]);
+    assert_eq!(
+        app.file_tracker
+            .get_baseline_text("call-edit", relative_path)
+            .as_deref(),
+        Some(before)
+    );
+
+    fs::write(&file_path, after).unwrap();
+    let result = app.apply_runtime_events_with_file_tracking(vec![ClientEvent::ToolCompleted {
+        id: "call-edit".into(),
+        name: Some("str_replace".into()),
+        outcome: "completed".into(),
+        raw_output: None,
+        terminal_output: None,
+    }]);
+    assert!(result.had_file_changes);
+    assert_eq!(app.ui.session_changes.len(), 1);
+    assert_eq!(app.ui.session_changes[0].path, relative_path);
+    assert_eq!(
+        app.ui.session_changes[0].old_text.as_deref(),
+        Some(before)
+    );
+    assert_eq!(app.ui.session_changes[0].new_text, after);
+}
+
+#[test]
 fn completed_read_tool_does_not_claim_preexisting_git_change() {
     let dir = tempfile::tempdir().unwrap();
     let mut app = test_app(&dir);

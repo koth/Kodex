@@ -1,4 +1,5 @@
 use super::*;
+use super::diff_utils::tool_start_should_record_write_baseline;
 use workspace_model::ChangeSetStatus;
 
 pub(super) struct RuntimeEventApplyResult {
@@ -646,7 +647,15 @@ impl Application {
         // the ToolDiff preprocessing pass so `get_any_baseline_text` can still supply
         // a baseline instead of letting the card diff against an empty file.
         for event in &events {
-            if let ClientEvent::ToolStarted { id, raw_input, .. } = event {
+            if let ClientEvent::ToolStarted {
+                id,
+                name,
+                kind,
+                raw_input,
+                ..
+            } = event
+                && tool_start_should_record_write_baseline(kind, name, raw_input.as_deref())
+            {
                 self.file_tracker
                     .start_recording(id, tool_event_hint_paths(raw_input.as_deref()));
             }
@@ -742,11 +751,40 @@ impl Application {
         let mut failed_tool_ids_without_changes = HashSet::new();
         for event in &events {
             match event {
-                ClientEvent::ToolStarted { id, raw_input, .. } => {
-                    self.file_tracker
-                        .start_recording(id, tool_event_hint_paths(raw_input.as_deref()));
+                ClientEvent::ToolStarted {
+                    id,
+                    name,
+                    kind,
+                    raw_input,
+                    ..
+                } => {
+                    if tool_start_should_record_write_baseline(kind, name, raw_input.as_deref()) {
+                        self.file_tracker
+                            .start_recording(id, tool_event_hint_paths(raw_input.as_deref()));
+                    }
                 }
-                ClientEvent::ToolUpdated { id, raw_input, .. } => {
+                ClientEvent::ToolUpdated {
+                    id,
+                    name,
+                    kind,
+                    raw_input,
+                    ..
+                } => {
+                    let existing_tool = self.ui.tools.iter().find(|tool| tool.call_id == *id);
+                    let tool_kind = kind
+                        .clone()
+                        .or_else(|| existing_tool.map(|tool| tool.kind.clone()))
+                        .unwrap_or_default();
+                    let tool_name = name
+                        .clone()
+                        .or_else(|| existing_tool.map(|tool| tool.name.clone()))
+                        .unwrap_or_default();
+                    if super::diff_utils::is_read_only_tool_identity(&tool_kind, &tool_name) {
+                        // Read/search tools never write; ignore path-shaped
+                        // hints so racing external edits are not attributed to
+                        // the read.
+                        continue;
+                    }
                     for path in tool_event_hint_paths(raw_input.as_deref()) {
                         if raw_input_has_write_payload(raw_input.as_deref()) {
                             self.file_tracker.add_diff_candidate(id, path);
@@ -902,6 +940,12 @@ impl Application {
         let Some(tool) = self.ui.tools.iter().find(|tool| tool.call_id == call_id) else {
             return;
         };
+        if super::diff_utils::is_read_only_tool_identity(&tool.kind, &tool.name) {
+            // Read/search tools never write; skip seeding so a completed
+            // exploration call cannot enter pending write detection and later
+            // claim a racing external edit.
+            return;
+        }
         let mut paths = tool_event_hint_paths(tool.raw_input.as_deref());
         paths.extend(tool_command_write_hint_paths(tool.raw_input.as_deref()));
         if !tool.detail_text.trim().is_empty() {

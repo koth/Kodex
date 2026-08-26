@@ -3,7 +3,7 @@ import { View, Text, TextInput, Pressable, Modal, ScrollView } from "react-nativ
 import { useAppController, useSnapshot, usePendingApprovals } from "../../app/AppServicesContext";
 import { isDestructive } from "../../session/permission";
 import type { PermissionInputResponse } from "../../types";
-import { styles, colors, spacing } from "../theme";
+import { styles, colors, spacing, radius, shadows } from "../theme";
 
 // Default-deny permission approval. The phone is the SOLE approval gate for
 // destructive remote operations: no "allow" is preselected, and destructive
@@ -47,22 +47,25 @@ export function PermissionApprovalSheet() {
 
   return (
     <Modal visible transparent animationType="slide" onRequestClose={() => controller.denyPermission(approval.permissionRequestId)}>
-      <View style={{ flex: 1, justifyContent: "flex-end", backgroundColor: "rgba(0,0,0,0.6)" }}>
-        <View style={{ backgroundColor: colors.surface, borderTopLeftRadius: 16, borderTopRightRadius: 16, maxHeight: "85%" }}>
-          <ScrollView contentContainerStyle={{ padding: spacing.md }}>
+      <View style={{ flex: 1, justifyContent: "flex-end", backgroundColor: colors.scrim }}>
+        <View style={{ backgroundColor: colors.surface, borderTopLeftRadius: radius.xl, borderTopRightRadius: radius.xl, maxHeight: "85%", borderWidth: 1, borderColor: colors.border, ...shadows.raised }}>
+          <View style={{ alignSelf: "center", width: 40, height: 5, borderRadius: 3, backgroundColor: colors.borderStrong, marginTop: spacing.sm }} />
+          <ScrollView contentContainerStyle={{ padding: spacing.lg, paddingTop: spacing.md }}>
             <View style={styles.rowBetween}>
-              <Text style={[styles.text, { fontWeight: "700" }]}>Permission requested</Text>
+              <Text style={[styles.text, { fontWeight: "800", fontSize: 17 }]}>Permission requested</Text>
               {destructive ? (
-                <Text style={[styles.badge, { backgroundColor: colors.danger }]}>
-                  <Text style={{ color: "#fff" }}>Destructive</Text>
-                </Text>
+                <View style={[styles.chip, { backgroundColor: colors.dangerTint, borderColor: colors.danger }]}>
+                  <Text style={{ color: colors.danger, fontSize: 10, fontWeight: "700", textTransform: "uppercase", letterSpacing: 0.5 }}>Destructive</Text>
+                </View>
               ) : null}
             </View>
 
             {tool ? (
               <>
-                <Text style={[styles.mono, { marginTop: spacing.sm, color: colors.textDim }]}>{tool.name}</Text>
-                {tool.summary ? <Text style={[styles.text, { marginTop: spacing.xs }]}>{tool.summary}</Text> : null}
+                <View style={[styles.row, { marginTop: spacing.md }]}>
+                  <Text style={[styles.mono, { color: colors.accent, fontSize: 12 }]}>{tool.name}</Text>
+                </View>
+                {tool.summary ? <Text style={[styles.text, { marginTop: spacing.xs, fontSize: 14, lineHeight: 20 }]}>{tool.summary}</Text> : null}
                 {tool.detail_text ? <Text style={[styles.textDim, { marginTop: spacing.xs }]}>{tool.detail_text}</Text> : null}
               </>
             ) : (
@@ -72,12 +75,12 @@ export function PermissionApprovalSheet() {
             {inputQuestions.length > 0 ? (
               <View style={{ marginTop: spacing.md }}>
                 {inputQuestions.map((question) => (
-                  <View key={question.id} style={{ marginTop: spacing.xs }}>
-                    <Text style={[styles.text, { fontSize: 13 }]}>{question.question}</Text>
+                  <View key={question.id} style={{ marginTop: spacing.sm }}>
+                    <Text style={[styles.text, { fontSize: 13, fontWeight: "600" }]}>{question.question}</Text>
                     <TextInput
                       style={[styles.input, { marginTop: spacing.xs }]}
                       placeholder={question.is_secret ? "secret input" : "free text"}
-                      placeholderTextColor={colors.textDim}
+                      placeholderTextColor={colors.textFaint}
                       secureTextEntry={question.is_secret}
                       value={textInputs[question.id] ?? ""}
                       onChangeText={(value) => setTextInputs((prev) => ({ ...prev, [question.id]: value }))}
@@ -88,39 +91,48 @@ export function PermissionApprovalSheet() {
             ) : null}
 
             {requireConfirm ? (
-              <View style={{ marginTop: spacing.md }}>
-                <Text style={[styles.text, { color: colors.danger, textAlign: "center" }]}>
-                  This operation can modify your workspace. Confirm to allow.
-                </Text>
-                <View style={[styles.row, { marginTop: spacing.sm }]}>
-                  <Pressable style={[styles.buttonDanger, { flex: 1, marginRight: spacing.xs }]} onPress={() => resolve(allowOption?.id ?? null)}>
+              <View style={{ marginTop: spacing.lg }}>
+                <View style={[styles.chip, { backgroundColor: colors.dangerTint, borderColor: colors.danger, alignSelf: "flex-start" }]}>
+                  <Text style={{ color: colors.danger, fontSize: 12 }}>This can modify your workspace. Confirm to allow.</Text>
+                </View>
+                <View style={[styles.row, { marginTop: spacing.md }]}>
+                  <Pressable
+                    style={({ pressed }) => [styles.buttonDanger, { flex: 1, marginRight: spacing.sm, opacity: pressed ? 0.9 : 1 }]}
+                    onPress={() => resolve(allowOption?.id ?? null)}
+                  >
                     <Text style={styles.buttonText}>Confirm allow</Text>
                   </Pressable>
-                  <Pressable style={[styles.buttonGhost, { flex: 1 }]} onPress={() => controller.denyPermission(approval.permissionRequestId)}>
-                    <Text style={styles.text}>Deny</Text>
+                  <Pressable
+                    style={({ pressed }) => [styles.buttonGhost, { flex: 1, opacity: pressed ? 0.7 : 1 }]}
+                    onPress={() => controller.denyPermission(approval.permissionRequestId)}
+                  >
+                    <Text style={[styles.text, { fontWeight: "600" }]}>Deny</Text>
                   </Pressable>
                 </View>
               </View>
             ) : (
-              <View style={[styles.row, { flexWrap: "wrap", marginTop: spacing.md }]}>
+              <View style={[styles.row, { flexWrap: "wrap", marginTop: spacing.lg }]}>
                 {options.map((option) => {
                   const isAllow = /allow|yes|approve|once/i.test(option.label);
                   const isDeny = /deny|no|cancel|block/i.test(option.label);
                   return (
                     <Pressable
                       key={option.id}
-                      style={[
+                      style={({ pressed }) => [
                         isDeny ? styles.buttonDanger : styles.buttonGhost,
-                        { marginRight: spacing.xs, marginBottom: spacing.xs, paddingVertical: spacing.sm },
+                        { marginRight: spacing.xs, marginBottom: spacing.xs, paddingVertical: spacing.sm + 1, opacity: pressed ? 0.85 : 1 },
                       ]}
                       onPress={() => (destructive && isAllow ? setConfirming(approval.permissionRequestId) : resolve(option.id))}
                     >
-                      <Text style={[styles.text, isDeny && { color: "#fff" }]}>{option.label}</Text>
+                      <Text style={[styles.text, { fontWeight: "600" }, isDeny && { color: "#fff" }]}>{option.label}</Text>
                     </Pressable>
                   );
                 })}
-                <Pressable style={[styles.buttonGhost, { paddingVertical: spacing.sm }]} onPress={() => controller.denyPermission(approval.permissionRequestId)}>
-                  <Text style={[styles.text, { color: colors.danger }]}>Deny</Text>
+                <Pressable
+                  style={({ pressed }) => [styles.buttonGhost, { paddingVertical: spacing.sm + 1, opacity: pressed ? 0.7 : 1 }]}
+                  onPress={() => controller.denyPermission(approval.permissionRequestId)}
+                >
+                  <Text style={[styles.text, { color: colors.danger, fontWeight: "600" }]}>Deny</Text>
                 </Pressable>
               </View>
             )}
