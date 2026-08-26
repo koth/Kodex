@@ -40,6 +40,15 @@ pub struct PairingResume {
     pub phone_ephemeral_pubkey: String,
 }
 
+/// Device -> relay: tell the paired peer that the sender could not decrypt
+/// its traffic (or has no key to decrypt with), so the peer's E2E session key
+/// is stale from the sender's point of view. The relay resolves the sender's
+/// latest pairing partner and forwards this envelope verbatim (plaintext —
+/// it carries no secrets). The receiver drops its session key and re-runs
+/// `pairing_resume` on its next reconnect instead of waiting for a timeout.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PeerSessionReset {}
+
 /// PC -> relay: register a one-time pairing code against the sender's
 /// connection so a scanning phone's `PairingInitiate` can be routed to this PC.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

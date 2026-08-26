@@ -11,12 +11,17 @@ import { diagnostics } from "../util/diagnostics";
 const CHUNK_SINGLE_FRAME_BYTES = 256 * 1024;
 /** Target ciphertext bytes per chunk (well under relay/mobile WS limits). */
 const CHUNK_PAYLOAD_BYTES = 128 * 1024;
+/** Minimum interval between `peer_session_reset` notices on one connection.
+ * A burst of undecryptable frames must not turn into a reset storm. */
+const SESSION_RESET_COOLDOWN_MS = 30_000;
 
 interface ChunkBuffer {
   total: number;
   received: (Uint8Array | null)[];
   nonce: number[];
   toDeviceId: string;
+  /** Payload encoding inherited from the original (pre-split) envelope. */
+  encoding?: string;
 }
 
 // A relay connection with optional E2E encryption. When no session key is
@@ -28,6 +33,8 @@ export class RelayConnection {
   private sessionKey: { bytes: Uint8Array } | null = null;
   private peerDeviceId: string | null = null;
   private chunks = new Map<string, ChunkBuffer>();
+  /** Last time we told the peer its traffic is undecryptable to us. */
+  private sessionResetSentAt: number | null = null;
 
   constructor(
     private readonly transport: RelayTransport,
@@ -108,7 +115,11 @@ export class RelayConnection {
         diagnostics.log("conn", `recv ${env.type} decrypted=ok`);
         return env;
       } catch (e) {
+        // Decrypt failure = the peer re-paired with a fresh key and ours is
+        // stale. Tell the peer (best-effort, rate-limited) so it drops its
+        // key and re-resumes immediately instead of us timing out blindly.
         diagnostics.log("conn", `recv decrypt FAILED: ${e}`);
+        await this.maybeSendSessionReset();
         throw e;
       }
     }
@@ -132,6 +143,7 @@ export class RelayConnection {
         received: Array.from({ length: total }, () => null),
         nonce: enc.nonce,
         toDeviceId: enc.to_device_id,
+        encoding: enc.encoding,
       };
       this.chunks.set(chunkId, entry);
     }
@@ -156,9 +168,36 @@ export class RelayConnection {
       to_device_id: entry.toDeviceId,
       nonce: entry.nonce,
       ciphertext: Array.from(ciphertext),
+      ...(entry.encoding ? { encoding: entry.encoding } : {}),
     };
     this.chunks.delete(chunkId);
     return full;
+  }
+
+  /** Best-effort plaintext `peer_session_reset` to our paired peer, telling
+   * it that we cannot decrypt its traffic (stale or missing key on our side)
+   * so it should drop its key and re-run its resume handshake immediately.
+   * Rate-limited per connection; failures ignored — advisory only. */
+  private async maybeSendSessionReset(): Promise<void> {
+    if (
+      this.sessionResetSentAt !== null &&
+      Date.now() - this.sessionResetSentAt < SESSION_RESET_COOLDOWN_MS
+    ) {
+      return;
+    }
+    this.sessionResetSentAt = Date.now();
+    try {
+      const env: Envelope = {
+        proto_version: PROTO_VERSION,
+        id: null,
+        type: "peer_session_reset",
+        payload: {},
+      };
+      await this.transport.sendText(serializeEnvelope(env));
+      diagnostics.log("conn", "sent peer_session_reset; asking peer to re-resume");
+    } catch (e) {
+      diagnostics.log("conn", `peer_session_reset send failed: ${e}`);
+    }
   }
 
   /** Pre-pairing auth: send a DeviceAuth envelope (plain) and await an ack.
@@ -238,6 +277,8 @@ function splitEncrypted(enc: EncryptedEnvelope): string[] {
       chunk_id: chunkId,
       chunk_index: index,
       chunk_total: total,
+      // Chunks inherit the original payload encoding flag.
+      ...(enc.encoding ? { encoding: enc.encoding } : {}),
     } as EncryptedEnvelope),
   );
 }

@@ -9,6 +9,7 @@ description = "Outbound-only relay client for kodex mobile remote control: devic
 relay-protocol = { path = "../relay-protocol" }
 workspace-model = { path = "../workspace-model" }
 futures.workspace = true
+flate2.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tokio = { workspace = true, features = ["rt", "rt-multi-thread", "sync", "time", "macros", "io-util"] }

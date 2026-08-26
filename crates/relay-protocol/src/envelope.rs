@@ -6,7 +6,7 @@ use crate::control::{ControlRequest, ControlResponse};
 use crate::events::EventFrame;
 use crate::pairing::{
     BindDeviceRequest, BindDeviceResponse, DeviceAuth, PairingConfirm, PairingInitiate,
-    PairingRegister, PairingResume, SubscriptionStatus,
+    PairingRegister, PairingResume, PeerSessionReset, SubscriptionStatus,
 };
 
 /// Wire protocol version. Bumped only on incompatible envelope/message
@@ -50,6 +50,7 @@ pub enum Message {
     PairingConfirm(PairingConfirm),
     PairingResume(PairingResume),
     PairingRegister(PairingRegister),
+    PeerSessionReset(PeerSessionReset),
     DeviceAuth(DeviceAuth),
     BindDeviceRequest(BindDeviceRequest),
     BindDeviceResponse(BindDeviceResponse),
@@ -76,6 +77,11 @@ pub struct EncryptedEnvelope {
     pub chunk_index: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub chunk_total: Option<u32>,
+    /// Payload encoding applied BEFORE encryption (e.g. `"gzip"`). Absent for
+    /// small payloads sent as raw serialized JSON. Chunks inherit the value
+    /// from the original envelope so reassembly can restore it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub encoding: Option<String>,
 }
 
 impl Envelope {
@@ -115,6 +121,9 @@ impl Envelope {
             }
             "pairing_register" => {
                 Message::PairingRegister(serde_json::from_value(self.payload.clone())?)
+            }
+            "peer_session_reset" => {
+                Message::PeerSessionReset(serde_json::from_value(self.payload.clone())?)
             }
             "device_auth" => Message::DeviceAuth(serde_json::from_value(self.payload.clone())?),
             "bind_device_request" => {
@@ -233,6 +242,7 @@ mod tests {
             chunk_id: None,
             chunk_index: None,
             chunk_total: None,
+            encoding: None,
         };
         let json = serde_json::to_value(&enc).unwrap();
         let obj = json.as_object().unwrap();
@@ -240,8 +250,21 @@ mod tests {
         assert!(obj.contains_key("to_device_id"));
         assert!(obj.contains_key("nonce"));
         assert!(obj.contains_key("ciphertext"));
-        for key in ["payload", "type", "id", "message_type", "proto_version"] {
+        for key in ["payload", "type", "id", "message_type", "proto_version", "encoding"] {
             assert!(!obj.contains_key(key), "unexpected key {key}");
+        }
+    }
+
+    #[test]
+    fn peer_session_reset_roundtrips_and_omits_empty_payload() {
+        let env =
+            Envelope::from_message(None, &Message::PeerSessionReset(PeerSessionReset {})).unwrap();
+        assert_eq!(env.message_type, "peer_session_reset");
+        let json = serde_json::to_string(&env).unwrap();
+        let back = serde_json::from_str::<Envelope>(&json).unwrap();
+        match back.into_message().unwrap() {
+            Message::PeerSessionReset(_) => {}
+            other => panic!("expected PeerSessionReset, got {other:?}"),
         }
     }
 }

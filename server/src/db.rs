@@ -239,6 +239,30 @@ self.blocking(move |c| {
         .await
     }
 
+    /// Latest pairing partner of ANY device (PC or phone), by creation time.
+    /// Used to route advisory `peer_session_reset` notices, which carry no
+    /// explicit target: the relay delivers them to the sender's newest
+    /// pairing partner.
+    pub async fn latest_pairing_partner_for(
+        &self,
+        device_id: String,
+    ) -> Result<Option<String>> {
+        self.blocking(move |c| {
+            let row: Option<String> = c
+                .query_row(
+                    "SELECT CASE WHEN pc_device_id = ?1 THEN phone_device_id \
+                     ELSE pc_device_id END \
+                     FROM pairings WHERE pc_device_id = ?1 OR phone_device_id = ?1 \
+                     ORDER BY created_at DESC LIMIT 1",
+                    params![device_id],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            Ok(row)
+        })
+        .await
+    }
+
     /// Rebind a pairing to a new phone device id (identity rotation). The
     /// pairing token and PC side stay stable; the phone's fresh ephemeral
     /// resume then derives the E2E key with the PC static key it presented

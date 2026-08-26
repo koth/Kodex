@@ -34,6 +34,10 @@ export interface EncryptedEnvelope {
   chunk_id?: string;
   chunk_index?: number;
   chunk_total?: number;
+  /** Payload encoding applied BEFORE encryption (e.g. `"gzip"`). Absent for
+   * small payloads sent as raw serialized JSON. Chunks inherit the value
+   * from the original envelope so reassembly can restore it. */
+  encoding?: string;
 }
 
 // --- Control requests (internally tagged by `op`, snake_case) ---
@@ -135,6 +139,9 @@ export interface SubscriptionStatus {
   plan?: string | null;
   expires_at?: number | null;
 }
+/** Device -> relay -> peer: the sender cannot decrypt the peer's traffic, so
+ * the peer should drop its session key and re-run its resume handshake. */
+export interface PeerSessionReset {}
 
 /** Typed view of an `Envelope` payload, reached via `intoMessage`. */
 export type Message =
@@ -145,6 +152,7 @@ export type Message =
   | { type: "pairing_confirm"; payload: PairingConfirm }
   | { type: "pairing_resume"; payload: PairingResume }
   | { type: "pairing_register"; payload: PairingRegister }
+  | { type: "peer_session_reset"; payload: PeerSessionReset }
   | { type: "device_auth"; payload: DeviceAuth }
   | { type: "bind_device_request"; payload: BindDeviceRequest }
   | { type: "bind_device_response"; payload: BindDeviceResponse }

@@ -70,6 +70,17 @@ export class ControlClient {
     return true;
   }
 
+  /** Reject every pending request immediately (connection lost / session
+   * reset). Without this, callers would wait out the full request timeout
+   * against a dead socket before the reconnect ladder kicks in. */
+  failAll(reason: string): void {
+    for (const [, entry] of this.pending) {
+      clearTimeout(entry.timer);
+      entry.reject(new Error(reason));
+    }
+    this.pending.clear();
+  }
+
   // --- Op builders (task 6.2). Each returns the typed response. ---
 
   listSessions(): Promise<{ op: "list_sessions"; request_id: string; sessions: WorkspaceSessionList[] }> {

@@ -63,6 +63,13 @@ export class AppController {
   private connectionGeneration = 0;
   private lastSessionKey: SessionKey | null = null;
   private lastPeerDeviceId: string | null = null;
+  /** True while `lastSessionKey` was restored from storage rather than
+   * established in-process. A restored key cannot be trusted for the cached
+   * fast path: the PC keeps its copy in memory only, so any PC restart (or
+   * key rotation) makes every fast-path frame silently undecryptable and the
+   * phone hangs until a full control-request timeout. Cold starts therefore
+   * always run the explicit pairing_resume handshake (~1 round trip). */
+  private sessionKeyNeedsResume = false;
   private stopLoop = false;
   private subscription: SubscriptionState = { ...NO_SUBSCRIPTION };
   private onSubscriptionChange: ((state: SubscriptionState) => void) | null = null;
@@ -186,14 +193,24 @@ export class AppController {
     const onEvent: EventSink = (frame: EventFrame) =>
       this.sessionStore.applyEventFrame(frame);
     const onOther = (env: Envelope) => this.handleOther(env);
-    await runReceiveLoop(
-      this.conn,
-      this.control,
-      onEvent,
-      onOther,
-      () => this.stopLoop,
-    );
+    try {
+      await runReceiveLoop(
+        this.conn,
+        this.control,
+        onEvent,
+        onOther,
+        () => this.stopLoop,
+      );
+    } catch (e) {
+      // A crashing receive loop must still trigger reconnection handling;
+      // swallowing the error here would strand the socket half-dead (open
+      // transport, no dispatcher) until the next heartbeat write fails.
+      diagnostics.log("conn", `receive loop crashed: ${e instanceof Error ? e.message : String(e)}`);
+    }
     if (this.stopLoop || generation !== this.connectionGeneration) return;
+    // Fail any in-flight control requests immediately: their socket is gone
+    // (or being replaced), so waiting out the 60s timeout is pure latency.
+    this.control.failAll("connection lost");
     void this.handleConnectionLoss();
   }
 
@@ -282,6 +299,9 @@ export class AppController {
     this.conn.installSessionKey(result.sessionKey, result.pcDeviceId);
     this.lastSessionKey = result.sessionKey;
     this.lastPeerDeviceId = result.pcDeviceId;
+    // The key is now authoritative and in-process: transient drops may use
+    // the cached fast path until this process ends.
+    this.sessionKeyNeedsResume = false;
     await persistSession(this.secretStore, {
       key: result.sessionKey,
       peer_device_id: result.pcDeviceId,
@@ -330,20 +350,29 @@ export class AppController {
       throw new Error("persisted pairing is missing a relay endpoint");
     }
 
-    // Restore the persisted E2E session key so a fresh process can attempt a
-    // cached-key reconnect before falling back to the resume handshake. The
-    // PC kept its copy in memory, so both sides still match.
+    // Restore the persisted E2E session key so a fresh process COULD attempt
+    // a cached-key reconnect. We deliberately do not trust it for the fast
+    // path (see `sessionKeyNeedsResume`): the PC only keeps its copy in
+    // memory, so after any PC restart the restored key is stale and every
+    // encrypted frame would be dropped silently. Keep it around only as a
+    // diagnostic fallback; the resume handshake below always re-establishes
+    // the key authoritatively.
     if (!this.lastSessionKey || !this.lastPeerDeviceId) {
       const persisted = await loadSession(this.secretStore);
       if (persisted) {
         this.lastSessionKey = persisted.key;
         this.lastPeerDeviceId = persisted.peer_device_id;
-        diagnostics.log("services", "restored persisted session key for cached reconnect");
+        this.sessionKeyNeedsResume = true;
+        diagnostics.log("services", "restored persisted session key; will re-resume via pairing handshake");
       }
     }
 
     if (transport) {
-      if (this.lastSessionKey && this.lastPeerDeviceId) {
+      if (
+        this.lastSessionKey &&
+        this.lastPeerDeviceId &&
+        !this.sessionKeyNeedsResume
+      ) {
         await this.establishCachedConnection(
           transport,
           this.lastSessionKey,
@@ -357,7 +386,11 @@ export class AppController {
         throw new Error("no transport factory configured for resume");
       }
       const ws = await this.reconnectTransportFactory(endpoint!);
-      if (this.lastSessionKey && this.lastPeerDeviceId) {
+      if (
+        this.lastSessionKey &&
+        this.lastPeerDeviceId &&
+        !this.sessionKeyNeedsResume
+      ) {
         await this.establishCachedConnection(
           ws,
           this.lastSessionKey,

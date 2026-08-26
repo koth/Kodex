@@ -1,6 +1,7 @@
 import type { RelayConnection } from "./connection";
 import type { ControlClient } from "../session/control-client";
 import { nextBackoffDelay } from "./backoff";
+import { diagnostics } from "../util/diagnostics";
 import type { Envelope, EventFrame, ControlResponse } from "../types/relay-protocol";
 
 export type EventSink = (frame: EventFrame) => void;
@@ -9,9 +10,11 @@ export type OtherSink = (env: Envelope) => void;
 /**
  * Phone receive loop: dispatch ControlResponse to the control client and route
  * EventFrame to the event sink. Other message types (subscription_status,
- * pairing_confirm, bind_device_response) go to `onOther`. Fail-open: a
- * connection error or clean close ends the loop without throwing — the
- * ConnectionManager decides whether to reconnect.
+ * pairing_confirm, bind_device_response) go to `onOther`. A
+ * `peer_session_reset` from the peer means our E2E key is stale from its
+ * point of view — end the loop so the ConnectionManager re-resumes with a
+ * fresh pairing handshake. Fail-open: a connection error or clean close ends
+ * the loop without throwing.
  */
 export async function runReceiveLoop(
   conn: RelayConnection,
@@ -32,6 +35,9 @@ export async function runReceiveLoop(
   controlClient.dispatchResponse(env.payload as ControlResponse);
   } else if (env.type === "event") {
   onEvent(env.payload as EventFrame);
+  } else if (env.type === "peer_session_reset") {
+  diagnostics.log("conn", "recv peer_session_reset; ending loop for re-pair");
+  return "closed";
   } else if (onOther) {
   onOther(env);
   }

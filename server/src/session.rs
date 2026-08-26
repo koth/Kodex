@@ -117,6 +117,10 @@ impl Session {
                 let did = self.require_device()?;
                 crate::pairing::handle_pairing_resume(&self.state, pr, did, &self.tx).await?;
             }
+            Message::PeerSessionReset(_) => {
+                let did = self.require_device()?;
+                crate::routing::route_peer_session_reset(&self.state, did).await?;
+            }
             other => {
                 tracing::debug!(message = ?other, "ignoring envelope");
             }

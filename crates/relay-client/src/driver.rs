@@ -296,6 +296,21 @@ impl<T: RelayTransport, H: ControlHandler, E: EventSource, P: PairingHandler> Re
                 }
                 Ok(())
             }
+            Message::PeerSessionReset(_) => {
+                // The peer could not decrypt our traffic: its key for us is
+                // stale (or absent). Drop ours too; when the peer reconnects
+                // it re-runs pairing_resume and PairingConfirm reinstalls a
+                // fresh key on both sides.
+                tracing::warn!(
+                    target: "remote_control",
+                    "peer reports undecryptable traffic; clearing session key"
+                );
+                self.conn.clear_session_key();
+                if let Ok(mut guard) = self.session_sink.lock() {
+                    *guard = None;
+                }
+                Ok(())
+            }
             _ => Ok(()),
         }
     }
@@ -410,6 +425,28 @@ mod tests {
         Envelope::from_message(None, &Message::Event(frame)).unwrap()
     }
 
+    /// Receive from the phone side, skipping driver heartbeat frames, until
+    /// a non-heartbeat envelope arrives. The driver loop's heartbeat
+    /// interval fires its FIRST tick immediately and `tokio::select!` picks
+    /// randomly among ready branches, so a heartbeat may legitimately race
+    /// ahead of the response/event under test — ordering with respect to
+    /// heartbeats must not be assumed.
+    async fn recv_non_heartbeat(
+        phone: &mut RelayConnection<ChannelTransport>,
+    ) -> Envelope {
+        loop {
+            let env = phone
+                .recv_envelope()
+                .await
+                .expect("transport recv")
+                .expect("driver should send the expected frame");
+            if env.message_type == "heartbeat" {
+                continue;
+            }
+            return env;
+        }
+    }
+
     #[tokio::test]
     async fn driver_routes_cancel_request_to_handler_and_responds() {
         let (pc_conn, mut phone) = linked_pair();
@@ -428,11 +465,7 @@ mod tests {
             Envelope::from_message(Some(request_id), &Message::ControlRequest(request)).unwrap();
         phone.send_envelope(&req_env).await.unwrap();
 
-        let env = phone
-            .recv_envelope()
-            .await
-            .unwrap()
-            .expect("driver should respond");
+        let env = recv_non_heartbeat(&mut phone).await;
         match env.into_message().unwrap() {
             Message::ControlResponse(ControlResponse::Cancel { request_id: rid }) => {
                 assert_eq!(rid, request_id);
@@ -463,11 +496,7 @@ mod tests {
             Envelope::from_message(Some(request_id), &Message::ControlRequest(request)).unwrap();
         phone.send_envelope(&req_env).await.unwrap();
 
-        let env = phone
-            .recv_envelope()
-            .await
-            .unwrap()
-            .expect("driver should respond");
+        let env = recv_non_heartbeat(&mut phone).await;
         match env.into_message().unwrap() {
             Message::ControlResponse(ControlResponse::StopTool { request_id: rid }) => {
                 assert_eq!(rid, request_id);
@@ -493,11 +522,7 @@ mod tests {
         let driver = RelayDriver::new(pc_conn, handler, events, NoopPairing);
         let task = tokio::spawn(async move { driver.run().await });
 
-        let env = phone
-            .recv_envelope()
-            .await
-            .unwrap()
-            .expect("driver should push the event");
+        let env = recv_non_heartbeat(&mut phone).await;
         match env.into_message().unwrap() {
             Message::Event(EventFrame::SessionStatusChanged { session_id, .. }) => {
                 assert_eq!(session_id, "s-1");
@@ -550,11 +575,7 @@ mod tests {
             Envelope::from_message(Some(request_id), &Message::ControlRequest(request)).unwrap();
         phone.send_envelope(&req_env).await.unwrap();
 
-        let env = phone
-            .recv_envelope()
-            .await
-            .unwrap()
-            .expect("driver should respond over E2E");
+        let env = recv_non_heartbeat(&mut phone).await;
         match env.into_message().unwrap() {
             Message::ControlResponse(ControlResponse::Cancel { request_id: rid }) => {
                 assert_eq!(rid, request_id);

@@ -104,6 +104,8 @@ class FakePc {
   private phoneDeviceId = "phone-dev";
   private snapshot: UiSnapshot;
   private stop = false;
+  /** Handshake message types received from the phone, in order. */
+  readonly handshakeTypes: string[] = [];
 
   constructor(conn: RelayConnection) {
     this.conn = conn;
@@ -117,6 +119,7 @@ class FakePc {
     await this.conn.sendEnvelope(fromMessage(null, { type: "subscription_status", payload: ackStatus }));
 
     const initEnv = await this.conn.recvEnvelope();
+    this.handshakeTypes.push(initEnv?.type ?? "null");
     // Accept either a fresh pairing or a resume (post-restart reconnect).
     if (initEnv && initEnv.type === "pairing_resume") {
       console.log("[fake-pc] got pairing_resume");
@@ -353,10 +356,11 @@ describe("integration: phone <-> fake PC over relay", () => {
     await controller1.pairFromTransport(phoneT1, qrJson(), false);
     expect(controller1.connectionState).toBe("connected");
     await controller1.getState();
-    // Drain the persisted session key so the restart exercises the resume
-    // handshake (pairing_resume) rather than the cached-key fast path.
-    const { clearSession } = await import("../account/session");
-    await clearSession(store);
+    // NOTE: the persisted session key is deliberately KEPT. A restored key
+    // must never be trusted for the cached fast path (the PC holds its copy
+    // in memory only; any PC restart would make every fast-path frame
+    // undecryptable and hang the phone until timeout), so the restart below
+    // must run the explicit pairing_resume handshake.
     // Simulate app kill: tear down the transport + loop without clearing
     // the persisted store (identity, BoundDevice, session key survive).
     await controller1.disconnect();
@@ -382,6 +386,10 @@ describe("integration: phone <-> fake PC over relay", () => {
     }
     expect(booted).toBe(true);
     expect(controller2.connectionState).toBe("connected");
+    // Fix for "bound once, then never connects again": a cold start with a
+    // restored session key goes straight to pairing_resume instead of the
+    // stale-key fast path that the PC silently drops.
+    expect(pc2.handshakeTypes).toEqual(["pairing_resume"]);
     await waitFor(() => (controller2.snapshot?.session.id === "init" ? true : undefined));
     expect(controller2.snapshot?.session.id).toBe("init");
 

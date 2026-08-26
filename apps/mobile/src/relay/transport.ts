@@ -1,4 +1,5 @@
 import type { Envelope, EncryptedEnvelope } from "../types/relay-protocol";
+import { diagnostics } from "../util/diagnostics";
 
 /** Hard cap for a single inbound WS text frame (4 MiB). Frames above this
  * are dropped defensively to avoid OOM/crash on memory-constrained phones. */
@@ -35,6 +36,9 @@ export class WsTransport implements RelayTransport {
   constructor(url: string) {
     this.ws = new WebSocket(url);
     this.ws.binaryType = "arraybuffer";
+    this.ws.onopen = () => {
+      diagnostics.log("conn", `ws open ${url}`);
+    };
     this.ws.onmessage = (ev: MessageEvent) => {
       const data =
         typeof ev.data === "string"
@@ -45,8 +49,9 @@ export class WsTransport implements RelayTransport {
       // send these after the snapshot-size fix; dropping defensively here keeps
       // the connection (and app) alive instead of crashing on a giant frame.
       if (data.length > MAX_FRAME_BYTES) {
-        console.warn(
-          `[ws] dropping oversized frame (${data.length} bytes > ${MAX_FRAME_BYTES})`,
+        diagnostics.log(
+          "conn",
+          `ws dropped oversized frame (${data.length} bytes > ${MAX_FRAME_BYTES})`,
         );
         return;
       }
@@ -54,11 +59,20 @@ export class WsTransport implements RelayTransport {
       if (waiter) waiter(data);
       else this.incoming.push(data);
     };
-    this.ws.onclose = () => {
+    this.ws.onclose = (ev: CloseEvent) => {
+      // Surface close codes on-device: an abrupt code (1006/abnormal, or a
+      // native stack abort) vs a clean 1000 distinguishes "phone-side crash
+      // killed the socket" from "relay closed us", which is exactly the
+      // signal needed to diagnose reconnect storms.
+      diagnostics.log(
+        "conn",
+        `ws closed code=${ev?.code ?? "?"} wasClean=${ev?.wasClean ?? "?"}`,
+      );
       this.closed = true;
       while (this.waiters.length) this.waiters.shift()!(null);
     };
     this.ws.onerror = () => {
+      diagnostics.log("conn", "ws error");
       this.closed = true;
       while (this.waiters.length) this.waiters.shift()!(null);
     };

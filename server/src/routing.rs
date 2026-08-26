@@ -1,4 +1,4 @@
-use relay_protocol::EncryptedEnvelope;
+use relay_protocol::{EncryptedEnvelope, Envelope, Message, PeerSessionReset};
 
 use crate::errors::{RelayError, Result};
 use crate::state::AppState;
@@ -60,6 +60,55 @@ pub async fn route_encrypted(
                 from = %from_device_id,
                 to_device_id = %env.to_device_id,
                 "target offline; dropping encrypted frame"
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Route an advisory `peer_session_reset` from `from_device_id` to its latest
+/// pairing partner. The notice is plaintext (it carries no secrets) and tells
+/// the peer that the sender cannot decrypt the peer's traffic, so the peer
+/// should drop its session key and re-run its resume handshake instead of
+/// waiting out a control-request timeout.
+pub async fn route_peer_session_reset(
+    state: &AppState,
+    from_device_id: &str,
+) -> Result<()> {
+    let Some(partner) = state
+        .db
+        .latest_pairing_partner_for(from_device_id.to_string())
+        .await?
+    else {
+        tracing::debug!(
+            from = %from_device_id,
+            "peer_session_reset: sender has no pairing; ignoring"
+        );
+        return Ok(());
+    };
+    let envelope = Envelope::from_message(None, &Message::PeerSessionReset(PeerSessionReset {}))?;
+    let text = serde_json::to_string(&envelope)?;
+    match state.connections.get(&partner) {
+        Some(tx) => {
+            if tx.send(text).await.is_err() {
+                tracing::warn!(
+                    to_device_id = %partner,
+                    "peer_session_reset delivery failed; evicting dead connection entry"
+                );
+                state.connections.remove(&partner);
+            } else {
+                tracing::info!(
+                    from = %from_device_id,
+                    to = %partner,
+                    "peer_session_reset routed"
+                );
+            }
+        }
+        None => {
+            tracing::debug!(
+                from = %from_device_id,
+                to = %partner,
+                "peer_session_reset: target offline; dropping"
             );
         }
     }

@@ -10,9 +10,11 @@
 
 use anyhow::{Context, Result};
 use futures::{SinkExt, StreamExt};
-use relay_protocol::{EncryptedEnvelope, Envelope, Message};
+use relay_protocol::{
+    EncryptedEnvelope, Envelope, Message, PeerSessionReset,
+};
 use std::collections::HashMap;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio_tungstenite::tungstenite::Message as WsMessage;
 use tokio_tungstenite::WebSocketStream;
 use tokio_tungstenite::Connector;
@@ -25,6 +27,9 @@ use crate::crypto::{SessionKey, decrypt, encrypt};
 const CHUNK_SINGLE_FRAME_BYTES: usize = 256 * 1024;
 /// Target ciphertext bytes per chunk (kept well under relay/mobile limits).
 const CHUNK_PAYLOAD_BYTES: usize = 128 * 1024;
+/// Minimum interval between `peer_session_reset` notices on one connection.
+/// A burst of undecryptable frames must not turn into a reset storm.
+const SESSION_RESET_COOLDOWN: Duration = Duration::from_secs(30);
 
 /// In-progress reassembly buffer for a chunked encrypted payload.
 struct ChunkBuffer {
@@ -32,6 +37,8 @@ struct ChunkBuffer {
     received: Vec<Option<Vec<u8>>>,
     nonce: Vec<u8>,
     to_device_id: String,
+    /// Payload encoding inherited from the original (pre-split) envelope.
+    encoding: Option<String>,
 }
 
 /// Abstract duplex text-frame transport. The real client uses a TLS
@@ -98,6 +105,8 @@ pub struct RelayConnection<T: RelayTransport> {
     peer_device_id: Option<String>,
     /// In-progress chunk reassembly keyed by `chunk_id`.
     chunks: HashMap<String, ChunkBuffer>,
+    /// Last time we told the peer its traffic is undecryptable to us.
+    session_reset_sent_at: Option<Instant>,
 }
 
 impl<T: RelayTransport> RelayConnection<T> {
@@ -108,6 +117,7 @@ impl<T: RelayTransport> RelayConnection<T> {
             session_key: None,
             peer_device_id: None,
             chunks: HashMap::new(),
+            session_reset_sent_at: None,
         }
     }
 
@@ -221,10 +231,15 @@ impl<T: RelayTransport> RelayConnection<T> {
             };
 
             let Some(key) = self.session_key.as_ref() else {
+                // No key installed (e.g. we restarted and lost the pairing
+                // key while the peer still holds the old one). Tell the peer
+                // immediately so it re-resumes instead of waiting out its
+                // control-request timeout.
                 tracing::debug!(
                     target: "remote_control",
                     "recv_envelope: skipping encrypted frame before key installed"
                 );
+                self.maybe_send_session_reset().await;
                 continue;
             };
             match decrypt(key, &full) {
@@ -242,9 +257,11 @@ impl<T: RelayTransport> RelayConnection<T> {
                         ct_len = full.ciphertext.len(),
                         "recv_envelope: decrypt failed; dropping stale session key"
                     );
+                    let err = anyhow::anyhow!("decrypt failed: {e}");
                     self.session_key = None;
                     self.peer_device_id = None;
-                    return Err(anyhow::anyhow!("decrypt failed: {e}"));
+                    self.maybe_send_session_reset().await;
+                    return Err(err);
                 }
             }
         }
@@ -270,6 +287,7 @@ impl<T: RelayTransport> RelayConnection<T> {
                 received: (0..total).map(|_| None).collect(),
                 nonce: enc.nonce.clone(),
                 to_device_id: enc.to_device_id.clone(),
+                encoding: enc.encoding.clone(),
             });
         if entry.total as usize != total || entry.nonce != enc.nonce {
             // Mismatched fragment set; abandon this id.
@@ -294,6 +312,7 @@ impl<T: RelayTransport> RelayConnection<T> {
             chunk_id: None,
             chunk_index: None,
             chunk_total: None,
+            encoding: entry.encoding.clone(),
         };
         self.chunks.remove(&chunk_id);
         Some(full)
@@ -305,6 +324,42 @@ impl<T: RelayTransport> RelayConnection<T> {
     /// rather than consumed by the relay.
     pub async fn send_heartbeat(&mut self, frame: &str) -> Result<()> {
         self.transport.send_text(frame.to_string()).await
+    }
+
+    /// Best-effort plaintext `PeerSessionReset` to our paired peer, telling
+    /// it that we cannot decrypt its traffic (no key or a stale one) so it
+    /// should re-run its resume handshake immediately. Rate-limited per
+    /// connection; send failures are ignored — this is advisory only.
+    async fn maybe_send_session_reset(&mut self) {
+        if let Some(sent_at) = self.session_reset_sent_at {
+            if sent_at.elapsed() < SESSION_RESET_COOLDOWN {
+                return;
+            }
+        }
+        self.session_reset_sent_at = Some(Instant::now());
+        let envelope = match Envelope::from_message(None, &Message::PeerSessionReset(PeerSessionReset {}))
+        {
+            Ok(env) => env,
+            Err(e) => {
+                tracing::debug!(target: "remote_control", error = %e, "session reset encode failed");
+                return;
+            }
+        };
+        let frame = match serde_json::to_string(&envelope) {
+            Ok(frame) => frame,
+            Err(e) => {
+                tracing::debug!(target: "remote_control", error = %e, "session reset serialize failed");
+                return;
+            }
+        };
+        if let Err(e) = self.transport.send_text(frame).await {
+            tracing::debug!(target: "remote_control", error = %e, "peer_session_reset send failed");
+        } else {
+            tracing::warn!(
+                target: "remote_control",
+                "sent peer_session_reset; asking peer to re-run pairing_resume"
+            );
+        }
     }
 
     /// Pre-pairing auth: send a `DeviceAuth` envelope (plain) and await an
@@ -367,6 +422,8 @@ fn split_encrypted_envelope(enc: &EncryptedEnvelope) -> Result<Vec<String>> {
             chunk_id: Some(chunk_id.clone()),
             chunk_index: Some(index as u32),
             chunk_total: Some(total),
+            // Chunks inherit the original payload encoding flag.
+            encoding: enc.encoding.clone(),
         };
         frames.push(serde_json::to_string(&chunk)?);
     }
