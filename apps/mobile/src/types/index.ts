@@ -14,11 +14,17 @@ export type FileChangeType = "Created" | "Modified" | "Deleted";
 
 export type TimelineItem = { Message: string } | { Tool: string } | "Thinking";
 
+export type WorkspaceKind = "project" | "chats";
+
 export interface WorkspaceDescriptor {
   id: string;
   name: string;
   root: string;
   location?: WorkspaceLocation;
+  // Marks the project-less "聊天" workspace so the session list can render it
+  // as a first-class chats group (like the desktop sidebar) instead of a
+  // regular project. Optional: older desktop builds omit the field.
+  kind?: WorkspaceKind;
 }
 export type WorkspaceLocation =
   | { kind: "local" }

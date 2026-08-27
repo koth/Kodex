@@ -247,6 +247,7 @@ fn settings_round_trip() {
             provider: WEB_TOOLS_PROVIDER_BRAVE.to_string(),
         },
         image: ImageSettings::default(),
+        commit_assistant: workspace_model::CommitAssistantSettings::default(),
         dsh_default_preset: None,
     };
 
@@ -348,6 +349,7 @@ fn legacy_goose_selection_migrates_to_codebuddy_when_codex_is_missing() {
         claude: ClaudeProviderSettings::default(),
         web_tools: WebToolsSettings::default(),
         image: ImageSettings::default(),
+        commit_assistant: workspace_model::CommitAssistantSettings::default(),
         dsh_default_preset: None,
     };
 
@@ -389,6 +391,7 @@ model_provider = "timiai"
         claude: ClaudeProviderSettings::default(),
         web_tools: WebToolsSettings::default(),
         image: ImageSettings::default(),
+        commit_assistant: workspace_model::CommitAssistantSettings::default(),
         dsh_default_preset: None,
     };
 
@@ -659,6 +662,7 @@ fn codebuddy_secret_appears_in_byok_model_catalog_with_correct_label() {
             claude: ClaudeProviderSettings::default(),
             web_tools: WebToolsSettings::default(),
             image: ImageSettings::default(),
+            commit_assistant: workspace_model::CommitAssistantSettings::default(),
             dsh_default_preset: None,
         },
     )
@@ -768,6 +772,7 @@ fn codebuddy_emit_model_provider_map_pins_local_proxy_base_url_chat_completions(
             claude: ClaudeProviderSettings::default(),
             web_tools: WebToolsSettings::default(),
             image: ImageSettings::default(),
+            commit_assistant: workspace_model::CommitAssistantSettings::default(),
             dsh_default_preset: None,
         },
     )
@@ -1007,6 +1012,7 @@ fn selected_codex_acp_resolves_with_codex_home_env() {
             claude: ClaudeProviderSettings::default(),
             web_tools: WebToolsSettings::default(),
             image: ImageSettings::default(),
+            commit_assistant: workspace_model::CommitAssistantSettings::default(),
             dsh_default_preset: None,
         },
     )
@@ -1121,6 +1127,7 @@ fn remote_codex_proxy_config_strips_local_only_paths() {
             claude: ClaudeProviderSettings::default(),
             web_tools: WebToolsSettings::default(),
             image: ImageSettings::default(),
+            commit_assistant: workspace_model::CommitAssistantSettings::default(),
             dsh_default_preset: None,
         },
     )
@@ -1178,6 +1185,7 @@ fn remote_codex_model_catalog_content_includes_byok_provider_models() {
             claude: ClaudeProviderSettings::default(),
             web_tools: WebToolsSettings::default(),
             image: ImageSettings::default(),
+            commit_assistant: workspace_model::CommitAssistantSettings::default(),
             dsh_default_preset: None,
         },
     )
@@ -1218,6 +1226,7 @@ fn remote_codex_byok_env_starts_local_proxy_before_scrubbing_keys() {
             claude: ClaudeProviderSettings::default(),
             web_tools: WebToolsSettings::default(),
             image: ImageSettings::default(),
+            commit_assistant: workspace_model::CommitAssistantSettings::default(),
             dsh_default_preset: None,
         },
     )
@@ -2123,6 +2132,7 @@ fn codex_byok_session_launch_repairs_legacy_source_provider_catalog() {
             claude: ClaudeProviderSettings::default(),
             web_tools: WebToolsSettings::default(),
             image: ImageSettings::default(),
+            commit_assistant: workspace_model::CommitAssistantSettings::default(),
             dsh_default_preset: None,
         },
     )
@@ -2213,6 +2223,7 @@ fn codex_byok_session_launch_repairs_misencoded_kimi_model_provider() {
             claude: ClaudeProviderSettings::default(),
             web_tools: WebToolsSettings::default(),
             image: ImageSettings::default(),
+            commit_assistant: workspace_model::CommitAssistantSettings::default(),
             dsh_default_preset: None,
         },
     )
@@ -2746,6 +2757,7 @@ fn env_override_wins_over_persisted_selection() {
             claude: ClaudeProviderSettings::default(),
             web_tools: WebToolsSettings::default(),
             image: ImageSettings::default(),
+            commit_assistant: workspace_model::CommitAssistantSettings::default(),
             dsh_default_preset: None,
         },
     )
@@ -2946,12 +2958,18 @@ fn build_dsh_settings_config_maps_configured_byok_providers_to_dsh_routes() {
     // openai-completions providers route through the local codex_api_proxy
     // (pinned per-provider in the path) so the proxy can normalize upstream
     // parameters (max_completion_tokens → max_tokens).
-    assert_eq!(
-        deepseek.base_url,
-        format!(
-            "{}/providers/{DEEPSEEK_PROVIDER_ID}",
-            acp_core::codex_api_proxy_base_url()
-        )
+    // The route must point at the local codex_api_proxy with the provider
+    // pinned in the path. The proxy port is a process-global that can
+    // legitimately flip between 17851 and its fallback (17852) when another
+    // Kodex process holds the default port, so assert the shape instead of
+    // re-reading the live global (which races a concurrent rebind).
+    assert!(
+        deepseek.base_url.starts_with("http://127.0.0.1:")
+            && deepseek
+                .base_url
+                .ends_with(&format!("/v1/providers/{DEEPSEEK_PROVIDER_ID}")),
+        "unexpected deepseek base_url: {}",
+        deepseek.base_url
     );
     assert_eq!(deepseek.api, "openai-completions");
     assert_eq!(deepseek.api_key_env, "KODEX_DSH_DEEPSEEK_KEY");
@@ -3047,4 +3065,45 @@ fn deepseek_harness_command_and_label_resolution() {
         .expect("dsh command resolves");
     assert!(is_deepseek_harness_command(&command));
     assert_eq!(agent_label_for_command(&command), "DeepSeek Harness");
+}
+
+#[test]
+fn commit_assistant_settings_validate_availability_and_support_clearing() {
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let dir = tempdir().unwrap();
+    let paths = AppPaths::from_root(dir.path().join(".kodex"));
+
+    // Configure the deepseek BYOK source: a stored key plus a model catalog.
+    save_agent_provider_secret(&paths, AgentProviderFamily::Codex, "deepseek", "sk-test").unwrap();
+    save_provider_models(
+        &paths,
+        "deepseek",
+        vec![workspace_model::ModelAttributesInput::from_slug("deepseek-chat")],
+    )
+    .unwrap();
+
+    // Unset selection reports not-configured (session-model fallback).
+    let settings = load_app_settings(&paths);
+    let status = commit_assistant_settings_status(&paths, &settings);
+    assert!(!status.configured);
+    assert!(status.provider.is_empty());
+    assert!(status.model.is_empty());
+
+    // A model outside the provider's catalog is rejected, and a half-empty
+    // pair (provider without model) is rejected.
+    assert!(save_commit_assistant_settings(&paths, "deepseek", "gpt-5.5").is_err());
+    assert!(save_commit_assistant_settings(&paths, "deepseek", "").is_err());
+    assert!(save_commit_assistant_settings(&paths, "", "deepseek-chat").is_err());
+
+    // A valid provider+model pair persists and shows up in the snapshot.
+    let snapshot = save_commit_assistant_settings(&paths, "deepseek", "deepseek-chat").unwrap();
+    assert!(snapshot.commit_assistant.configured);
+    assert_eq!(snapshot.commit_assistant.provider, "deepseek");
+    assert_eq!(snapshot.commit_assistant.model, "deepseek-chat");
+
+    // Clearing with an empty pair restores the session-model fallback.
+    let snapshot = save_commit_assistant_settings(&paths, "", "").unwrap();
+    assert!(!snapshot.commit_assistant.configured);
+    assert!(snapshot.commit_assistant.provider.is_empty());
+    assert!(snapshot.commit_assistant.model.is_empty());
 }

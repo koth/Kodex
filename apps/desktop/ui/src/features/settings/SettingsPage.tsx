@@ -71,6 +71,7 @@ import {
   settingsSaveImageGenerateApiKey,
   settingsSaveImageGenerateSettings,
   settingsSaveImageViewSettings,
+  settingsSaveCommitAssistantSettings,
   settingsValidateRemoteProfile,
   sessionDeleteAllArchived,
   sessionDeleteArchived,
@@ -104,6 +105,7 @@ export type SettingsPane =
   | "general"
   | "web"
   | "image"
+  | "commit"
   | "companion"
   | "archive"
   | "remote"
@@ -693,6 +695,12 @@ export function SettingsPage({
   const [busyCodebuddy, setBusyCodebuddy] = useState(false);
   const [busyWebTools, setBusyWebTools] = useState(false);
   const [busyImage, setBusyImage] = useState(false);
+  const [busyCommitAssistant, setBusyCommitAssistant] = useState(false);
+  const [commitAssistantMessage, setCommitAssistantMessage] = useState<
+    string | null
+  >(null);
+  const [commitDraftProvider, setCommitDraftProvider] = useState("");
+  const [commitDraftModel, setCommitDraftModel] = useState("");
   const [imageMessage, setImageMessage] = useState<string | null>(null);
   const [imageViewDraftProvider, setImageViewDraftProvider] = useState("");
   const [imageViewDraftModel, setImageViewDraftModel] = useState("");
@@ -1749,6 +1757,55 @@ export function SettingsPage({
     snapshot?.image?.generate_model,
     snapshot?.image?.generate_default_size,
   ]);
+
+  // Sync commit-assistant drafts from the snapshot.
+  useEffect(() => {
+    if (!snapshot?.commit_assistant) return;
+    setCommitDraftProvider(snapshot.commit_assistant.provider);
+    setCommitDraftModel(snapshot.commit_assistant.model);
+  }, [
+    snapshot?.commit_assistant?.provider,
+    snapshot?.commit_assistant?.model,
+  ]);
+
+  // Commit-assistant models follow the *draft* provider so the picker updates
+  // as soon as the user switches provider, before saving (same cascade the
+  // image pane uses).
+  const commitAssistantModelOptions = useMemo(() => {
+    if (!snapshot || !commitDraftProvider) return [];
+    return (
+      snapshot.codex_acp.profiles.find(
+        (profile) => profile.id === commitDraftProvider,
+      )?.models ?? []
+    );
+  }, [snapshot, commitDraftProvider]);
+
+  const commitAssistantDirty =
+    commitDraftProvider !== (snapshot?.commit_assistant?.provider ?? "") ||
+    commitDraftModel !== (snapshot?.commit_assistant?.model ?? "");
+
+  const handleSaveCommitAssistant = useCallback(async () => {
+    setBusyCommitAssistant(true);
+    setCommitAssistantMessage(null);
+    setError(null);
+    try {
+      // Empty provider means "自动（跟随会话模型）" — clear the override.
+      const provider = commitDraftProvider.trim();
+      const model = provider ? commitDraftModel.trim() : "";
+      const next = await settingsSaveCommitAssistantSettings(provider, model);
+      setSnapshot(next);
+      setCommitAssistantMessage(
+        provider
+          ? "Commit 助手模型已保存，下次生成提交信息时生效"
+          : "已恢复为跟随会话模型",
+      );
+    } catch (e) {
+      setError(String(e));
+      setCommitAssistantMessage(String(e));
+    } finally {
+      setBusyCommitAssistant(false);
+    }
+  }, [commitDraftProvider, commitDraftModel]);
 
   // Image view models must follow the *draft* provider so the picker updates
   // as soon as the user changes the provider dropdown, before saving. The
@@ -3039,6 +3096,125 @@ export function SettingsPage({
   );
 };
 
+  const renderCommitAssistantSection = () => {
+    if (!snapshot) return null;
+    if (editingRemoteSettings) {
+      return (
+        <section className="settings-section settings-capability-section">
+          <div className="settings-general-card">
+            <h2 className="settings-section-title">Commit 助手</h2>
+            <p className="settings-section-desc">
+              AI 生成提交信息（commit message）的助手配置。
+            </p>
+            <div className="settings-warning">
+              远程会话暂不支持 Commit 助手配置。
+            </div>
+          </div>
+        </section>
+      );
+    }
+    const commitAssistant = snapshot.commit_assistant;
+    // The assistant reuses an existing BYOK provider's key, so only offer
+    // providers that actually have a resolved key. A saved provider that has
+    // since lost its key stays visible so the select can still display it.
+    const byokProfiles = selectableByokSourceProfiles(
+      snapshot.codex_acp.profiles,
+      byokProfileId,
+    ).filter((profile) => profile.configured);
+    const savedProfileMissing =
+      !!commitAssistant?.provider &&
+      !byokProfiles.some((profile) => profile.id === commitAssistant.provider);
+    const providerOptions = [
+      { value: "", label: "自动（跟随会话模型）" },
+      ...byokProfiles.map((profile) => ({
+        value: profile.id,
+        label: profile.label,
+      })),
+      ...(savedProfileMissing
+        ? [
+            {
+              value: commitAssistant?.provider ?? "",
+              label: `${providerLabel(snapshot.codex_acp.profiles, commitAssistant?.provider ?? "")}（未配置）`,
+            },
+          ]
+        : []),
+    ];
+    return (
+      <section className="settings-section settings-capability-section">
+        <div className="settings-general-card settings-capability-intro">
+          <h2 className="settings-section-title">Commit 助手</h2>
+          <p className="settings-section-desc">
+            Commit 助手基于 codex agent 运行：在独立的临时会话中查看已暂存的变更，生成约定式提交信息。这里选择助手使用的模型。
+          </p>
+        </div>
+        <div className="settings-provider-config settings-capability-card">
+          <div className="settings-provider-config-head">
+            <div>
+              <span>助手模型</span>
+              <p>
+                从已配置的 BYOK provider 模型目录中选择；选择「自动」时跟随当前会话模型。
+              </p>
+            </div>
+          </div>
+          <div className="settings-provider-detail">
+            <span
+              className={`settings-row-badge ${commitAssistant?.configured ? "is-installed" : "is-missing"}`}
+            >
+              {commitAssistant?.configured ? "已配置" : "跟随会话模型"}
+            </span>
+          </div>
+          <label className="settings-field settings-provider-source-field">
+            <span>模型来源（BYOK provider）</span>
+            <SettingsSelect
+              ariaLabel="commit_assistant_provider"
+              value={commitDraftProvider}
+              disabled={busyCommitAssistant}
+              placeholder="— 选择 provider —"
+              options={providerOptions}
+              onChange={(next) => {
+                setCommitDraftProvider(next);
+                setCommitDraftModel("");
+              }}
+            />
+          </label>
+          <label className="settings-field settings-provider-source-field">
+            <span>助手模型</span>
+            <SettingsSelect
+              ariaLabel="commit_assistant_model"
+              value={commitDraftModel}
+              disabled={busyCommitAssistant || !commitDraftProvider}
+              placeholder="— 选择模型 —"
+              options={commitAssistantModelOptions.map((model: string) => ({
+                value: model,
+                label: model,
+              }))}
+              onChange={setCommitDraftModel}
+            />
+          </label>
+          <div className="settings-provider-config-actions">
+            {commitAssistantMessage && (
+              <span className="settings-provider-config-message">
+                {commitAssistantMessage}
+              </span>
+            )}
+            <button
+              type="button"
+              className="settings-btn"
+              disabled={
+                busyCommitAssistant ||
+                !commitAssistantDirty ||
+                (!!commitDraftProvider && !commitDraftModel)
+              }
+              onClick={handleSaveCommitAssistant}
+            >
+              {busyCommitAssistant ? "保存中..." : "保存助手配置"}
+            </button>
+          </div>
+        </div>
+      </section>
+    );
+  };
+
   const renderArchivePane = () => {
     const workspaceOptions = archivedWorkspaceOptions(archivedSessions);
     const normalizedSearch = archivedSearch.trim().toLowerCase();
@@ -4257,6 +4433,13 @@ export function SettingsPage({
           </button>
           <button
             type="button"
+            className={`settings-nav-item ${activePane === "commit" ? "is-active" : ""}`}
+            onClick={() => setActivePane("commit")}
+          >
+            Commit 助手
+          </button>
+          <button
+            type="button"
             className={`settings-nav-item ${activePane === "archive" ? "is-active" : ""}`}
             onClick={() => setActivePane("archive")}
           >
@@ -4618,6 +4801,8 @@ export function SettingsPage({
         {activePane === "companion" && <CompanionSettingsSection />}
 
         {activePane === "image" && renderImageSection()}
+
+        {activePane === "commit" && renderCommitAssistantSection()}
 
         {activePane === "remote" && renderRemotePane()}
 
@@ -5198,6 +5383,7 @@ function settingsPaneTitle(pane: SettingsPane): string {
   if (pane === "remote") return "远程";
   if (pane === "web") return "Web 工具";
   if (pane === "image") return "图像能力";
+  if (pane === "commit") return "Commit 助手";
   if (pane === "usage") return "用量";
   if (pane === "lsp") return "LSP";
   if (pane === "codebuddy") return "CodeBuddy";
@@ -5214,6 +5400,8 @@ function settingsPaneDescription(pane: SettingsPane): string {
     return "配置 Codex 和 Claude 本机会话可用的搜索与网页抓取能力。";
   if (pane === "image")
     return "配置识图、生图、改图的降级 MCP 工具：识图复用对话模型，生/改图独立配置协议与模型。";
+  if (pane === "commit")
+    return "配置 AI 生成提交信息的 Commit 助手使用的模型；助手基于 codex agent 运行，不配置时跟随当前会话模型。";
   if (pane === "usage")
     return "汇总可上报智能体（Codex、Claude）的 token 用量与性能指标。CodeBuddy 等第三方智能体不纳入统计。";
   if (pane === "lsp")

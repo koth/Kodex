@@ -3243,6 +3243,9 @@ fn native_responses_request_retries_transient_502() {
         "input": "hi",
         "stream": false
     });
+    // Unique ACP session id: the retry registry is process-global and tests
+    // run in parallel, so a fixed id would collide with other tests' entries.
+    let acp_session = format!("acp-sid-responses-{}", uuid::Uuid::new_v4());
     let response = rt
         .block_on(async {
             proxy_native_responses_request(
@@ -3250,7 +3253,7 @@ fn native_responses_request_retries_transient_502() {
                 "test-key",
                 "deepseek",
                 &format!("http://127.0.0.1:{port}/responses"),
-                Some("acp-sid"),
+                Some(&acp_session),
             )
             .await
         })
@@ -3355,6 +3358,12 @@ fn native_anthropic_messages_retry_keys_under_acp_session_id() {
         "max_tokens": 16,
         "messages": [{ "role": "user", "content": "hi" }],
     });
+    // Unique ACP session id: the retry registry is process-global and tests
+    // run in parallel, so a fixed id would collide with other tests' entries.
+    // The property under test only requires that registration and lookup use
+    // the SAME ACP id (and that the provider-scoped id stays unused).
+    let acp_session = format!("acp-sid-anthropic-{}", uuid::Uuid::new_v4());
+    let thread_acp_session = acp_session.clone();
     let (tx, rx) = std::sync::mpsc::channel::<(bool, u16)>();
     let request_thread = std::thread::spawn(move || {
         let rt = tokio::runtime::Builder::new_current_thread()
@@ -3368,7 +3377,7 @@ fn native_anthropic_messages_retry_keys_under_acp_session_id() {
                 "test_native",
                 "provider-scoped-sid",
                 &url,
-                Some("acp-sid"),
+                Some(&thread_acp_session),
             )
             .await
         });
@@ -3384,7 +3393,7 @@ fn native_anthropic_messages_retry_keys_under_acp_session_id() {
     let mut observed = None;
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
     while std::time::Instant::now() < deadline {
-        if let Some(status) = current_proxy_retry_status("acp-sid") {
+        if let Some(status) = current_proxy_retry_status(&acp_session) {
             observed = Some(status);
             break;
         }
@@ -3404,7 +3413,7 @@ fn native_anthropic_messages_retry_keys_under_acp_session_id() {
         3,
         "expected 2 retries then success (3 total requests)"
     );
-assert!(current_proxy_retry_status("acp-sid").is_none());
+    assert!(current_proxy_retry_status(&acp_session).is_none());
     let _ = request_thread.join();
     let _ = handle.join();
 }

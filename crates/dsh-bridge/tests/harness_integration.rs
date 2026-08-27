@@ -9,8 +9,9 @@ mod common;
 
 use acp_core::{ClientEvent, PermissionBroker};
 use common::{
-    MockHarness, MuxEnd, MuxScript, default_config, history_event, mux_assistant_final,
-    mux_assistant_text_delta, mux_session_event, mux_subscribed, scripts_with,
+    HoldFramesUntil, MockHarness, MuxEnd, MuxScript, default_config, history_event,
+    mux_assistant_final, mux_assistant_text_delta, mux_session_event, mux_subscribed,
+    scripts_with,
 };
 use dsh_bridge::{HarnessHostRegistry, HttpClient};
 use serde_json::{json, Value};
@@ -250,7 +251,7 @@ async fn mux_drop_rebaselines_all_live_sessions_with_bounded_concurrency() {
                 mux_subscribed("s-c", 0),
             ],
             end: MuxEnd::Close,
-            wait_for_subscribe: true,
+            hold_frames_until: HoldFramesUntil::Connected,
         },
         MuxScript {
             frames: vec![
@@ -259,7 +260,7 @@ async fn mux_drop_rebaselines_all_live_sessions_with_bounded_concurrency() {
                 mux_assistant_text_delta("s-c", 7, "C recovered"),
             ],
             end: MuxEnd::Hold,
-            wait_for_subscribe: true,
+            hold_frames_until: HoldFramesUntil::Connected,
         },
     ];
     let mock = MockHarness::start(c).await;
@@ -315,12 +316,12 @@ async fn per_session_history_failure_isolates_that_session() {
                 mux_subscribed("s-c", 0),
             ],
             end: MuxEnd::Close,
-            wait_for_subscribe: true,
+            hold_frames_until: HoldFramesUntil::Connected,
         },
         MuxScript {
             frames: vec![],
             end: MuxEnd::Hold,
-            wait_for_subscribe: true,
+            hold_frames_until: HoldFramesUntil::Connected,
         },
     ];
     let mock = MockHarness::start(c).await;
@@ -443,7 +444,10 @@ fn attached_child_is_terminated_on_host_teardown() {
     // teardown() stops the host's own runtime — must run outside async context.
     std::thread::spawn(move || host.teardown()).join().unwrap();
 
-    let exited = !process_exists(child_id);
+    // Termination is asynchronous (job release, handle teardown); a single
+    // tasklist/kill-0 snapshot right after teardown can still see the
+    // exiting process. Poll briefly before declaring a leak.
+    let exited = wait_until(|| !process_exists(child_id), Duration::from_secs(5));
     assert!(
         exited,
         "attached test child survived host teardown; dsh web would leak"
@@ -790,7 +794,7 @@ async fn question_answer_multiple_questions_partial_payload() {
             }),
         ],
         end: MuxEnd::Hold,
-        wait_for_subscribe: true,
+        hold_frames_until: HoldFramesUntil::SessionRegistered,
     }];
     let mock = MockHarness::start(c).await;
     let registry = Arc::new(HarnessHostRegistry::new());
@@ -822,13 +826,21 @@ async fn question_answer_multiple_questions_partial_payload() {
         )
     });
     let start = std::time::Instant::now();
-    while start.elapsed() < Duration::from_secs(5) {
+    let mut saw_question = false;
+    while start.elapsed() < Duration::from_secs(5) && !saw_question {
         match rx.recv_timeout(Duration::from_millis(100)) {
-            Ok(ClientEvent::ToolPermissionRequest { id, input: Some(_), .. }) if id == "q1" => break,
+            Ok(ClientEvent::ToolPermissionRequest { id, input: Some(_), .. }) if id == "q1" => {
+                saw_question = true;
+            }
             Ok(_) => {}
-            Err(_) => break,
+            Err(mpsc::RecvTimeoutError::Timeout) => continue,
+            Err(mpsc::RecvTimeoutError::Disconnected) => break,
         }
     }
+    assert!(
+        saw_question,
+        "question request was not surfaced (frames raced the sink registration?)"
+    );
     // Answer BOTH questions in REVERSE order — the UI's answer map iterates in
     // insertion order, which need not match the question order. The bridge must
     // re-sort answers positionally or dsh's matchesQuestions rejects the batch.
@@ -895,7 +907,7 @@ async fn question_answer_payload_matches_dsh_schema() {
             }),
         ],
         end: MuxEnd::Hold,
-        wait_for_subscribe: true,
+        hold_frames_until: HoldFramesUntil::SessionRegistered,
     }];
     let mock = MockHarness::start(c).await;
     let registry = Arc::new(HarnessHostRegistry::new());
@@ -928,13 +940,21 @@ async fn question_answer_payload_matches_dsh_schema() {
     });
     // wait for question
     let start = std::time::Instant::now();
-    while start.elapsed() < Duration::from_secs(5) {
+    let mut saw_question = false;
+    while start.elapsed() < Duration::from_secs(5) && !saw_question {
         match rx.recv_timeout(Duration::from_millis(100)) {
-            Ok(ClientEvent::ToolPermissionRequest { id, input: Some(_), .. }) if id == "q1" => break,
+            Ok(ClientEvent::ToolPermissionRequest { id, input: Some(_), .. }) if id == "q1" => {
+                saw_question = true;
+            }
             Ok(_) => {}
-            Err(_) => break,
+            Err(mpsc::RecvTimeoutError::Timeout) => continue,
+            Err(mpsc::RecvTimeoutError::Disconnected) => break,
         }
     }
+    assert!(
+        saw_question,
+        "question request was not surfaced (frames raced the sink registration?)"
+    );
     let (reply_tx, reply_rx) = mpsc::channel();
     command_tx
         .send(acp_core::RuntimeCommand::ResolveHarnessApproval {
@@ -982,7 +1002,7 @@ async fn question_answer_rejected_as_bad_response_surfaces_notice() {
             }),
         ],
         end: MuxEnd::Hold,
-        wait_for_subscribe: true,
+        hold_frames_until: HoldFramesUntil::SessionRegistered,
     }];
     let mock = MockHarness::start(c).await;
     let registry = Arc::new(HarnessHostRegistry::new());
@@ -1361,7 +1381,7 @@ async fn question_answer_responds_with_envelope_rpc_id() {
             }),
         ],
         end: MuxEnd::Hold,
-        wait_for_subscribe: true,
+        hold_frames_until: HoldFramesUntil::SessionRegistered,
     }];
     let mock = MockHarness::start(c).await;
     let registry = Arc::new(HarnessHostRegistry::new());

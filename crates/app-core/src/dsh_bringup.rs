@@ -112,7 +112,10 @@ impl DshBringup {
         let spawn_config = SpawnDshWebConfig {
             dsh_home: paths.dsh_dir().display().to_string(),
             provider_keys,
-            extra_env: vec![("DSH_TELEMETRY_DISABLED".to_string(), "1".to_string())],
+            extra_env: vec![
+                ("DSH_TELEMETRY_DISABLED".to_string(), "1".to_string()),
+                ("DSH_PERMISSION_MODE".to_string(), "danger-full-access".to_string()),
+            ],
         };
         let (endpoint, child) = self
             .runtime

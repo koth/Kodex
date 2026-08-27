@@ -258,6 +258,13 @@ impl SessionSink {
         }
     }
 
+    /// Remove a pending approval once the harness reports it resolved.
+    pub fn clear_pending_approval(&self, ui_id: &str) {
+        if let Ok(mut pending) = self.pending.lock() {
+            pending.retain(|e| !(e.kind == PendingApprovalKind::Approval && e.ui_id == ui_id));
+        }
+    }
+
     /// Remove a pending question batch once the harness reports it resolved.
     pub fn clear_pending_question(&self, ui_id: &str) {
         if let Ok(mut guard) = self.question_rpc_ids.lock() {

@@ -35,6 +35,18 @@ pub enum ChangeSection {
     Untracked,
 }
 
+/// Kind of workspace, used by clients to decide how a workspace is rendered.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkspaceKind {
+    /// A workspace bound to a real project directory (or a remote workspace).
+    #[default]
+    Project,
+    /// The project-less "聊天" workspace (`~/.kodex/chats`). Clients render it
+    /// as a first-class chats group instead of a regular project.
+    Chats,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct WorkspaceDescriptor {
     pub id: Uuid,
@@ -42,6 +54,11 @@ pub struct WorkspaceDescriptor {
     pub root: PathBuf,
     #[serde(default)]
     pub location: WorkspaceLocation,
+    /// Marks the project-less chats workspace so remote clients (mobile) can
+    /// render it like the desktop sidebar's "聊天" group. Defaults to
+    /// `project` for payloads from peers that do not send the field.
+    #[serde(default)]
+    pub kind: WorkspaceKind,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -1811,6 +1828,25 @@ fn default_image_generate_size() -> String {
     "1024x1024".to_string()
 }
 
+/// Commit-message assistant configuration. The assistant always runs as a
+/// throwaway codex-acp session; `provider` + `model` select the model from
+/// the configured BYOK provider catalog (same ids the composer uses).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct CommitAssistantSettings {
+    #[serde(default)]
+    pub provider: String,
+    #[serde(default)]
+    pub model: String,
+}
+
+/// UI-facing commit assistant status. `configured` reports whether a
+/// provider+model pair is set and the provider actually resolves.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CommitAssistantSettingsStatus {
+    pub provider: String,
+    pub model: String,
+    pub configured: bool,
+}
 /// Unified image capability fallback settings. When `enabled`/`auto_enable`
 /// are true and a native image capability is missing, the `kodex-image` MCP
 /// server is injected with the corresponding fallback tool(s).
@@ -1856,6 +1892,9 @@ pub struct AppSettings {
     pub web_tools: WebToolsSettings,
     #[serde(default)]
     pub image: ImageSettings,
+    /// Commit-message assistant model selection (codex agent).
+    #[serde(default)]
+    pub commit_assistant: CommitAssistantSettings,
     /// DeepSeek Harness default agent preset (mode) for NEW dsh sessions.
     /// Written into the dsh `settings.yaml` `agent-presets.default` on bring-up.
     /// `None` = dsh deployment default.
@@ -1947,6 +1986,8 @@ pub struct AgentSettingsSnapshot {
     pub web_tools: WebToolsSettingsStatus,
     #[serde(default)]
     pub image: ImageSettingsStatus,
+    #[serde(default)]
+    pub commit_assistant: CommitAssistantSettingsStatus,
 }
 
 /// Result of an explicit DeepSeek Harness update check.

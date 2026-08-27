@@ -300,7 +300,7 @@ pub fn run_harness_session(
                 let pending = sink.pending_approvals();
                 let response = pending.build_response(&sink, &rpc_id, &result);
                 if let Some(response) = &response {
-                    tracing::debug!(
+                    tracing::info!(
                         target: "dsh-bridge::respond",
                         rpc_id,
                         payload = %serde_json::to_string(response).unwrap_or_default(),
@@ -308,7 +308,7 @@ pub fn run_harness_session(
                     );
                 }
                 let send_result = match response {
-                    Some(response) => host.runtime().block_on(client.respond(&response)),
+                    Some(ref response) => host.runtime().block_on(client.respond(response)),
                     None => Err(anyhow::anyhow!(
                         "no pending approval/question for id {rpc_id}"
                     )),
@@ -327,6 +327,7 @@ pub fn run_harness_session(
                         tracing::warn!(
                             target: "dsh-bridge::respond",
                             rpc_id,
+                            response = %serde_json::to_string(&response).unwrap_or_default(),
                             reason = %reason,
                             "harness rejected respond (question/approval stays pending)"
                         );

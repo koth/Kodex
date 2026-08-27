@@ -24,11 +24,16 @@ export type TimelineItem = { Message: string } | { Tool: string } | "Thinking";
 
 export type ThinkingStatus = "Active" | "Completed";
 
+export type WorkspaceKind = "project" | "chats";
+
 export interface WorkspaceDescriptor {
   id: string;
   name: string;
   root: string;
   location?: WorkspaceLocation;
+  // Set by the backend for the project-less "聊天" workspace (`~/.kodex/chats`).
+  // Optional so payloads from older builds keep deserializing.
+  kind?: WorkspaceKind;
 }
 
 export type WorkspaceLocation =
@@ -973,6 +978,13 @@ export interface AgentSettingsSnapshot {
   claude: ClaudeProviderSettingsStatus;
   web_tools: WebToolsSettingsStatus;
   image?: ImageSettingsStatus;
+  commit_assistant?: CommitAssistantSettingsStatus;
+}
+
+export interface CommitAssistantSettingsStatus {
+  provider: string;
+  model: string;
+  configured: boolean;
 }
 
 export interface CodexAcpSettingsStatus {

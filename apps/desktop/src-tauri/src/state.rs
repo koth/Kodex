@@ -13,8 +13,8 @@ use terminal_service::{TerminalEventSink, TerminalService};
 use workspace_model::{
     AgentCliId, EditorFileSnapshot, FileEntry, OpenWorkspaceItem, RemoteLinuxWorkspace,
     RepositorySnapshot, SessionListItem, TerminalOpenRequest, TerminalResizeRequest,
-    TerminalSession, TerminalWriteRequest, UiSnapshot, WorkspaceDescriptor, WorkspaceLocation,
-    WorkspaceSessionList,
+    TerminalSession, TerminalWriteRequest, UiSnapshot, WorkspaceDescriptor, WorkspaceKind,
+    WorkspaceLocation, WorkspaceSessionList,
 };
 
 use std::sync::Arc;
@@ -1442,15 +1442,28 @@ fn workspace_key_for_identifier(guard: &WorkspaceRegistry, identifier: &str) -> 
 }
 
 fn workspace_descriptor(workspace_root: &Path) -> WorkspaceDescriptor {
+    // Dormant chat workspaces keep the friendly "聊天" label and the chats
+    // kind so the sidebar (and remote clients) treat them like the connected
+    // descriptor produced by `build_initial_ui`.
+    let is_chats = is_chats_workspace(&workspace_root.display().to_string());
     WorkspaceDescriptor {
         id: uuid::Uuid::new_v4(),
-        name: workspace_root
-            .file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or("工作区")
-            .to_string(),
+        name: if is_chats {
+            "聊天".to_string()
+        } else {
+            workspace_root
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("工作区")
+                .to_string()
+        },
         root: workspace_root.to_path_buf(),
         location: WorkspaceLocation::Local,
+        kind: if is_chats {
+            WorkspaceKind::Chats
+        } else {
+            WorkspaceKind::Project
+        },
     }
 }
 
@@ -1460,6 +1473,7 @@ fn remote_workspace_descriptor(remote: RemoteLinuxWorkspace) -> WorkspaceDescrip
         name: remote.display_name(),
         root: PathBuf::from(remote.key()),
         location: WorkspaceLocation::RemoteLinux(remote),
+        kind: WorkspaceKind::Project,
     }
 }
 
@@ -1500,6 +1514,7 @@ mod tests {
             name: "Dormant".into(),
             root: PathBuf::from("D:/work/Dormant"),
             location: WorkspaceLocation::Local,
+            kind: WorkspaceKind::Project,
         };
         let session = SessionListItem {
             id: uuid::Uuid::new_v4().to_string(),

@@ -2,7 +2,7 @@ use std::path::Path;
 use workspace_model::{
     ChatMessage, InspectorTab, MessageRole, RemoteLinuxWorkspace, RepositorySnapshot,
     SessionStatus, SessionSummary, SidebarSection, TimelineItem, ToolInvocation, ToolLogEntry,
-    ToolStatus, UiSnapshot, WorkspaceDescriptor, WorkspaceLocation,
+    ToolStatus, UiSnapshot, WorkspaceDescriptor, WorkspaceKind, WorkspaceLocation,
 };
 
 pub(crate) fn build_initial_ui(workspace_root: &Path) -> anyhow::Result<UiSnapshot> {
@@ -28,6 +28,11 @@ pub(crate) fn build_initial_ui(workspace_root: &Path) -> anyhow::Result<UiSnapsh
         },
         root: workspace_root.to_path_buf(),
         location: WorkspaceLocation::Local,
+        kind: if is_chats {
+            WorkspaceKind::Chats
+        } else {
+            WorkspaceKind::Project
+        },
     };
     build_initial_ui_for_descriptor(descriptor)
 }
@@ -38,6 +43,7 @@ pub(crate) fn build_initial_remote_ui(remote: RemoteLinuxWorkspace) -> anyhow::R
         name: remote.display_name(),
         root: std::path::PathBuf::from(remote.key()),
         location: WorkspaceLocation::RemoteLinux(remote),
+        kind: WorkspaceKind::Project,
     };
     build_initial_ui_for_descriptor(descriptor)
 }

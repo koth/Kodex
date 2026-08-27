@@ -743,6 +743,11 @@ fn handle_mock_streamable_http_request(
     stream: &mut std::net::TcpStream,
     state: &MockStreamableHttpState,
 ) {
+    // Accepted sockets inherit the listener's non-blocking mode (on Windows),
+    // which makes request reads return WouldBlock whenever the client's bytes
+    // have not arrived in a single segment. Restore blocking semantics before
+    // reading.
+    stream.set_nonblocking(false).unwrap();
     let request = read_mock_http_request(stream);
     match (request.method.as_str(), request.path.as_str()) {
         ("POST", path) if path.ends_with("/connect") => {

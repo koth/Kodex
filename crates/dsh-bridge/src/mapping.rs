@@ -94,10 +94,13 @@ pub fn map_mux_frame(frame: &MuxFrame, sink: &SessionSink) -> MappedEvents {
             approval_id,
             outcome,
             ..
-        } => MappedEvents::single(ClientEvent::ToolPermissionResolved {
-            id: approval_id.clone(),
-            outcome: outcome.clone(),
-        }),
+        } => {
+            sink.clear_pending_approval(approval_id);
+            MappedEvents::single(ClientEvent::ToolPermissionResolved {
+                id: approval_id.clone(),
+                outcome: outcome.clone(),
+            })
+        }
         MuxFrame::QuestionRequested { questions, .. } => {
             // The bridge answers one ask() as a batch via the question's rpcId.
             // Use the first question's id as the request id surfaced to the UI;

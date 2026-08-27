@@ -75,6 +75,24 @@ pub enum MuxEnd {
     Close,
 }
 
+/// When the mux stream emits its scripted frames.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum HoldFramesUntil {
+    /// Emit frames as soon as the WebSocket connection is up. Use for tests
+    /// that register their sinks manually right after `acquire()` — the
+    /// WebSocket handshake always loses that race.
+    #[default]
+    Connected,
+    /// Hold frames until the mock has served a `session.models` POST.
+    /// `run_harness_session` registers the session sink synchronously right
+    /// after `session.create` returns and strictly BEFORE it POSTs
+    /// `session.models`, so serving that call guarantees the sink is
+    /// registered. Without the hold, an up-front scripted frame races the
+    /// registration and is dropped as "mux frame for unregistered session"
+    /// (which flaked the question/answer tests under parallel load).
+    SessionRegistered,
+}
+
 /// Behavior for a single mux stream connection (a reconnection re-runs the
 /// script from its own frame list).
 #[derive(Debug, Clone)]
@@ -83,10 +101,9 @@ pub struct MuxScript {
     pub frames: Vec<Value>,
     /// What to do after `frames` are emitted.
     pub end: MuxEnd,
-    /// Wait for the client's mux subscribe message before emitting frames, so
-    /// a scripted server-request never races past the bridge's session
-    /// registration (which precedes the subscribe).
-    pub wait_for_subscribe: bool,
+    /// When to emit the scripted frames relative to the bridge's session
+    /// registration.
+    pub hold_frames_until: HoldFramesUntil,
 }
 
 #[derive(Debug, Clone)]
@@ -120,6 +137,10 @@ struct MockState {
     /// Pending question frames keyed by envelope rpcId (the questions the host
     /// is waiting on). Populated when a `question/requested` frame is sent.
     pub pending_questions: std::collections::HashMap<String, Vec<Value>>,
+    /// Set once a `session.models` POST has been served. `run_harness_session`
+    /// only sends it after the session sink is registered, so tests can use it
+    /// as a registration barrier (`HoldFramesUntil::SessionRegistered`).
+    pub models_served: bool,
 }
 
 pub struct MockHarness {
@@ -375,6 +396,11 @@ async fn handle_connection(
                 let payload = parsed.get("payload").cloned().unwrap_or(Value::Null);
                 state.lock().unwrap().creates.push(payload);
             }
+            if method_name == "session.models" {
+                // Sent by `run_harness_session` only after the session sink is
+                // registered — used as the frame-hold barrier.
+                state.lock().unwrap().models_served = true;
+            }
 
             let value = match method_name.as_str() {
                 "host.describe" => serde_json::json!({
@@ -503,6 +529,16 @@ async fn serve_mux(
         Ok(ws) => ws,
         Err(_) => return,
     };
+    if script.hold_frames_until == HoldFramesUntil::SessionRegistered {
+        // `run_harness_session` registers the sink before POSTing
+        // `session.models`, so serving that call is the earliest observable
+        // signal that scripted frames will find their sink. Bounded so a test
+        // that never reaches models fails visibly instead of hanging.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while !state.lock().unwrap().models_served && std::time::Instant::now() < deadline {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    }
     for frame in &script.frames {
         // Record pending questions so the respond handler can validate answers
         // the way dsh's `matchesQuestions` does.
@@ -563,7 +599,7 @@ fn scripts_for_hold() -> Vec<MuxScript> {
     vec![MuxScript {
         frames: Vec::new(),
         end: MuxEnd::Hold,
-        wait_for_subscribe: true,
+        hold_frames_until: HoldFramesUntil::Connected,
     }]
 }
 
@@ -628,7 +664,7 @@ pub fn scripts_with(frames: Vec<Value>) -> Vec<MuxScript> {
     vec![MuxScript {
         frames,
         end: MuxEnd::Hold,
-        wait_for_subscribe: true,
+        hold_frames_until: HoldFramesUntil::Connected,
     }]
 }
 

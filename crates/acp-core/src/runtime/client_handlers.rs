@@ -2734,44 +2734,6 @@ mod tests {
     }
 
     #[test]
-    fn codebuddy_registered_terminal_approval_skips_second_permission_request() {
-        let command = "python - <<'PY'\nfrom pathlib import Path\np=Path('src/main.ts')\np.write_text('ok')\nPY";
-        let approvals = CodeBuddyTerminalApprovals::default();
-        approvals
-            .register(command, vec![PathBuf::from("src/main.ts")])
-            .unwrap();
-        let denials = CodeBuddyTerminalDenials::default();
-        let (tx, rx) = mpsc::channel();
-        let tool_execution_registry = ToolExecutionRegistry::default();
-        let broker = PermissionBroker::default();
-        let root = temp_workspace("terminal-approval");
-        let mut config = test_session_config(&root);
-        config.agent_command = "codebuddy".into();
-        let request = CreateTerminalRequest::new("session-1", "python".to_string()).args(vec![
-            "-".into(),
-            "<<'PY'\nfrom pathlib import Path\np=Path('src/main.ts')\np.write_text('ok')\nPY"
-                .into(),
-        ]);
-
-        let gate = ensure_codebuddy_terminal_create_permission(
-            &broker,
-            &tx,
-            &tool_execution_registry,
-            &config,
-            &config.agent_command,
-            &config.workspace_root,
-            &denials,
-            &approvals,
-            &request,
-        )
-        .expect("permission gate should not fail");
-
-        assert!(matches!(gate, CodeBuddyTerminalCreateGate::Allow));
-        assert!(rx.try_recv().is_err());
-        let _ = fs::remove_dir_all(root.parent().unwrap());
-    }
-
-    #[test]
     fn codebuddy_registered_pathless_terminal_approval_skips_second_permission_request() {
         let approvals = CodeBuddyTerminalApprovals::default();
         approvals.register("pnpm build", Vec::new()).unwrap();

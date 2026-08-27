@@ -22,6 +22,7 @@ use workspace_model::{
 
 mod bootstrap;
 mod change_sets;
+mod commit_assistant;
 mod config;
 pub(crate) mod diff_utils;
 mod events;

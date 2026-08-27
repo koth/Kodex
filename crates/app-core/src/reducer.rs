@@ -313,10 +313,13 @@ pub(crate) fn apply_event(ui: &mut UiSnapshot, event: ClientEvent) {
             value_label,
         } => {
             apply_config_value_change(ui, &control_id, &value_id, value_label.clone());
-            // Model changes flow through the config controls above; mode
-            // changes are applied here because `ui.session.mode` is not
-            // synced from LegacyMode controls (their authoritative update is
-            // this event).
+            // Propagate the refreshed control selection into the session
+            // summary (`ui.session.model` after a model switch, etc.).
+            // `sync_session_summary_from_config` only syncs `ui.session.mode`
+            // from LocalMode controls, so LegacyMode preset switches are not
+            // clobbered here — their authoritative update is the assignment
+            // below.
+            sync_session_summary_from_config(ui);
             if control_id == "mode" {
                 ui.session.mode = Some(
                     value_label.unwrap_or_else(|| value_id.to_string()),
@@ -1741,7 +1744,7 @@ mod tests {
     use workspace_model::{
         InspectorTab, MessageRole, PermissionOption, RepositorySnapshot, SessionConfigCategory,
         SessionConfigChoice, SessionConfigControl, SessionConfigSource, SessionConfigState,
-        SessionStatus, SessionSummary, WorkspaceDescriptor, WorkspaceLocation,
+        SessionStatus, SessionSummary, WorkspaceDescriptor, WorkspaceKind, WorkspaceLocation,
     };
 
     fn empty_ui() -> UiSnapshot {
@@ -1753,6 +1756,7 @@ mod tests {
                 name: "test".into(),
                 root: PathBuf::from("/test"),
                 location: WorkspaceLocation::Local,
+                kind: WorkspaceKind::Project,
             },
             workspace_connected: true,
             session: SessionSummary {

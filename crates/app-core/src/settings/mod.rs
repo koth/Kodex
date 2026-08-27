@@ -52,9 +52,10 @@ use toml_edit::{DocumentMut, Item, Table, value};
 use workspace_model::{
     AgentCliId, AgentModelOption, AgentProviderFamily, AgentProviderProfile,
     AgentProviderProxyKind, AgentSettingsSnapshot, AppSettings, AppTheme, ClaudeProviderSettings,
-    ClaudeProviderSettingsStatus, CodexAcpSettingsStatus, CodexConnectionMode, CustomProviderInput,
-    CustomProviderProtocol, ImageGenerateProtocol, ImageGenerateSettings, ImageSettings,
-    ImageSettingsStatus, WebToolsSettings, WebToolsSettingsStatus,
+    ClaudeProviderSettingsStatus, CodexAcpSettingsStatus, CodexConnectionMode,
+    CommitAssistantSettingsStatus, CustomProviderInput, CustomProviderProtocol,
+    ImageGenerateProtocol, ImageGenerateSettings, ImageSettings, ImageSettingsStatus,
+    WebToolsSettings, WebToolsSettingsStatus,
 };
 
 const SETTINGS_FILE: &str = "settings.json";
@@ -741,6 +742,7 @@ fn default_settings() -> AppSettings {
         claude: ClaudeProviderSettings::default(),
         web_tools: WebToolsSettings::default(),
         image: workspace_model::ImageSettings::default(),
+        commit_assistant: workspace_model::CommitAssistantSettings::default(),
         dsh_default_preset: None,
     }
 }
@@ -847,12 +849,74 @@ fn infer_legacy_codex_provider_profile_id(paths: &AppPaths, settings: &AppSettin
         .unwrap_or_else(|_| BYOK_PROVIDER_ID.to_string())
 }
 
+
+/// Commit-assistant status: the configured provider+model pair, and whether
+/// it actually resolves to a configured BYOK provider profile whose catalog
+/// contains the model. Unconfigured pairs surface as `configured: false` so
+/// the commit assistant can fall back to the session model.
+pub fn commit_assistant_settings_status(
+    paths: &AppPaths,
+    settings: &AppSettings,
+) -> CommitAssistantSettingsStatus {
+    let provider = settings.commit_assistant.provider.trim().to_string();
+    let model = settings.commit_assistant.model.trim().to_string();
+    let configured = !provider.is_empty()
+        && !model.is_empty()
+        && commit_assistant_model_is_available(paths, &provider, &model);
+    CommitAssistantSettingsStatus {
+        provider,
+        model,
+        configured,
+    }
+}
+
+fn commit_assistant_model_is_available(
+    paths: &AppPaths,
+    provider: &str,
+    model: &str,
+) -> bool {
+    let selected_profile_id = selected_codex_provider_profile_id(paths, &load_app_settings(paths));
+    provider_profiles(paths, AgentProviderFamily::Codex, &selected_profile_id)
+        .iter()
+        .find(|profile| profile.id == provider)
+        .is_some_and(|profile| profile.configured && profile.models.iter().any(|m| m == model))
+}
+
+/// Persist the commit-assistant model selection. `provider` must be a
+/// configured BYOK source provider and `model` must be in that provider's
+/// model catalog, so the assistant can never start with a model it cannot
+/// authenticate against. Passing an empty provider AND model clears the
+/// override — the assistant then falls back to the visible session's model.
+pub fn save_commit_assistant_settings(
+    paths: &AppPaths,
+    provider: &str,
+    model: &str,
+) -> Result<AgentSettingsSnapshot> {
+    let provider = provider.trim().to_string();
+    let model = model.trim().to_string();
+    if provider.is_empty() != model.is_empty() {
+        anyhow::bail!("commit assistant requires both a provider and a model");
+    }
+    if !provider.is_empty() && !commit_assistant_model_is_available(paths, &provider, &model) {
+        anyhow::bail!(
+            "commit assistant model \"{model}\" is not available for provider \"{provider}\"; pick a model from the provider's configured catalog"
+        );
+    }
+    let mut settings = load_app_settings(paths);
+    settings.commit_assistant.provider = provider;
+    settings.commit_assistant.model = model;
+    save_app_settings(paths, &settings)?;
+    Ok(settings_snapshot(paths))
+}
+
 pub fn settings_snapshot(paths: &AppPaths) -> AgentSettingsSnapshot {
     let settings = load_app_settings(paths);
     let agents = agent_statuses(paths, settings.selected_agent);
+    let commit_assistant = commit_assistant_settings_status(paths, &settings);
     AgentSettingsSnapshot {
         web_tools: web_tools_settings_status(paths, &settings),
         image: image_settings_status(paths, &settings),
+        commit_assistant,
         settings,
         agents,
         env_override: std::env::var("ACP_AGENT_COMMAND").ok(),
@@ -879,6 +943,7 @@ pub fn select_agent(paths: &AppPaths, agent: AgentCliId) -> Result<AgentSettings
         claude: existing.claude,
         web_tools: existing.web_tools,
         image: existing.image,
+        commit_assistant: existing.commit_assistant,
         dsh_default_preset: existing.dsh_default_preset,
     };
     save_app_settings(paths, &settings)?;

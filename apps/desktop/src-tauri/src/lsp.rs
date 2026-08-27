@@ -496,6 +496,7 @@ impl Default for LanguageServerRegistry {
                 claude: workspace_model::ClaudeProviderSettings::default(),
                 web_tools: workspace_model::WebToolsSettings::default(),
                 image: workspace_model::ImageSettings::default(),
+                commit_assistant: workspace_model::CommitAssistantSettings::default(),
                 dsh_default_preset: None,
             })
             .into_iter()

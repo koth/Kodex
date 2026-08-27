@@ -1,19 +1,25 @@
-import { useCallback, useEffect, useState } from "react";
-import { View, Text, FlatList, Pressable, ActivityIndicator, RefreshControl, StyleSheet } from "react-native";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { View, Text, FlatList, Pressable, ActivityIndicator, RefreshControl, StyleSheet, Animated, Easing } from "react-native";
 import { useFocusEffect } from "@react-navigation/native";
 import { useAppController, useConnectionState } from "../../app/AppServicesContext";
 import type { SessionListItem, WorkspaceSessionList } from "../../types";
+import { splitSessionGroups } from "./session-groups";
 import { styles, colors, spacing, radius, shadows } from "../theme";
+import { EmptyState } from "../ui/EmptyState";
 
-// Lists sessions from `ListSessions` grouped by workspace, mirroring the
-// desktop sidebar: every project renders as a collapsible row that starts
-// collapsed (except the currently active workspace), and expanding a project
-// reveals its session list. Pull-to-refresh re-issues `ListSessions`; the
-// expand/collapse map is hoisted here so background refreshes never reset it.
+// Lists sessions from `ListSessions`. The project-less chats workspace
+// (marked `kind: "chats"`) renders as a pinned "聊天" section with its
+// sessions always visible — mirroring the desktop sidebar where chats are a
+// first-level group next to projects, not a project itself. Every project
+// renders as a collapsible row that starts collapsed (except the currently
+// active workspace), and expanding a project reveals its session list.
+// Pull-to-refresh re-issues `ListSessions`; the expand/collapse map is
+// hoisted here so background refreshes never reset it.
 
 type Group = WorkspaceSessionList;
 
 type Row =
+  | { kind: "chats-header"; key: string }
   | { kind: "workspace"; key: string; group: Group }
   | {
       kind: "session";
@@ -155,11 +161,44 @@ export function SessionListScreen({
     [connected, controller, onOpenSession],
   );
 
-  // Flatten groups into section rows. Collapsed workspaces contribute no
-  // session rows, so the list stays short like the desktop sidebar.
+  // Flatten groups into section rows. Chats render first as a pinned, always
+  // expanded section; collapsed projects contribute no session rows, so the
+  // list stays short like the desktop sidebar.
+  const { chats: chatsGroups, projects: projectGroups } = splitSessionGroups(groups);
+  const chatsGroup = chatsGroups[0];
   const rows: Row[] = [];
   let anySessionVisible = false;
-  for (const group of groups) {
+  if (chatsGroup) {
+    rows.push({ kind: "chats-header", key: "chats:header" });
+    const sortedChats = sortSessions(chatsGroup.sessions);
+    if (sortedChats.length === 0) {
+      rows.push({
+        kind: "session",
+        key: `chats-empty:${chatsGroup.workspace.root}`,
+        session: {
+          id: "",
+          title: chatsGroup.connected ? "No chats yet" : "Not loaded yet",
+          status: "Idle",
+          created_at: "",
+          updated_at: "",
+          message_count: 0,
+        },
+        isSessionActive: false,
+      });
+    } else {
+      for (const session of sortedChats) {
+        anySessionVisible = true;
+        rows.push({
+          kind: "session",
+          key: `${chatsGroup.workspace.root}:${session.id}`,
+          session,
+          isSessionActive:
+            chatsGroup.is_active && session.id === chatsGroup.active_session_id,
+        });
+      }
+    }
+  }
+  for (const group of projectGroups) {
     rows.push({ kind: "workspace", key: `ws:${group.workspace.root}`, group });
     const isOpen = expanded[group.workspace.root] ?? group.is_active;
     if (!isOpen) continue;
@@ -170,7 +209,7 @@ export function SessionListScreen({
         key: `ws-empty:${group.workspace.root}`,
         session: {
           id: "",
-          title: group.connected ? "No sessions yet" : "Not loaded",
+          title: group.connected ? "No sessions yet" : "Not loaded yet",
           status: "Idle",
           created_at: "",
           updated_at: "",
@@ -211,7 +250,9 @@ export function SessionListScreen({
         <View>
           <Text style={[styles.title, { marginBottom: 0, fontSize: 26 }]}>Projects</Text>
           <Text style={[styles.textFaint, { marginTop: 2 }]}>
-            {connected ? `${groups.length} workspace${groups.length === 1 ? "" : "s"}` : "offline"}
+            {connected
+              ? `${projectGroups.length} workspace${projectGroups.length === 1 ? "" : "s"}`
+              : "offline"}
           </Text>
         </View>
         <View style={styles.row}>
@@ -248,7 +289,13 @@ export function SessionListScreen({
         data={rows}
         keyExtractor={(item) => item.key}
         renderItem={({ item }) =>
-          item.kind === "workspace" ? (
+          item.kind === "chats-header" ? (
+            <ChatsHeader
+              creating={chatsGroup ? creatingFor === chatsGroup.workspace.root : false}
+              disabled={!chatsGroup || !chatsGroup.connected || !connected}
+              onCreate={() => chatsGroup && void createInWorkspace(chatsGroup)}
+            />
+          ) : item.kind === "workspace" ? (
             <WorkspaceRow
               group={item.group}
               expanded={expanded[item.group.workspace.root] ?? item.group.is_active}
@@ -273,12 +320,12 @@ export function SessionListScreen({
           loading ? (
             <View style={styles.center}><ActivityIndicator color={colors.accent} /></View>
           ) : (
-            <View style={styles.center}>
-              <Text style={[styles.textFaint, { fontSize: 13 }]}>
-                {error ?? "No projects. Open a workspace on desktop to see it here."}
-              </Text>
-            </View>
-          )
+              <EmptyState
+                glyph={"\u2302"}
+                title={error ? "Could not load projects" : "No projects yet"}
+                hint={error ? "Pull down to retry." : "Open a workspace on desktop and it will appear here."}
+              />
+            )
         }
         ListFooterComponent={
           rows.length > 0 && error ? (
@@ -291,6 +338,42 @@ export function SessionListScreen({
       {!anySessionVisible && groups.length > 0 && !loading ? (
         <Text style={localStyles.hint}>Tap a project to reveal its sessions</Text>
       ) : null}
+    </View>
+  );
+}
+
+// Section header for the pinned chats group: a "聊天" label plus a shortcut
+// that starts a new chat in the project-less chats workspace. Kept visually
+// lighter than project cards, like the desktop sidebar's chats group.
+function ChatsHeader({
+  creating,
+  disabled,
+  onCreate,
+}: {
+  creating: boolean;
+  disabled: boolean;
+  onCreate: () => void;
+}) {
+  return (
+    <View style={localStyles.chatsHeader}>
+      <Text style={localStyles.chatsKicker}>{"聊天"}</Text>
+      <Pressable
+        style={({ pressed }) => [
+          localStyles.chatsNew,
+          { opacity: pressed ? 0.7 : disabled ? 0.4 : 1 },
+        ]}
+        onPress={onCreate}
+        disabled={disabled || creating}
+        accessibilityRole="button"
+        accessibilityLabel="新建聊天"
+        hitSlop={8}
+      >
+        {creating ? (
+          <ActivityIndicator color={colors.accent} size="small" />
+        ) : (
+          <Text style={localStyles.chatsNewText}>{"+ 新聊天"}</Text>
+        )}
+      </Pressable>
     </View>
   );
 }
@@ -346,7 +429,7 @@ function WorkspaceRow({
                 : "offline"}
           </Text>
         </View>
-        <Text style={localStyles.chevron}>{expanded ? "\u25BE" : "\u25B8"}</Text>
+        <AnimatedChevron expanded={expanded} />
         {!remote ? (
           <Pressable
             style={({ pressed }) => [localStyles.plusButton, { opacity: pressed ? 0.6 : 1 }]}
@@ -366,6 +449,25 @@ function WorkspaceRow({
         ) : null}
       </Pressable>
     </View>
+  );
+}
+
+// Rotating disclosure arrow (single glyph, rotated 0deg -> 90deg) so the
+// expand/collapse affordance animates instead of snapping between glyphs.
+function AnimatedChevron({ expanded }: { expanded: boolean }) {
+  const spin = useRef(new Animated.Value(expanded ? 1 : 0)).current;
+  useEffect(() => {
+    Animated.timing(spin, {
+      toValue: expanded ? 1 : 0,
+      duration: 180,
+      easing: Easing.out(Easing.quad),
+      useNativeDriver: true,
+    }).start();
+  }, [expanded, spin]);
+  return (
+    <Animated.View style={{ transform: [{ rotate: spin.interpolate({ inputRange: [0, 1], outputRange: ["0deg", "90deg"] }) }] }}>
+      <Text style={localStyles.chevron}>{"\u203A"}</Text>
+    </Animated.View>
   );
 }
 
@@ -407,6 +509,35 @@ function SessionRow({
 }
 
 const localStyles = StyleSheet.create({
+  chatsHeader: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    paddingHorizontal: spacing.lg,
+    paddingTop: spacing.sm,
+    paddingBottom: spacing.xs,
+  },
+  chatsKicker: {
+    fontSize: 13,
+    fontWeight: "700",
+    letterSpacing: 1,
+    color: colors.textFaint,
+  },
+  chatsNew: {
+    flexDirection: "row",
+    alignItems: "center",
+    paddingVertical: spacing.xs + 2,
+    paddingHorizontal: spacing.md,
+    borderRadius: radius.pill,
+    borderWidth: 1,
+    borderColor: colors.border,
+    backgroundColor: colors.surface,
+  },
+  chatsNewText: {
+    fontSize: 13,
+    fontWeight: "600",
+    color: colors.text,
+  },
   headButton: {
     paddingVertical: spacing.sm,
     paddingHorizontal: spacing.md,

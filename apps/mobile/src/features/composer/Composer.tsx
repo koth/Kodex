@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { View, Text, TextInput, Pressable, ActivityIndicator, Keyboard } from "react-native";
+import { View, Text, TextInput, Pressable, ActivityIndicator, Keyboard, Platform, Vibration } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { styles, colors, spacing, radius } from "../theme";
 
@@ -11,24 +11,31 @@ interface Props {
 
 // Prompt input + send. Image/file attach is behind a feature flag for the
 // MVP (the prompt content type supports them, but the picker UI is deferred).
+//
+// Keyboard handling is platform-split to avoid double offsets: iOS relies on
+// the KeyboardAvoidingView in ConversationScreen, Android on the default
+// adjustResize window mode + a small manual pad here (some keyboards still
+// overlap the composer edge with resize mode alone).
 export function Composer({ onSend, disabled, error }: Props) {
   const [text, setText] = useState("");
   const [sending, setSending] = useState(false);
-  const [keyboardHeight, setKeyboardHeight] = useState(0);
+  const [inputHeight, setInputHeight] = useState(38);
+  const [keyboardPad, setKeyboardPad] = useState(0);
   const insets = useSafeAreaInsets();
 
   useEffect(() => {
+    if (Platform.OS === "ios") return;
     const show = Keyboard.addListener("keyboardDidShow", (event) => {
-      setKeyboardHeight(event.endCoordinates.height);
+      setKeyboardPad(Math.max(0, event.endCoordinates.height - insets.bottom) + 8);
     });
     const hide = Keyboard.addListener("keyboardDidHide", () => {
-      setKeyboardHeight(0);
+      setKeyboardPad(0);
     });
     return () => {
       show.remove();
       hide.remove();
     };
-  }, []);
+  }, [insets.bottom]);
 
   const canSend = text.trim().length > 0 && !disabled && !sending;
 
@@ -38,6 +45,7 @@ export function Composer({ onSend, disabled, error }: Props) {
     setSending(true);
     try {
       await onSend(value);
+      Vibration.vibrate(8);
       setText("");
     } catch {
       // The parent surfaces the error and keeps the input so the user can retry.
@@ -52,12 +60,7 @@ export function Composer({ onSend, disabled, error }: Props) {
         backgroundColor: colors.bg,
         borderTopWidth: 1,
         borderTopColor: colors.border,
-        paddingBottom:
-          keyboardHeight > 0
-            ? Math.max(0, keyboardHeight - insets.bottom) + 12
-            : insets.bottom > 0
-              ? 0
-              : 8,
+        paddingBottom: keyboardPad || (insets.bottom > 0 ? 0 : 8),
       }}
     >
       {error ? (
@@ -73,9 +76,8 @@ export function Composer({ onSend, disabled, error }: Props) {
             styles.input,
             {
               flex: 1,
-              minHeight: 46,
-              maxHeight: 140,
-              borderRadius: radius.pill,
+              height: Math.max(46, Math.min(inputHeight + 8, 140)),
+              borderRadius: inputHeight <= 50 ? 23 : radius.lg,
               paddingHorizontal: spacing.lg,
               fontSize: 15,
             },
@@ -84,6 +86,7 @@ export function Composer({ onSend, disabled, error }: Props) {
           placeholderTextColor={colors.textFaint}
           value={text}
           onChangeText={setText}
+          onContentSizeChange={(event) => setInputHeight(event.nativeEvent.contentSize.height)}
           multiline
           editable={!disabled}
         />
@@ -92,13 +95,15 @@ export function Composer({ onSend, disabled, error }: Props) {
             styles.pillButton,
             {
               width: 46,
-              minHeight: 46,
-              height: "100%",
+              height: 46,
+              alignSelf: "flex-end",
               opacity: canSend ? (pressed ? 0.85 : 1) : 0.4,
             },
           ]}
           disabled={!canSend}
           onPress={handleSend}
+          accessibilityRole="button"
+          accessibilityLabel="Send message"
         >
           {sending ? (
             <ActivityIndicator color="#fff" size="small" />

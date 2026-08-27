@@ -139,6 +139,20 @@ pub fn settings_save_image_generate_api_key(
         .map_err(|e| e.to_string())
 }
 
+/// Persist the commit-assistant model selection (provider + model from the
+/// configured BYOK catalog). Empty provider+model clears the override so the
+/// assistant falls back to the visible session's model. Local-only: the
+/// commit assistant does not run against remote workspaces.
+#[tauri::command]
+pub fn settings_save_commit_assistant_settings(
+    provider: String,
+    model: String,
+) -> Result<AgentSettingsSnapshot, String> {
+    let paths = app_core::AppPaths::resolve().map_err(|e| e.to_string())?;
+    app_core::settings::save_commit_assistant_settings(&paths, &provider, &model)
+        .map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 pub fn settings_get_remote_profiles() -> Result<RemoteMachineProfilesSnapshot, String> {
     let paths = app_core::AppPaths::resolve().map_err(|e| e.to_string())?;

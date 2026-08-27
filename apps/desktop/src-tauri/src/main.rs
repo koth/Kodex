@@ -191,6 +191,7 @@ fn main() {
             commands::settings::settings_save_image_view_settings,
             commands::settings::settings_save_image_generate_settings,
             commands::settings::settings_save_image_generate_api_key,
+            commands::settings::settings_save_commit_assistant_settings,
             commands::settings::settings_get_remote_profiles,
             commands::settings::settings_save_remote_profile,
             commands::settings::settings_delete_remote_profile,

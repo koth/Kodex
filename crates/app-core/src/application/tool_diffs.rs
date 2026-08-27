@@ -394,6 +394,35 @@ impl Application {
                 });
                 continue;
             }
+            // dsh write/create shape: the arguments carry the full file
+            // content (`content`/`file_text`) with no old text, and the
+            // result text states whether the file was created. When the
+            // write landed before the app processed the tool-start event
+            // (coalesced poll batch), the tracker baseline already reflects
+            // the post-write file and the creation would be silently
+            // dropped — recover it from the tool payload + disk check.
+            if let Some(new_text) =
+                write_tool_payload_created_content(&tool, &normalized_path, &self.ui.workspace.root)
+                && tool_result_reports_created_file(&tool)
+            {
+                let disk_matches = std::fs::read_to_string(
+                    self.ui.workspace.root.join(&normalized_path),
+                )
+                .ok()
+                .map(|text| normalize_diff_text_for_session_change(&text))
+                .is_some_and(|disk| disk == new_text);
+                if disk_matches {
+                    changes.push(crate::file_tracker::VerifiedFileChange {
+                        path: normalized_path,
+                        change_type: FileChangeType::Created,
+                        old_text: None,
+                        new_text,
+                        skipped_diff: false,
+                        quality: DiffQuality::Exact,
+                    });
+                    continue;
+                }
+            }
             if change_type == FileChangeType::Created
                 && let Some(new_text) =
                     self.created_edit_content_from_tool_payloads(&tool, &normalized_path)
@@ -1217,6 +1246,48 @@ fn tool_has_diff_source_for_path(tool: &ToolInvocation, path: &str, workspace_ro
                     .any(|line| matches!(line.kind, DiffLineKind::Added | DiffLineKind::Removed))
             })
     })
+}
+
+/// Content of a write-shaped tool payload targeting `normalized_path`: the
+/// arguments carry the full file content (`content`/`file_text`/
+/// `new_content`) and no old text (no `old_string`/`before`). This is the
+/// dsh `write` tool and `str_replace_editor` `create` shape.
+fn write_tool_payload_created_content(
+    tool: &ToolInvocation,
+    normalized_path: &str,
+    workspace_root: &Path,
+) -> Option<String> {
+    let payload = tool.raw_input.as_deref()?;
+    let json = serde_json::from_str::<serde_json::Value>(payload).ok()?;
+    let payload_path = json
+        .get("file_path")
+        .or_else(|| json.get("path"))
+        .or_else(|| json.get("filePath"))
+        .and_then(|value| value.as_str())?;
+    if normalize_path_for_storage(payload_path, workspace_root) != normalized_path {
+        return None;
+    }
+    if edit_input_before_text(&json).is_some() {
+        return None;
+    }
+    let content = json
+        .get("content")
+        .or_else(|| json.get("file_text"))
+        .or_else(|| json.get("new_content"))
+        .or_else(|| json.get("newContent"))
+        .and_then(|value| value.as_str())?;
+    (!content.trim().is_empty()).then(|| normalize_diff_text_for_session_change(content))
+}
+
+/// Whether the tool result text reports that a new file was created (dsh
+/// `write` replies with "Created file"; `str_replace_editor` `create` replies
+/// with "New file created successfully at: ...").
+fn tool_result_reports_created_file(tool: &ToolInvocation) -> bool {
+    let Some(raw_output) = tool.raw_output.as_deref() else {
+        return false;
+    };
+    let lower = raw_output.to_ascii_lowercase();
+    lower.contains("created file") || lower.contains("new file created successfully")
 }
 
 fn completed_tool_edit_candidate_paths(

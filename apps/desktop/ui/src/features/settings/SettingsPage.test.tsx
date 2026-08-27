@@ -35,6 +35,7 @@ import {
   settingsSaveWebToolsProviderKey,
   settingsSaveWebToolsSettings,
   settingsSaveImageViewSettings,
+  settingsSaveCommitAssistantSettings,
   usageGetSummary,
 } from "../../lib/tauri";
 import {
@@ -95,6 +96,7 @@ vi.mock("../../lib/tauri", async () => {
     settingsSaveWebToolsProviderKey: vi.fn(),
     settingsSaveWebToolsSettings: vi.fn(),
     settingsSaveImageViewSettings: vi.fn(),
+    settingsSaveCommitAssistantSettings: vi.fn(),
     settingsSaveAgentProviderSecret: vi.fn(),
     settingsSaveCustomProvider: vi.fn(),
     settingsSaveLspServer: vi.fn(),
@@ -592,6 +594,7 @@ async function openSettingsPane(
     | "通用"
     | "Web 工具"
     | "图像能力"
+    | "Commit 助手"
     | "远程"
     | "已归档"
     | "用量"
@@ -2828,5 +2831,114 @@ describe("SettingsPage LSP settings", () => {
       ),
     );
     await screen.findByText("识图配置已保存。");
+  });
+
+  it("saves the commit assistant model from a configured BYOK provider catalog", async () => {
+    // Only providers with a resolved key are offered. Configure TimiAI and
+    // CommandCode so both appear and the provider → model cascade can be
+    // exercised; DeepSeek (no key) must stay hidden.
+    const commitSnapshot: AgentSettingsSnapshot = {
+      ...agentSnapshot,
+      codex_acp: {
+        ...agentSnapshot.codex_acp,
+        profiles: codexProfiles("byok", {
+          timiai: true,
+          commandcode: true,
+        }),
+      },
+      commit_assistant: {
+        provider: "",
+        model: "",
+        configured: false,
+      },
+    };
+    vi.mocked(settingsGetAgentSnapshot).mockResolvedValue(commitSnapshot);
+    vi.mocked(settingsSaveCommitAssistantSettings).mockImplementation(
+      async (provider, model) => ({
+        ...commitSnapshot,
+        commit_assistant: {
+          provider,
+          model,
+          configured: !!provider && !!model,
+        },
+      }),
+    );
+
+    render(<SettingsPage onBack={vi.fn()} />);
+    await openSettingsPane("Commit 助手");
+
+    const commitSection = (
+      await screen.findByRole("heading", { name: "Commit 助手", level: 2 })
+    ).closest("section");
+    expect(commitSection).not.toBeNull();
+    const commitControls = within(commitSection as HTMLElement);
+
+    // Unconfigured: the badge reports the session-model fallback and saving
+    // is disabled until a provider+model pair is picked.
+    expect(commitControls.getByText("跟随会话模型")).toBeInTheDocument();
+    expect(
+      commitControls.getByRole("button", { name: "保存助手配置" }),
+    ).toBeDisabled();
+
+    const providerTrigger = commitControls.getByRole("button", {
+      name: "commit_assistant_provider",
+    });
+    const modelTrigger = commitControls.getByRole("button", {
+      name: "commit_assistant_model",
+    });
+
+    fireEvent.click(providerTrigger);
+    const providerListbox = await screen.findByRole("listbox", {
+      name: "commit_assistant_provider",
+    });
+    expect(providerListbox.textContent).toContain("自动（跟随会话模型）");
+    expect(providerListbox.textContent).toContain("TimiAI");
+    expect(providerListbox.textContent).toContain("CommandCode");
+    expect(providerListbox.textContent).not.toContain("DeepSeek");
+    fireEvent.click(
+      within(providerListbox).getByRole("button", { name: "CommandCode" }),
+    );
+
+    // The model list follows the draft provider immediately, before saving.
+    fireEvent.click(modelTrigger);
+    const modelListbox = await screen.findByRole("listbox", {
+      name: "commit_assistant_model",
+    });
+    expect(modelListbox.textContent).toContain("claude-sonnet-4-6");
+    expect(modelListbox.textContent).toContain("deepseek/deepseek-v4-pro");
+    expect(modelListbox.textContent).not.toContain("gpt-5.4");
+    fireEvent.click(
+      within(modelListbox).getByRole("button", { name: "claude-sonnet-4-6" }),
+    );
+
+    fireEvent.click(
+      commitControls.getByRole("button", { name: "保存助手配置" }),
+    );
+    await waitFor(() =>
+      expect(settingsSaveCommitAssistantSettings).toHaveBeenCalledWith(
+        "commandcode",
+        "claude-sonnet-4-6",
+      ),
+    );
+    await screen.findByText("Commit 助手模型已保存，下次生成提交信息时生效");
+    expect(commitControls.getByText("已配置")).toBeInTheDocument();
+
+    // Switching back to "自动" clears the override (empty provider+model).
+    fireEvent.click(providerTrigger);
+    const providerListboxAgain = await screen.findByRole("listbox", {
+      name: "commit_assistant_provider",
+    });
+    fireEvent.click(
+      within(providerListboxAgain).getByRole("button", {
+        name: "自动（跟随会话模型）",
+      }),
+    );
+    fireEvent.click(
+      commitControls.getByRole("button", { name: "保存助手配置" }),
+    );
+    await waitFor(() =>
+      expect(settingsSaveCommitAssistantSettings).toHaveBeenCalledWith("", ""),
+    );
+    await screen.findByText("已恢复为跟随会话模型");
   });
 });

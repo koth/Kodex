@@ -4186,6 +4186,211 @@ fn preview_before_file_create_does_not_retry_into_review_after_landing() {
     assert!(turns.is_empty());
 }
 
+
+#[test]
+fn dsh_write_tool_created_file_survives_coalesced_poll_batch() {
+    // Regression: dsh emits `tool/call` and `tool/result` back-to-back, so the
+    // app often processes ToolStarted AFTER the write already landed on disk.
+    // The tracker baseline then reflects the post-write file and the creation
+    // would be silently dropped. The tool payload (content + file_path) plus
+    // the "Created file" result marker must recover it.
+    let dir = tempfile::tempdir().unwrap();
+    let file_path = dir.path().join("tmp-ssh").join("package.json");
+    let new_text = "{\n  \"name\": \"tmp-ssh-debug\"\n}\n";
+    fs::create_dir_all(file_path.parent().unwrap()).unwrap();
+    fs::write(&file_path, new_text).unwrap();
+
+    let mut app = test_app(&dir);
+    let raw_input = serde_json::json!({
+        "content": new_text,
+        "file_path": file_path.display().to_string(),
+    })
+    .to_string();
+
+    let result = app.apply_runtime_events_with_file_tracking(vec![
+        ClientEvent::ToolStarted {
+            id: "call-w2".into(),
+            parent_id: None,
+            name: "write".into(),
+            kind: "edit".into(),
+            summary: "write".into(),
+            is_subagent: false,
+            raw_input: Some(raw_input.clone()),
+        },
+        ClientEvent::ToolDiff {
+            id: "call-w2".into(),
+            path: file_path.display().to_string(),
+            old_text: Some(String::new()),
+            new_text: new_text.into(),
+        },
+        ClientEvent::ToolCompleted {
+            id: "call-w2".into(),
+            name: None,
+            outcome: "completed".into(),
+            raw_output: Some(
+                "<path>D:\\\\tmp-ssh\\\\package.json</path>\n<type>file</type>\n<content>\nCreated file\n</content>"
+                    .into(),
+            ),
+            terminal_output: None,
+        },
+    ]);
+    assert!(result.had_file_changes, "coalesced write must be detected");
+
+    assert_eq!(app.ui.session_changes.len(), 1, "session_changes");
+    assert_eq!(app.ui.review_changes.len(), 1, "review_changes");
+    let change = &app.ui.review_changes[0];
+    assert_eq!(change.change_type, FileChangeType::Created);
+    assert_eq!(change.old_text, None);
+    assert_eq!(change.new_text, new_text);
+}
+
+#[test]
+fn dsh_write_tool_updated_file_is_not_recorded_as_created() {
+    // The `write` tool also overwrites existing files ("Updated file" marker).
+    // Without a recoverable baseline the update must NOT be recorded as a
+    // creation (the tracker/git baselines own that case).
+    let dir = tempfile::tempdir().unwrap();
+    let file_path = dir.path().join("existing.txt");
+    let updated_text = "fully rewritten content\n";
+    fs::write(&file_path, updated_text).unwrap();
+
+    let mut app = test_app(&dir);
+    let raw_input = serde_json::json!({
+        "content": updated_text,
+        "file_path": file_path.display().to_string(),
+    })
+    .to_string();
+
+    let result = app.apply_runtime_events_with_file_tracking(vec![
+        ClientEvent::ToolStarted {
+            id: "call-w3".into(),
+            parent_id: None,
+            name: "write".into(),
+            kind: "edit".into(),
+            summary: "write".into(),
+            is_subagent: false,
+            raw_input: Some(raw_input),
+        },
+        ClientEvent::ToolCompleted {
+            id: "call-w3".into(),
+            name: None,
+            outcome: "completed".into(),
+            raw_output: Some("Updated file".into()),
+            terminal_output: None,
+        },
+    ]);
+    let _ = app.retry_pending_tool_write_detections();
+
+    let created = app
+        .ui
+        .review_changes
+        .iter()
+        .any(|change| change.change_type == FileChangeType::Created);
+    assert!(!created, "overwrite must not be recorded as created");
+    let _ = result;
+}
+
+#[test]
+fn dsh_str_replace_editor_create_enters_review_when_batch_is_coalesced() {
+    // `str_replace_editor` with `command: "create"` carries `path` + `file_text`
+    // and replies with "New file created successfully at: ...".
+    let dir = tempfile::tempdir().unwrap();
+    let file_path = dir.path().join("features").join("ui").join("EmptyState.tsx");
+    let new_text = "export function EmptyState() {\n  return null;\n}\n";
+    fs::create_dir_all(file_path.parent().unwrap()).unwrap();
+    fs::write(&file_path, new_text).unwrap();
+
+    let mut app = test_app(&dir);
+    let raw_input = serde_json::json!({
+        "command": "create",
+        "path": file_path.display().to_string(),
+        "file_text": new_text,
+    })
+    .to_string();
+
+    let result = app.apply_runtime_events_with_file_tracking(vec![
+        ClientEvent::ToolStarted {
+            id: "call-c1".into(),
+            parent_id: None,
+            name: "str_replace_editor".into(),
+            kind: "edit".into(),
+            summary: "str_replace_editor".into(),
+            is_subagent: false,
+            raw_input: Some(raw_input),
+        },
+        ClientEvent::ToolCompleted {
+            id: "call-c1".into(),
+            name: None,
+            outcome: "completed".into(),
+            raw_output: Some(
+                "New file created successfully at: EmptyState.tsx".into(),
+            ),
+            terminal_output: None,
+        },
+    ]);
+    assert!(result.had_file_changes);
+    assert_eq!(app.ui.review_changes.len(), 1);
+    assert_eq!(app.ui.review_changes[0].change_type, FileChangeType::Created);
+    assert_eq!(app.ui.review_changes[0].new_text, new_text);
+}
+#[test]
+fn dsh_write_tool_new_file_enters_review_from_raw_input_hints() {
+    // dsh harness `write` tool: arguments carry `content` + `file_path` (an
+    // absolute path inside the workspace); the result card has NO diff view,
+    // so dsh-bridge synthesizes a whole-file-added ToolDiff. The tracker must
+    // record the missing-at-start baseline from raw_input and surface the
+    // created file in review_changes.
+    let dir = tempfile::tempdir().unwrap();
+    let file_path = dir.path().join("tmp-ssh").join("package.json");
+    let new_text = "{\n  \"name\": \"tmp-ssh-debug\"\n}\n";
+    let mut app = test_app(&dir);
+    let raw_input = serde_json::json!({
+        "content": new_text,
+        "file_path": file_path.display().to_string(),
+    })
+    .to_string();
+
+    let started = app.apply_runtime_events_with_file_tracking(vec![ClientEvent::ToolStarted {
+        id: "call-w1".into(),
+        parent_id: None,
+        name: "write".into(),
+        kind: "edit".into(),
+        summary: "write".into(),
+        is_subagent: false,
+        raw_input: Some(raw_input.clone()),
+    }]);
+    assert!(!started.had_file_changes);
+
+    let diff = app.apply_runtime_events_with_file_tracking(vec![ClientEvent::ToolDiff {
+        id: "call-w1".into(),
+        path: file_path.display().to_string(),
+        old_text: Some(String::new()),
+        new_text: new_text.into(),
+    }]);
+    let _ = diff;
+
+    fs::create_dir_all(file_path.parent().unwrap()).unwrap();
+    fs::write(&file_path, new_text).unwrap();
+    let completed = app.apply_runtime_events_with_file_tracking(vec![ClientEvent::ToolCompleted {
+        id: "call-w1".into(),
+        name: None,
+        outcome: "completed".into(),
+        raw_output: Some("Created file".into()),
+        terminal_output: None,
+    }]);
+    let _ = completed;
+    // The landed-edit payload recovery records the created change directly at
+    // completion time, so no pending write detection needs to fire.
+    let retried = app.retry_pending_tool_write_detections();
+    let _ = retried;
+
+    assert_eq!(app.ui.session_changes.len(), 1, "session_changes");
+    assert_eq!(app.ui.review_changes.len(), 1, "review_changes");
+    let change = &app.ui.review_changes[0];
+    assert_eq!(change.change_type, FileChangeType::Created);
+    assert_eq!(change.new_text, new_text);
+}
+
 #[test]
 fn created_file_enters_review_from_tracker_baseline() {
     let dir = tempfile::tempdir().unwrap();

@@ -427,8 +427,23 @@ if (-not $forward) {
 }
 $parts = $forward -split ":"
 $localPort = [int]$parts[1]
-$listener = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Parse("127.0.0.1"), $localPort)
-$listener.Start()
+$listener = $null
+for ($i = 0; $i -lt 50; $i++) {
+    try {
+        $candidate = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Parse("127.0.0.1"), $localPort)
+        $candidate.Start()
+        $listener = $candidate
+        break
+    } catch {
+        # The local port is only reserved when the test binds port 0 and
+        # releases it; a parallel test can transiently claim it. Retry.
+        Start-Sleep -Milliseconds 200
+    }
+}
+if (-not $listener) {
+    Write-Error "failed to bind 127.0.0.1:$localPort"
+    exit 1
+}
 [Console]::Error.WriteLine("__KODEX_ACP_REMOTE_AGENT_READY__")
 try {
     $client = $listener.AcceptTcpClient()
@@ -478,7 +493,18 @@ import time
 port = int(sys.argv[1])
 server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-server.bind(("127.0.0.1", port))
+bound = False
+for attempt in range(50):
+    try:
+        server.bind(("127.0.0.1", port))
+        bound = True
+        break
+    except OSError:
+        # The local port is only reserved when the test binds port 0 and
+        # releases it; a parallel test can transiently claim it. Retry.
+        time.sleep(0.2)
+if not bound:
+    sys.exit(1)
 server.listen(1)
 print("__KODEX_ACP_REMOTE_AGENT_READY__", file=sys.stderr, flush=True)
 conn, _ = server.accept()
@@ -750,9 +776,9 @@ fn active_send_prompt_uses_latest_accepted_prompt_completion() {
         .send_prompt_content_async(vec![UserPromptContent::text("first prompt")])
         .unwrap();
 
-    session
-        .send_steer_content(vec![UserPromptContent::text("second prompt")])
-        .unwrap();
+    if let Err(error) = session.send_steer_content(vec![UserPromptContent::text("second prompt")]) {
+        panic!("send_steer_content failed: {error:#}; runtime last_error: {:?}", session.last_error());
+    }
 
     let events = collect_prompt_events_until_finished(&mut session, &mut task);
     session.shutdown();
@@ -789,7 +815,11 @@ fn active_send_prompt_rejection_emits_feedback_and_keeps_turn_alive() {
     let error = session
         .send_steer_content(vec![UserPromptContent::text("   ")])
         .unwrap_err();
-    assert!(error.to_string().contains("提示内容不能为空"));
+    assert!(
+        error.to_string().contains("提示内容不能为空"),
+        "unexpected steer error: {error:#}; runtime last_error: {:?}",
+        session.last_error()
+    );
 
     let events = collect_prompt_events_until_finished(&mut session, &mut task);
     session.shutdown();
@@ -821,9 +851,9 @@ fn active_send_prompt_finishes_when_steer_response_never_returns() {
         .send_prompt_content_async(vec![UserPromptContent::text("first prompt")])
         .unwrap();
 
-    session
-        .send_steer_content(vec![UserPromptContent::text("second prompt")])
-        .unwrap();
+    if let Err(error) = session.send_steer_content(vec![UserPromptContent::text("second prompt")]) {
+        panic!("send_steer_content failed: {error:#}; runtime last_error: {:?}", session.last_error());
+    }
 
     let events = collect_prompt_events_until_finished(&mut session, &mut task);
     session.shutdown();
@@ -857,7 +887,9 @@ fn cancel_active_prompt_finishes_locally_when_agent_never_responds() {
         .send_prompt_content_async(vec![UserPromptContent::text("first prompt")])
         .unwrap();
 
-    session.cancel_prompt().unwrap();
+    if let Err(error) = session.cancel_prompt() {
+        panic!("cancel_prompt failed: {error:#}; runtime last_error: {:?}", session.last_error());
+    }
     let events = collect_prompt_events_until_finished(&mut session, &mut task);
     session.shutdown();
 
@@ -914,7 +946,9 @@ fn late_prompt_response_after_cancel_does_not_disconnect_session() {
         .send_prompt_content_async(vec![UserPromptContent::text("first prompt")])
         .unwrap();
 
-    session.cancel_prompt().unwrap();
+    if let Err(error) = session.cancel_prompt() {
+        panic!("cancel_prompt failed: {error:#}; runtime last_error: {:?}", session.last_error());
+    }
     let events = collect_prompt_events_until_finished(&mut session, &mut task);
     assert!(
         events.iter().any(|event| matches!(
@@ -987,10 +1021,6 @@ fn mock_agent_session_config_with_options(
     steer_never_responds: bool,
     prompt_never_responds: bool,
 ) -> SessionConfig {
-    let manifest = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../tools/mock-acp-agent/Cargo.toml")
-        .canonicalize()
-        .unwrap();
     let prompt_never_responds_env = if prompt_never_responds {
         "KODEX_MOCK_ACP_PROMPT_NEVER_RESPONDS=1 "
     } else {
@@ -1003,13 +1033,13 @@ fn mock_agent_session_config_with_options(
             ""
         };
         format!(
-            "{prompt_never_responds_env}KODEX_MOCK_ACP_STEER_TEST=1{never_responds_env} cargo run --manifest-path {} -p mock-acp-agent --quiet --",
-            shell_words::quote(&manifest.to_string_lossy())
+            "{prompt_never_responds_env}KODEX_MOCK_ACP_STEER_TEST=1{never_responds_env} {}",
+            mock_agent_binary_command()
         )
     } else {
         format!(
-            "{prompt_never_responds_env}cargo run --manifest-path {} -p mock-acp-agent --quiet --",
-            shell_words::quote(&manifest.to_string_lossy())
+            "{prompt_never_responds_env}{}",
+            mock_agent_binary_command()
         )
     };
 
@@ -1029,11 +1059,58 @@ fn mock_agent_session_config_with_options(
     }
 }
 
+/// Pre-build the `mock-acp-agent` binary exactly once (process-wide) and
+/// return its quoted filesystem path. Replaces `cargo run -p mock-acp-agent`
+/// which acquired the cargo build lock on every test and serialized dozens of
+/// parallel `cargo run` invocations, causing agent startup to exceed the
+/// prompt-collection deadline and sessions to be torn down mid-test under
+/// parallel load.
+fn mock_agent_binary_command() -> String {
+    static BINARY: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    let path = BINARY.get_or_init(|| {
+        let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".into());
+        let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tools/mock-acp-agent/Cargo.toml");
+        let status = std::process::Command::new(&cargo)
+            .arg("build")
+            .arg("--manifest-path")
+            .arg(&manifest)
+            .arg("-p")
+            .arg("mock-acp-agent")
+            .arg("--quiet")
+            .status()
+            .expect("failed to invoke cargo build for mock-acp-agent");
+        assert!(status.success(), "cargo build -p mock-acp-agent failed");
+        let target_dir = std::env::var("CARGO_TARGET_DIR").unwrap_or_else(|_| {
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .parent()
+                .and_then(|path| path.parent())
+                .expect("workspace root")
+                .join("target")
+                .to_string_lossy()
+                .into_owned()
+        });
+        let exe = if cfg!(windows) {
+            "mock-acp-agent.exe"
+        } else {
+            "mock-acp-agent"
+        };
+        let binary = std::path::Path::new(&target_dir).join("debug").join(exe);
+        assert!(
+            binary.exists(),
+            "mock-acp-agent binary not found at {}",
+            binary.display()
+        );
+        binary.to_string_lossy().into_owned()
+    });
+    shell_words::quote(path).to_string()
+}
+
 fn collect_prompt_events_until_finished(
     session: &mut SessionHandle,
     task: &mut crate::PromptTask,
 ) -> Vec<ClientEvent> {
-    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
     let mut events = Vec::new();
     while !task.is_finished() && std::time::Instant::now() < deadline {
         events.extend(task.collect_ready_events(session).unwrap());

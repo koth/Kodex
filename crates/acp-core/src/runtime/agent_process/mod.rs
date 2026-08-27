@@ -184,9 +184,18 @@ impl ConnectTo<Client> for HiddenAgentProcess {
         hide_console_window(&mut command);
         configure_agent_process_group(&mut command);
 
-        let mut child = command
-            .spawn()
-            .map_err(agent_client_protocol::Error::into_internal_error)?;
+        let mut child = command.spawn().map_err(|error| {
+            // Include the command and cwd so spawn failures (e.g. a deleted
+            // working directory surfaces as os error 267 on Windows) point at
+            // the actual cause instead of a bare io message.
+            agent_client_protocol::Error::into_internal_error(std::io::Error::other(
+                format!(
+                    "failed to spawn agent {} in {}: {error}",
+                    self.command.display(),
+                    self.current_dir.display()
+                ),
+            ))
+        })?;
 
         let child_stdin = child.stdin.take().ok_or_else(|| {
             agent_client_protocol::util::internal_error("failed to open agent stdin")
@@ -503,9 +512,18 @@ impl ConnectTo<Client> for TcpAgentProcess {
         hide_console_window(&mut command);
         configure_agent_process_group(&mut command);
 
-        let mut child = command
-            .spawn()
-            .map_err(agent_client_protocol::Error::into_internal_error)?;
+        let mut child = command.spawn().map_err(|error| {
+            // Include the command and cwd so spawn failures (e.g. a deleted
+            // working directory surfaces as os error 267 on Windows) point at
+            // the actual cause instead of a bare io message.
+            agent_client_protocol::Error::into_internal_error(std::io::Error::other(
+                format!(
+                    "failed to spawn agent {} in {}: {error}",
+                    self.command.display(),
+                    self.current_dir.display()
+                ),
+            ))
+        })?;
 
         // Keep stdin handle alive for the entire session. Some TCP ACP agents exit
         // when stdin reaches EOF, regardless of whether it uses stdio or TCP.
@@ -654,9 +672,13 @@ impl ConnectTo<Client> for RemoteSshAgentProcess {
         }
         hide_console_window(&mut command);
 
-        let mut child = command
-            .spawn()
-            .map_err(agent_client_protocol::Error::into_internal_error)?;
+        let mut child = command.spawn().map_err(|error| {
+            // Include the ssh command so spawn failures point at the actual
+            // cause instead of a bare io message.
+            agent_client_protocol::Error::into_internal_error(std::io::Error::other(
+                format!("failed to spawn ssh {}: {error}", self.ssh_command.display()),
+            ))
+        })?;
         let child_stderr = child.stderr.take().ok_or_else(|| {
             agent_client_protocol::util::internal_error("failed to open ssh stderr")
         })?;
