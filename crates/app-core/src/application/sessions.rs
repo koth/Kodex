@@ -581,6 +581,12 @@ impl Application {
             };
         self.poll_current_runtime_progress();
         self.bump_revision();
+        // Remote (phone) entry into a session relies on the pushed Full
+        // snapshot: bump_revision alone does not signal subscribers, so the
+        // relay event source would stay asleep after a switch and the phone
+        // would wait on its sync fallback. Broadcast like every other UI
+        // change so AppUpdateEventSource wakes and pushes the Full delta.
+        self.broadcast_ui_updated();
         Ok(())
     }
 

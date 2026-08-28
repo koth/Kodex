@@ -29,6 +29,12 @@ use crate::rpc_types::{
 /// Default timeout for bounded control calls (a hung host must not leave the
 /// session pending forever). Matches dsh's `DEFAULT_TIMEOUT_MS`.
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
+/// `commands/execute` runs user-paced slash commands: `/compact` triggers a
+/// full LLM summarization of the session history that routinely takes longer
+/// than bounded-call timeouts, and the harness aborts the command the moment
+/// the HTTP request dies (the carrier signal follows the caller) — so this
+/// call gets a generous cap instead of the 30s default.
+const COMMANDS_EXECUTE_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 
 /// Shared HTTP client for a harness host. Connection pooling multiplexes
 /// concurrent control POSTs from multiple sessions; the cookie jar is empty for
@@ -80,12 +86,34 @@ impl HttpClient {
         P: serde::Serialize,
         V: DeserializeOwned,
     {
+        self.call_bounded(method, rpc_id, payload, DEFAULT_TIMEOUT)
+            .await
+    }
+
+    /// [`HttpClient::call`] with a per-request timeout cap. `None` means "use
+    /// the client default"; a duration overrides the client's bounded-call
+    /// timeout for this request only.
+    pub async fn call_bounded<P, V>(
+        &self,
+        method: &str,
+        rpc_id: RpcId,
+        payload: &P,
+        timeout: impl Into<Option<Duration>>,
+    ) -> anyhow::Result<V>
+    where
+        P: serde::Serialize,
+        V: DeserializeOwned,
+    {
         let body = ClientRequest::new(rpc_id.clone(), method, serde_json::to_value(payload)?);
-        let response = self
+        let mut request = self
             .inner
             .post(self.api_url(method))
             .header(reqwest::header::CONTENT_TYPE, "application/json")
-            .json(&body)
+            .json(&body);
+        if let Some(timeout) = timeout.into() {
+            request = request.timeout(timeout);
+        }
+        let response = request
             .send()
             .await
             .with_context(|| format!("transport failure for {method}"))?;
@@ -228,6 +256,34 @@ impl HttpClient {
         payload: &crate::rpc_types::AgentPresetSelectPayload,
     ) -> anyhow::Result<crate::rpc_types::AgentPresetSelectValue> {
         self.call("agentPreset.select", rpc_id, payload).await
+    }
+
+    /// Execute one slash-command line against a session's agent via the
+    /// typert Remote gateway (`POST /api/commands/execute`).
+    ///
+    /// Returns `Ok(None)` when the line did not resolve to a registered
+    /// command (the wire serializes the void business result with no `value`
+    /// field). `Ok(Some(value))` carries the settled execution outcome.
+    pub async fn commands_execute(
+        &self,
+        rpc_id: RpcId,
+        session_id: &str,
+        line: &str,
+    ) -> anyhow::Result<Option<crate::rpc_types::CommandsExecuteValue>> {
+        let payload = crate::rpc_types::CommandsExecutePayload {
+            args: crate::rpc_types::CommandsExecuteArgs {
+                agent_id: session_id.to_string(),
+                line: line.to_string(),
+                images: Vec::new(),
+            },
+        };
+        self.call_bounded(
+            "commands/execute",
+            rpc_id,
+            &payload,
+            COMMANDS_EXECUTE_TIMEOUT,
+        )
+        .await
     }
 
     // ---- WebSocket event streams ----

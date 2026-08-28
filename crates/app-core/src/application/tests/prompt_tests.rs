@@ -1,5 +1,5 @@
 use super::*;
-use workspace_model::{PendingSteer, UserPromptContent};
+use workspace_model::{PendingSteer, PromptSendOutcome, UserPromptContent};
 
 #[test]
 fn inline_think_filter_strips_complete_blocks_from_visible_text() {
@@ -1002,6 +1002,41 @@ fn cancel_during_image_degradation_aborts_turn() {
     app.cancel_prompt().unwrap();
     assert!(!app.has_in_flight_prompt());
     assert_eq!(app.ui.session.status, SessionStatus::Idle);
+
+    app.session.shutdown();
+}
+
+/// A `/compact` command sent right after a resumed app start must consume
+/// `skip_replay`. The compaction lifecycle events (`compaction/start` →
+/// `compaction/end` + paired `command/done`) arrive while the session is Idle;
+/// with skip_replay still active, `poll_prompt_progress`'s idle drain silently
+/// dropped them, so the UI showed no notices at all and the bare command
+/// message (with only the retry affordance under it) looked like an instant
+/// send failure even though the backend compaction succeeded.
+#[test]
+fn compact_slash_command_consumes_skip_replay_so_compaction_events_apply() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = test_app(&dir);
+    wait_for_control(&mut app, SessionConfigCategory::Model);
+
+    // Simulate the resumed-session state: skip_replay is armed until the
+    // first send, and the session must be a harness one for the interception.
+    app.agent_command = "dsh".into();
+    app.skip_replay = true;
+    assert!(app.skip_replay);
+
+    let outcome = app
+        .send_prompt_content_background(vec![UserPromptContent::text("/compact")])
+        .unwrap();
+
+    assert_eq!(outcome, PromptSendOutcome::Command);
+    assert!(!app.skip_replay, "/compact must consume skip_replay");
+    // Fire-and-forget: no turn starts, the session stays Idle.
+    assert!(!app.has_in_flight_prompt());
+    assert_eq!(app.ui.session.status, SessionStatus::Idle);
+    let last = app.ui.messages.last().expect("command message appended");
+    assert_eq!(last.role, MessageRole::User);
+    assert_eq!(last.body, "/compact");
 
     app.session.shutdown();
 }

@@ -88,11 +88,22 @@ impl ClientResponse {
 
 /// Business success/failure result. The error arm is held as opaque JSON so an
 /// unknown error `code` does not break deserialization.
+///
+/// The `Err` arm is tried FIRST: with `value` defaulted on `Ok`, an untagged
+/// match ordered Ok-first would swallow error envelopes (`{"ok":false,
+/// "error":…}` parses fine as `Ok` with the default `value`). Err-first keeps
+/// error parsing authoritative while still accepting the typert void result
+/// (`{"ok":true}` with no `value` field — e.g. `commands/execute` for an
+/// unresolvable command line), which deserializes as `Ok` with `Value::Null`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum RpcResult<T> {
-    Ok { ok: bool, value: T },
     Err { ok: bool, error: RpcError },
+    Ok {
+        ok: bool,
+        #[serde(default)]
+        value: T,
+    },
 }
 
 impl<T> RpcResult<T> {
@@ -405,6 +416,57 @@ pub struct AskUserQuestionAnswerItemWire {
     pub custom: Option<String>,
 }
 
+// ---- `commands/execute` (typert Remote surface) ----
+//
+// Unlike the dotted legacy methods (`session.create`, ...), typert Remote
+// endpoints live at `POST /api/<namespace>/<method>` and require the payload
+// to be exactly `{ "args": { ...named wire fields... } }`. The gateway
+// validates the args shape against the generated descriptor and rejects
+// anything else with `arguments-invalid`.
+
+/// `commands/execute` request payload: exactly one `args` object whose fields
+/// are the descriptor's wire names (`agentId`, `line`, `images`).
+#[derive(Debug, Clone, Serialize)]
+pub struct CommandsExecutePayload {
+    pub args: CommandsExecuteArgs,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct CommandsExecuteArgs {
+    /// Wire name for the descriptor's `agent` lookup parameter: the session id.
+    #[serde(rename = "agentId")]
+    pub agent_id: String,
+    /// Full command line including the leading slash (e.g. `/compact`).
+    pub line: String,
+    /// Base64 image attachments; always empty for the commands kodex issues.
+    pub images: Vec<serde_json::Value>,
+}
+
+/// `commands/execute` response value: the settled `CommandExecution`, present
+/// only when the line resolved to a registered command. Absent (void) means
+/// unknown or malformed command.
+#[derive(Debug, Clone, Deserialize)]
+pub struct CommandsExecuteValue {
+    #[serde(rename = "commandId")]
+    pub command_id: String,
+    pub result: CommandsExecuteResult,
+}
+
+/// One settled command outcome. `sourceEventSeq` rides only on success.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(tag = "kind")]
+pub enum CommandsExecuteResult {
+    #[serde(rename = "success")]
+    Success {
+        #[serde(default)]
+        text: Option<String>,
+        #[serde(rename = "sourceEventSeq", default)]
+        source_event_seq: Option<u64>,
+    },
+    #[serde(rename = "error")]
+    Error { text: String },
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -450,6 +512,66 @@ mod tests {
         let err = resp.result.err().unwrap();
         assert_eq!(err.code, "session-not-found");
         assert_eq!(err.message, "nope");
+    }
+
+    #[test]
+    fn server_response_void_ok_parse() {
+        // Typert void business result: no `value` field at all. Must parse as
+        // Ok with `Value::Null` — and must not be mistaken for an error.
+        let raw = serde_json::json!({
+            "type": "server-response",
+            "rpcId": "rpc-1",
+            "result": { "ok": true },
+        });
+        let resp: ServerResponse = serde_json::from_value(raw).unwrap();
+        assert!(resp.result.is_ok());
+        assert_eq!(resp.result.ok_value().unwrap(), &serde_json::Value::Null);
+    }
+
+    #[test]
+    fn commands_execute_value_parse() {
+        let raw = serde_json::json!({
+            "commandId": "cmd-1",
+            "result": { "kind": "success", "text": "Compacted 3 history items (~1.2k tokens)." }
+        });
+        let value: crate::rpc_types::CommandsExecuteValue = serde_json::from_value(raw).unwrap();
+        assert_eq!(value.command_id, "cmd-1");
+        match value.result {
+            crate::rpc_types::CommandsExecuteResult::Success { text, .. } => {
+                assert!(text.unwrap().contains("Compacted"));
+            }
+            other => panic!("expected success, got {other:?}"),
+        }
+
+        let raw = serde_json::json!({
+            "commandId": "cmd-2",
+            "result": { "kind": "error", "text": "Compaction cancelled." }
+        });
+        let value: crate::rpc_types::CommandsExecuteValue = serde_json::from_value(raw).unwrap();
+        match value.result {
+            crate::rpc_types::CommandsExecuteResult::Error { text } => {
+                assert_eq!(text, "Compaction cancelled.");
+            }
+            other => panic!("expected error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn commands_execute_payload_wire_shape() {
+        // The typert gateway requires the payload to be exactly one `args`
+        // object whose fields are the descriptor wire names.
+        let payload = crate::rpc_types::CommandsExecutePayload {
+            args: crate::rpc_types::CommandsExecuteArgs {
+                agent_id: "s-1".into(),
+                line: "/compact".into(),
+                images: Vec::new(),
+            },
+        };
+        let json = serde_json::to_value(&payload).unwrap();
+        assert_eq!(json["args"]["agentId"], "s-1");
+        assert_eq!(json["args"]["line"], "/compact");
+        assert_eq!(json["args"]["images"], serde_json::json!([]));
+        assert_eq!(json.as_object().unwrap().len(), 1);
     }
 
     #[test]

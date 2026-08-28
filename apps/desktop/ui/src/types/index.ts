@@ -222,6 +222,12 @@ export type UserPromptContent =
       end_line?: number | null;
     };
 
+/** What happened when a prompt was submitted: a new agent turn started, the
+ *  content was steered into the running turn, or it was handled as a
+ *  client-side command (e.g. the harness `/compact`) — no turn starts and the
+ *  session stays Idle. */
+export type PromptSendOutcome = "turn" | "steer" | "command";
+
 export interface AgentPlanEntry {
   id?: string | null;
   content: string;

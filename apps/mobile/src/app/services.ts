@@ -89,6 +89,26 @@ export class AppController {
     // EventFrame::PermissionRequest carries only the PermissionInputRequest.
     this.sessionStore.setPermissionHandler(() => this.rescanPendingPermissions());
     this.sessionStore.subscribe(() => this.rescanPendingPermissions());
+    // A lost patch frame (revision gap) wedges the incremental chain: the
+    // store asks for a full re-sync, debounced here into one GetState.
+    this.sessionStore.setResyncHandler(() => this.scheduleSnapshotResync());
+  }
+
+  private resyncTimer: ReturnType<typeof setTimeout> | null = null;
+
+  /** Debounced full-snapshot re-sync after a detected patch gap. */
+  private scheduleSnapshotResync(): void {
+    if (this.resyncTimer !== null) return;
+    this.resyncTimer = setTimeout(() => {
+      this.resyncTimer = null;
+      if (this.connState.state !== "connected" || !this.control) return;
+      void this.getState().catch((e) => {
+        diagnostics.log(
+          "services",
+          `snapshot resync failed: ${e instanceof Error ? e.message : String(e)}`,
+        );
+      });
+    }, 400);
   }
 
   get connectionState(): ConnectionState {
@@ -666,7 +686,14 @@ export class AppController {
   }
 
   async switchSession(sessionId: string, workspaceRoot?: string | null) {
-    this.sessionStore.beginSession(sessionId);
+    // Wipe the held snapshot only when actually switching away: re-entering
+    // the session that is already live must not clear it (that forced a full
+    // re-fetch on every back-and-forth). If the PC's active session differs
+    // (desktop user switched locally), the switch request still goes out and
+    // the pushed Full snapshot replaces the stale view.
+    if (this.sessionStore.state?.session.id !== sessionId) {
+      this.sessionStore.beginSession(sessionId);
+    }
     return this.controlClient().switchSession(sessionId, workspaceRoot ?? null);
   }
 

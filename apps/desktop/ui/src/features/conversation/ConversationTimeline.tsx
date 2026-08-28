@@ -113,7 +113,7 @@ interface ImagePreviewState {
   src: string;
 }
 
-type ContextCompactionState = "pending" | "completed";
+type ContextCompactionState = "pending" | "completed" | "failed";
 type TimelineItem = UiSnapshot["timeline"][number];
 type TimelineMessage = UiSnapshot["messages"][number];
 type TimelineTool = UiSnapshot["tools"][number];
@@ -141,15 +141,45 @@ interface TimelineCollapseState {
   hiddenIndexes: Set<number>;
 }
 
+/// Which compaction-divider state a system notice renders as. Mirrors the
+/// backend notice matchers (reducer `is_context_compaction_notice_body`) and
+/// the dsh-bridge wording: the running notice may carry a `（compactionId）`
+/// suffix, and the manual `/compact` outcome arrives as
+/// "上下文压缩完成：{text}" / "上下文压缩失败…" — all lifecycle forms must
+/// render as the divider, not as plain italic system rows.
 function contextCompactionState(body: string): ContextCompactionState | null {
   const normalized = body.trim();
-  if (normalized === "正在压缩上下文") {
+  if (normalized === "正在压缩上下文" || normalized.startsWith("正在压缩上下文（")) {
     return "pending";
   }
-  if (normalized === "上下文已压缩" || normalized === "上下文已自动压缩") {
+  if (
+    normalized === "上下文已压缩" ||
+    normalized === "上下文已自动压缩" ||
+    normalized.startsWith("上下文压缩完成：")
+  ) {
     return "completed";
   }
+  if (
+    normalized === "上下文压缩失败" ||
+    normalized.startsWith("上下文压缩未完成：") ||
+    normalized.startsWith("上下文压缩失败：")
+  ) {
+    return "failed";
+  }
   return null;
+}
+
+/** Divider label for a settled notice. The success notice's
+ *  "上下文压缩完成：" prefix is redundant inside the divider (the divider
+ *  itself says the compaction finished), so only the harness's summary detail
+ *  is shown; failure notices keep their full text. */
+function contextCompactionDividerLabel(body: string, state: ContextCompactionState): string {
+  const trimmed = body.trim();
+  if (state === "completed" && trimmed.startsWith("上下文压缩完成：")) {
+    const detail = trimmed.slice("上下文压缩完成：".length).trim();
+    if (detail) return detail;
+  }
+  return trimmed;
 }
 
 const StreamingMarkdown = memo(function StreamingMarkdown({ id, body, onFilePathClick, changedFiles, candidatePaths, onImagePreview }: StreamingMarkdownProps) {
@@ -565,7 +595,11 @@ const MessageRow = memo(function MessageRow({
       >
         <span className="msg-context-compaction-label">
           <span className="msg-context-compaction-icon" aria-hidden="true" />
-          <span>{compactionState === "pending" ? "正在压缩上下文" : body.trim()}</span>
+          <span>
+            {compactionState === "pending"
+              ? "正在压缩上下文"
+              : contextCompactionDividerLabel(body, compactionState)}
+          </span>
         </span>
       </div>
     );
@@ -593,6 +627,11 @@ function retryableUserMessageIds(snapshot: UiSnapshot) {
     if (typeof item !== "object" || !("Message" in item)) continue;
     const message = messagesById.get(item.Message);
     if (message?.role !== "User") continue;
+    // A `/compact` command never receives a turn response — its outcome rides
+    // system compaction notices, which this heuristic ignores, so the retry
+    // affordance would render permanently and read as a failed send. Mirrors
+    // the backend compact-slash interception (eq_ignore_ascii_case).
+    if (message.body.trim().toLowerCase() === "/compact") continue;
 
     let canRetry = true;
     for (const nextItem of snapshot.timeline.slice(index + 1)) {

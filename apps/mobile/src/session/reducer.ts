@@ -1,4 +1,8 @@
 import type { UiSnapshot, UiSnapshotPatch, ChatMessage, ToolInvocation, TimelineItem } from "../types";
+import {
+  getStreamingMessageBody,
+  reconcileStreamingMessageBody,
+} from "./streaming-message-store";
 
 // Verbatim port of the desktop `applySnapshotPatch` reducer
 // (apps/desktop/ui/src/features/workbench/useWorkbenchSnapshot.ts), so the
@@ -101,5 +105,45 @@ export function applySessionStatus(
   status: UiSnapshot["session"]["status"],
 ): UiSnapshot {
   return { ...snapshot, session: { ...snapshot.session, status } };
+}
+
+/**
+ * Fold the live streaming store back into snapshot message bodies.
+ *
+ * During a turn the PC sends delta-only patches (`message_deltas` with an
+ * empty `messages` list), so `snapshot.messages` stays a truncated prefix
+ * while the streaming store holds the growing text. Without this fold the
+ * timeline would render a frozen bubble for the whole turn and the text
+ * would only appear on a fresh full sync — the "sync feels broken" bug.
+ * Mirrors the desktop `materializeStreamingMessageBodies`.
+ */
+export function materializeStreamingMessageBodies(snapshot: UiSnapshot): UiSnapshot {
+  let changed = false;
+  const messages = snapshot.messages.map((message) => {
+    // Diverged streaming entries reset to the snapshot body first, so the
+    // fold below never resurrects text from a replaced message.
+    reconcileStreamingMessageBody(message.id, message.body);
+    const streamingBody = getStreamingMessageBody(message.id);
+    if (
+      streamingBody == null ||
+      streamingBody === message.body ||
+      streamingBody.length <= message.body.length
+    ) {
+      return message;
+    }
+    // Prefer the longer stream body whenever it is a continuation OR the
+    // snapshot body is only a stale prefix-incompatible fragment.
+    const streamIsContinuation = streamingBody.startsWith(message.body);
+    const snapshotLooksStalePrefix =
+      message.role === "Assistant" &&
+      message.body.length > 0 &&
+      streamingBody.includes(message.body);
+    if (!streamIsContinuation && !snapshotLooksStalePrefix) {
+      return message;
+    }
+    changed = true;
+    return { ...message, body: streamingBody };
+  });
+  return changed ? { ...snapshot, messages } : snapshot;
 }
 // end of file

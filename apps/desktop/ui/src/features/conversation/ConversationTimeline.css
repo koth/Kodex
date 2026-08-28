@@ -609,6 +609,18 @@
   animation: context-compaction-pulse 1s ease-in-out infinite;
 }
 
+/* A failed compaction keeps the divider shape (it replaces the running notice
+ * in place, so the lifecycle stays visually continuous) but tints warning. */
+.msg-context-compaction.is-failed,
+.msg-context-compaction.is-failed .msg-context-compaction-label {
+  color: color-mix(in srgb, var(--warning) 78%, var(--text-soft));
+}
+
+.msg-context-compaction.is-failed .msg-context-compaction-label {
+  white-space: normal;
+  text-align: center;
+}
+
 @keyframes context-compaction-line {
   0% {
     background-position: 120% 0;

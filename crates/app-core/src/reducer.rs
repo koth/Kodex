@@ -627,13 +627,27 @@ fn context_compaction_started_notice(message: &str) -> String {
 }
 
 fn is_context_compaction_started_notice(body: &str) -> bool {
-    body.trim() == "正在压缩上下文"
+    let body = body.trim();
+    body == "正在压缩上下文" || body.starts_with("正在压缩上下文（")
+}
+
+/// Any compaction lifecycle notice the bridge maps (started or completed).
+/// Consecutive notices describe the same compaction: a completion replaces the
+/// running notice in place, and a richer completion (`command/done` after
+/// `compaction/end`) replaces the earlier one.
+fn is_context_compaction_notice_body(body: &str) -> bool {
+    is_context_compaction_started_notice(body)
+        || body == "上下文已压缩"
+        || body == "上下文已自动压缩"
+        || body.starts_with("上下文压缩未完成：")
+        || body.starts_with("上下文压缩完成：")
+        || body.starts_with("上下文压缩失败：")
 }
 
 fn push_context_compaction_notice(ui: &mut UiSnapshot, content: String) {
     if ui.messages.last().is_some_and(|message| {
         message.role == workspace_model::MessageRole::System
-            && is_context_compaction_started_notice(&message.body)
+            && is_context_compaction_notice_body(&message.body)
     }) {
         return;
     }
@@ -649,7 +663,7 @@ fn push_or_replace_context_compaction_notice(ui: &mut UiSnapshot, content: Strin
         && let Some(message) = ui.messages.iter_mut().find(|message| {
             message.id == message_id
                 && message.role == workspace_model::MessageRole::System
-                && is_context_compaction_started_notice(&message.body)
+                && is_context_compaction_notice_body(&message.body)
         })
     {
         message.body = content;

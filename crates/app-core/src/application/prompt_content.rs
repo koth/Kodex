@@ -32,6 +32,20 @@ pub(super) fn prompt_has_file(prompt: &[UserPromptContent]) -> bool {
     })
 }
 
+/// Whether the prompt is the bare `/compact` slash command: a single text
+/// part whose trimmed, case-insensitive text is exactly `/compact`. Harness
+/// sessions route it to manual compaction instead of the model (see
+/// `send_prompt_content_background_inner`); ACP agents parse slash commands
+/// natively and must keep receiving the raw text.
+pub(super) fn is_compact_slash_prompt(prompt: &[UserPromptContent]) -> bool {
+    prompt.len() == 1
+        && matches!(
+            &prompt[0],
+            UserPromptContent::Text { text }
+                if text.trim().eq_ignore_ascii_case("/compact")
+        )
+}
+
 /// Degrade image attachments for a text-only model by calling the
 /// configured multimodal view model ahead of time and injecting its
 /// text description in place of the original image blocks.
@@ -343,5 +357,22 @@ mod tests {
         );
         let text = prompt_text(&prompt).expect("text remains");
         assert!(!text.contains("view_image"));
+    }
+
+    #[test]
+    fn compact_slash_prompt_matches_bare_command_only() {
+        assert!(is_compact_slash_prompt(&[UserPromptContent::text("/compact")]));
+        assert!(is_compact_slash_prompt(&[UserPromptContent::text("  /Compact  ")]));
+        assert!(!is_compact_slash_prompt(&[UserPromptContent::text("/compact 之后总结一下")]));
+        assert!(!is_compact_slash_prompt(&[UserPromptContent::text("/compactx")]));
+        assert!(!is_compact_slash_prompt(&[]));
+        assert!(!is_compact_slash_prompt(&[
+            UserPromptContent::text("/compact"),
+            UserPromptContent::text("请压缩上下文"),
+        ]));
+        assert!(!is_compact_slash_prompt(&[
+            UserPromptContent::text("/compact"),
+            UserPromptContent::workspace_file("src/lib.rs", None, None),
+        ]));
     }
 }

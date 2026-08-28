@@ -194,7 +194,7 @@ describe("Composer", () => {
   });
 
   it("sends workspace references as structured mentions without eager file content", async () => {
-    vi.mocked(sessionSendPrompt).mockResolvedValue(undefined);
+    vi.mocked(sessionSendPrompt).mockResolvedValue("turn");
 
     render(
       <Composer
@@ -231,7 +231,7 @@ describe("Composer", () => {
   });
 
   it("switches the active primary action from stop to steer when text is present", async () => {
-    vi.mocked(sessionSendPrompt).mockResolvedValue(undefined);
+    vi.mocked(sessionSendPrompt).mockResolvedValue("turn");
     const onStateChange = vi.fn();
     const snapshot = makeSnapshot({
       session: { ...makeSnapshot().session, status: "Streaming" },

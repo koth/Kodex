@@ -292,6 +292,19 @@ impl SessionHandle {
             .map_err(|_| anyhow!("ACP command reply channel closed"))?
     }
 
+    /// Request a manual context compaction (DeepSeek Harness `/compact`).
+    /// Fire-and-forget: only errors when the command channel is closed. The
+    /// compaction itself runs a full LLM summarization (minutes on large
+    /// contexts), so its outcome flows back as mapped harness events instead
+    /// of a blocking reply — a hung or slow compaction must not hold the
+    /// caller (which runs under the workspace mutex).
+    pub fn force_compact(&self) -> anyhow::Result<()> {
+        let (reply_tx, _reply_rx) = mpsc::channel();
+        self.command_tx
+            .send(RuntimeCommand::ForceCompact { reply_tx })
+            .map_err(|_| anyhow!("ACP command channel closed"))
+    }
+
     pub fn cancel_prompt(&self) -> anyhow::Result<()> {
         self.permission_broker.cancel_all()?;
         let (reply_tx, reply_rx) = mpsc::channel();

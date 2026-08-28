@@ -4,9 +4,9 @@ use tauri::{AppHandle, Manager, State};
 use workspace_model::{
     AgentCliId, ArchivedSessionListItem, ChangeSetFilesResponse, ChangeSetSummary,
     FileChangeRecord, GetChangeSetFileDiffRequest, ListChangeSetFilesRequest,
-    ListChangeSetsRequest, PermissionInputResponse, SessionConfigState, SessionFileChange,
-    UiSnapshot, UsageDailyBucket, UsageSummaryRequest, UsageSummaryRow, UserPromptContent,
-    WorkspaceSessionList,
+    ListChangeSetsRequest, PermissionInputResponse, PromptSendOutcome, SessionConfigState,
+    SessionFileChange, UiSnapshot, UsageDailyBucket, UsageSummaryRequest, UsageSummaryRow,
+    UserPromptContent, WorkspaceSessionList,
 };
 
 #[tauri::command]
@@ -33,7 +33,7 @@ pub fn session_get_revision(state: State<'_, AppState>) -> Result<(String, u64),
 pub fn session_send_prompt(
     state: State<'_, AppState>,
     prompt: Vec<UserPromptContent>,
-) -> Result<(), String> {
+) -> Result<PromptSendOutcome, String> {
     state.with_app(|app| {
         app.send_prompt_content_background(prompt)
             .map_err(|e| e.to_string())
@@ -48,6 +48,7 @@ pub fn session_retry_user_message(
 ) -> Result<(), String> {
     state.with_app(|app| {
         app.retry_user_message_background(&message_id, text)
+            .map(|_outcome| ())
             .map_err(|e| e.to_string())
     })
 }

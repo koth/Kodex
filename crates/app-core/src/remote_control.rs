@@ -129,6 +129,7 @@ where
         self.with_app(|app| {
             app.set_remote_mode(true);
             app.send_prompt_content_background(prompt)
+                .map(|_outcome| ())
                 .map_err(|e| e.to_string())
         })
     }
@@ -181,6 +182,7 @@ where
     ) -> impl std::future::Future<Output = Result<(), String>> + Send {
         let result = self.with_app(|app| {
             app.send_prompt_content_background(prompt)
+                .map(|_outcome| ())
                 .map_err(|e| e.to_string())
         });
         async move { result }

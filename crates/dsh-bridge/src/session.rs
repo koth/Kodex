@@ -167,6 +167,18 @@ pub fn run_harness_session(
         session_id = %session_id,
         "session.models + agentPreset.list published",
     );
+    // Publish the `/compact` slash command for sessions whose preset composes
+    // the compaction seam (`standard`). The harness publishes no ACP
+    // `available_commands_update`, so the bridge synthesizes the one command
+    // kodex executes on the user's behalf: the composer renders it in the "/"
+    // menu, and sending it routes to the manual-compaction path in app-core
+    // (`ForceCompact` → `commands/execute`). `minimal` sessions have neither
+    // the command nor auto-compaction, so they get no entry.
+    if session_preset.as_deref() == Some("standard") {
+        let _ = tx_events.send(ClientEvent::AvailableCommandsUpdated {
+            commands: compact_slash_commands(),
+        });
+    }
     // Declare prompt capabilities. The harness `session/prompt` RPC accepts
     // `mode: "steer"` (an in-flight prompt can be steered mid-turn), so kodex
     // advertises `session_steer`. Workspace file/directory references are
@@ -419,6 +431,71 @@ pub fn run_harness_session(
                         .to_string(),
                 }]));
             }
+            RuntimeCommand::ForceCompact { reply_tx } => {
+                // Manual compaction: execute the harness `/compact` command
+                // over the typert gateway — spawned on the host runtime so
+                // neither this command loop nor the caller (which holds the
+                // app mutex) blocks for the run. The compaction is a full LLM
+                // summarization (minutes on large contexts) and the harness
+                // aborts the command when the HTTP request dies, so the
+                // request uses the long `COMMANDS_EXECUTE_TIMEOUT` cap. The
+                // outcome reaches the UI through the mux events
+                // (`compaction/start` → `compaction/end`, plus the paired
+                // `command/done` result mapped in `map_session_event`); the
+                // reply only acknowledges the dispatch.
+                let compact_client = client.clone();
+                let compact_session_id = session_id.clone();
+                host.runtime().spawn(async move {
+                    let start = Instant::now();
+                    let result = compact_client
+                        .commands_execute(
+                            Uuid::new_v4().to_string(),
+                            &compact_session_id,
+                            "/compact",
+                        )
+                        .await;
+                    let elapsed_ms = start.elapsed().as_millis() as u64;
+                    match &result {
+                        Ok(None) => tracing::warn!(
+                            target: "dsh-bridge::session",
+                            elapsed_ms,
+                            session_id = %compact_session_id,
+                            "manual compaction: /compact command not registered (agent preset has no compaction seam)",
+                        ),
+                        Ok(Some(execution)) => match &execution.result {
+                            crate::rpc_types::CommandsExecuteResult::Success { .. } => {
+                                tracing::info!(
+                                    target: "dsh-bridge::session",
+                                    elapsed_ms,
+                                    session_id = %compact_session_id,
+                                    command_id = %execution.command_id,
+                                    "manual compaction succeeded",
+                                );
+                            }
+                            crate::rpc_types::CommandsExecuteResult::Error { text } => {
+                                tracing::warn!(
+                                    target: "dsh-bridge::session",
+                                    elapsed_ms,
+                                    session_id = %compact_session_id,
+                                    command_id = %execution.command_id,
+                                    error = %text,
+                                    "manual compaction failed",
+                                );
+                            }
+                        },
+                        Err(err) => {
+                            tracing::warn!(
+                                target: "dsh-bridge::session",
+                                elapsed_ms,
+                                session_id = %compact_session_id,
+                                error = %err,
+                                "commands/execute failed",
+                            );
+                        }
+                    }
+                });
+                let _ = reply_tx.send(Ok(()));
+            }
             RuntimeCommand::Shutdown => break,
             // Config-option changes: the composer's model dropdown sends a
             // Model control change → `session.selectModel`; other controls
@@ -590,6 +667,18 @@ async fn replay_history(
     }
     sink.set_replaying(false);
     Ok(())
+}
+
+/// The slash commands kodex can execute on behalf of a harness session. The
+/// harness surfaces no ACP command list, so the bridge publishes the commands
+/// it can route itself; `standard` composes the compaction seam, whose
+/// `/compact` command runs over `commands/execute`.
+fn compact_slash_commands() -> Vec<workspace_model::AvailableCommand> {
+    vec![workspace_model::AvailableCommand {
+        name: "compact".into(),
+        description: "压缩当前会话上下文".into(),
+        input_hint: None,
+    }]
 }
 
 /// Emit both config controls (Model + agent-preset Mode) in one update.
@@ -972,5 +1061,14 @@ mod tests {
             !flag.load(Ordering::Acquire),
             "Interrupted must clear the in-flight flag"
         );
+    }
+
+    #[test]
+    fn compact_slash_command_is_published_for_the_standard_preset() {
+        let commands = compact_slash_commands();
+        assert_eq!(commands.len(), 1);
+        assert_eq!(commands[0].name, "compact");
+        assert!(!commands[0].description.is_empty());
+        assert!(commands[0].input_hint.is_none());
     }
 }

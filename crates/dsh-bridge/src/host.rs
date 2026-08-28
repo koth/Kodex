@@ -84,6 +84,12 @@ pub struct SessionSink {
     question_order: Mutex<std::collections::HashMap<String, Vec<String>>>,
     /// The dsh session id, set once `session.create` returns.
     session_id: Mutex<Option<SessionId>>,
+    /// Command ids of tracked `compact` command runs, recorded when the
+    /// `command/run` session event names the compact command so the paired
+    /// `command/done` outcome can be mapped to the compaction notice. Capped:
+    /// a run always settles, but a stream tear mid-run must not grow the
+    /// table unbounded.
+    compact_commands: Mutex<std::collections::VecDeque<String>>,
     /// Set when the session has been removed by the host (`host/session-removed`)
     /// during a stream gap, so re-baseline skips it and marks it Interrupted.
     removed: AtomicBool,
@@ -123,6 +129,7 @@ impl SessionSink {
             question_rpc_ids: Mutex::new(Vec::new()),
             question_order: Mutex::new(std::collections::HashMap::new()),
             session_id: Mutex::new(None),
+            compact_commands: Mutex::new(std::collections::VecDeque::new()),
             removed: AtomicBool::new(false),
             inflight: Mutex::new(None),
         }
@@ -228,6 +235,27 @@ impl SessionSink {
 
     pub fn session_id(&self) -> Option<SessionId> {
         self.session_id.lock().ok().and_then(|g| g.clone())
+    }
+
+    /// Track a `compact` command run by its `command/run` command id, so the
+    /// paired `command/done` outcome maps to the compaction notice.
+    pub fn track_compact_command(&self, command_id: String) {
+        const COMPACT_COMMAND_TRACK_CAP: usize = 32;
+        if let Ok(mut guard) = self.compact_commands.lock() {
+            if guard.len() >= COMPACT_COMMAND_TRACK_CAP {
+                guard.pop_front();
+            }
+            guard.push_back(command_id);
+        }
+    }
+
+    /// Whether the id belongs to a tracked `compact` run (removes it).
+    pub fn take_compact_command(&self, command_id: &str) -> bool {
+        self.compact_commands.lock().ok().is_some_and(|mut guard| {
+            let before = guard.len();
+            guard.retain(|id| id != command_id);
+            guard.len() != before
+        })
     }
 
     pub fn mark_removed(&self) {

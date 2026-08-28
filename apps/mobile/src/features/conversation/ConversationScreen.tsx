@@ -50,16 +50,33 @@ export function ConversationScreen({ sessionId, title, onBack }: Props) {
 
   useEffect(() => {
     let active = true;
+    let fallback: ReturnType<typeof setTimeout> | null = null;
+    // Entry sync: the PC pushes a Full snapshot over the event channel as
+    // soon as it processes the SwitchSession (its UiUpdated broadcast wakes
+    // the relay event source). The switch request itself is always sent —
+    // it is idempotent when the session is already active and repairs the
+    // active session when the desktop user switched away locally. Only when
+    // the store was actually wiped (cross-session entry) AND the push has
+    // not landed within a short window — older PC build or a dead event
+    // stream — do we pay for an explicit (duplicate) full GetState.
     (async () => {
       try {
         await controller.switchSession(sessionId);
-        await controller.getState(sessionId);
+        fallback = setTimeout(() => {
+          if (!active || controller.snapshot) return;
+          void controller
+            .getState(sessionId)
+            .catch((e: unknown) => {
+              if (active) setSendError(e instanceof Error ? e.message : String(e));
+            });
+        }, 1500);
       } catch (e) {
         if (active) setSendError(e instanceof Error ? e.message : String(e));
       }
     })();
     return () => {
       active = false;
+      if (fallback !== null) clearTimeout(fallback);
     };
   }, [controller, sessionId]);
 

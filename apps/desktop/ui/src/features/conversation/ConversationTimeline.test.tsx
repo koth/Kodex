@@ -216,6 +216,53 @@ describe("ThinkingIndicator", () => {
     expect(container.querySelector(".msg-content-system")).toBeNull();
   });
 
+  it("renders dsh compaction lifecycle notices as divider rows", () => {
+    // dsh-bridge appends the compaction id to the running notice and the
+    // manual /compact outcome arrives as "上下文压缩完成：{text}"; all of
+    // these must render as the divider, never as a plain system row.
+    const pending = makeSnapshot({
+      timeline: [{ Message: "compact-start" }],
+      messages: [{ id: "compact-start", role: "System", body: "正在压缩上下文（cmd-1）" }],
+    });
+
+    const { container, rerender } = render(
+      <ConversationTimeline snapshot={pending} onPermissionSelect={() => {}} />,
+    );
+
+    expect(container.querySelector(".msg-context-compaction.is-pending")).not.toBeNull();
+    expect(within(container).getByRole("status")).toHaveTextContent("正在压缩上下文");
+
+    const completed = makeSnapshot({
+      timeline: [{ Message: "compact-start" }],
+      messages: [
+        {
+          id: "compact-start",
+          role: "System",
+          body: "上下文压缩完成：Compacted 119 history items (~90334 tokens).",
+        },
+      ],
+    });
+
+    rerender(<ConversationTimeline snapshot={completed} onPermissionSelect={() => {}} />);
+
+    expect(container.querySelector(".msg-context-compaction.is-completed")).not.toBeNull();
+    // The redundant prefix is stripped; the summary detail is the label.
+    expect(container.textContent).toContain("Compacted 119 history items (~90334 tokens).");
+    expect(container.textContent).not.toContain("上下文压缩完成：");
+    expect(container.querySelector(".msg-content-system")).toBeNull();
+
+    const failed = makeSnapshot({
+      timeline: [{ Message: "compact-start" }],
+      messages: [{ id: "compact-start", role: "System", body: "上下文压缩失败：boom" }],
+    });
+
+    rerender(<ConversationTimeline snapshot={failed} onPermissionSelect={() => {}} />);
+
+    expect(container.querySelector(".msg-context-compaction.is-failed")).not.toBeNull();
+    expect(container.textContent).toContain("上下文压缩失败：boom");
+    expect(container.querySelector(".msg-content-system")).toBeNull();
+  });
+
   it("hides permission requests that are handled by the plan approval modal", () => {
     const permissionTool = makePermissionTool();
     const snapshot = makeSnapshot({
@@ -977,6 +1024,34 @@ describe("ThinkingIndicator", () => {
       messages: [
         { id: "user-1", role: "User", body: "old prompt" },
         { id: "assistant-1", role: "Assistant", body: "already replying" },
+      ],
+    });
+
+    const { container } = render(
+      <ConversationTimeline
+        snapshot={snapshot}
+        onPermissionSelect={() => {}}
+        onRetryUserMessage={vi.fn()}
+      />,
+    );
+
+    expect(within(container).queryByRole("button", { name: "编辑并重发" })).toBeNull();
+  });
+
+  it("does not offer edit-and-resend for a /compact command message", () => {
+    // A /compact command never receives a turn response — only system
+    // compaction notices follow it, so the trailing-response heuristic would
+    // otherwise render the retry affordance permanently and read as a failed
+    // send.
+    const snapshot = makeSnapshot({
+      session: {
+        ...makeSnapshot().session,
+        status: "Idle",
+      },
+      timeline: [{ Message: "user-1" }, { Message: "system-1" }],
+      messages: [
+        { id: "user-1", role: "User", body: "/compact" },
+        { id: "system-1", role: "System", body: "上下文压缩完成：Compacted 12 history items." },
       ],
     });
 

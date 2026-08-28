@@ -1,6 +1,12 @@
 import { describe, it, expect, beforeEach } from "vitest";
-import { applySnapshotPatch, applyToolUpdated, applySessionStatus } from "../session/reducer";
+import {
+  applySnapshotPatch,
+  applyToolUpdated,
+  applySessionStatus,
+  materializeStreamingMessageBodies,
+} from "../session/reducer";
 import { SessionStore } from "../session/store";
+import { clearAllStreamingMessages } from "../session/streaming-message-store";
 import type { UiSnapshot, UiSnapshotPatch, ToolInvocation, ChatMessage } from "../types";
 
 function makeSnapshot(overrides: Partial<UiSnapshot> = {}): UiSnapshot {
@@ -147,34 +153,172 @@ describe("applyToolUpdated / applySessionStatus", () => {
 describe("SessionStore guard", () => {
   let store: SessionStore;
   beforeEach(() => {
-  store = new SessionStore();
-  store.setSnapshot(makeSnapshot({ revision: 5 }));
+    clearAllStreamingMessages();
+    store = new SessionStore();
+    store.setSnapshot(makeSnapshot({ revision: 5 }));
   });
 
   it("SnapshotFull replaces", () => {
-  const fresh = makeSnapshot({ revision: 9, session: { ...makeSnapshot().session, id: "s-9" } });
-  store.setSnapshot(fresh);
-  expect(store.state?.revision).toBe(9);
+    const fresh = makeSnapshot({ revision: 9, session: { ...makeSnapshot().session, id: "s-9" } });
+    store.setSnapshot(fresh);
+    expect(store.state?.revision).toBe(9);
   });
 
   it("ignores a patch for a different session", () => {
-  const other = makeSnapshot({ session: { ...makeSnapshot().session, id: "s-other" } });
-  const p = patchFor(other, { revision: 6 });
-  store.applyEventFrame({ kind: "snapshot_patch", patch: p });
-  expect(store.state?.revision).toBe(5);
+    const other = makeSnapshot({ session: { ...makeSnapshot().session, id: "s-other" } });
+    const p = patchFor(other, { revision: 6 });
+    store.applyEventFrame({ kind: "snapshot_patch", patch: p });
+    expect(store.state?.revision).toBe(5);
   });
 
   it("ignores a stale/duplicate revision", () => {
-  const p = patchFor(makeSnapshot({ revision: 5 }), { revision: 5, session: store.state!.session });
-  store.applyEventFrame({ kind: "snapshot_patch", patch: p });
-  expect(store.state?.revision).toBe(5);
+    const p = patchFor(makeSnapshot({ revision: 5 }), { revision: 5, session: store.state!.session });
+    store.applyEventFrame({ kind: "snapshot_patch", patch: p });
+    expect(store.state?.revision).toBe(5);
   });
 
   it("applies a newer same-session patch", () => {
-  const p = patchFor(store.state!, { revision: 6, messages: [userMsg("m1", "hi")] });
-  store.applyEventFrame({ kind: "snapshot_patch", patch: p });
-  expect(store.state?.revision).toBe(6);
-  expect(store.state?.messages.map((m) => m.id)).toEqual(["m1"]);
+    const p = patchFor(store.state!, { revision: 6, messages: [userMsg("m1", "hi")] });
+    store.applyEventFrame({ kind: "snapshot_patch", patch: p });
+    expect(store.state?.revision).toBe(6);
+    expect(store.state?.messages.map((m) => m.id)).toEqual(["m1"]);
+  });
+
+  it("drops a stale GetState response that raced behind newer patches", () => {
+    // Patch landed first (revision 6), then the slower GetState response
+    // (revision 5, built earlier on the PC) arrives: accepting it would
+    // rewind the revision and wedge every subsequent patch guard.
+    const patch = patchFor(store.state!, { revision: 6, messages: [userMsg("m1", "from patch")] });
+    store.applyEventFrame({ kind: "snapshot_patch", patch });
+    expect(store.state?.revision).toBe(6);
+    const staleState = makeSnapshot({ revision: 5, messages: [userMsg("m0", "from getstate")] });
+    store.setSnapshot(staleState);
+    expect(store.state?.revision).toBe(6);
+    expect(store.state?.messages.map((m) => m.id)).toEqual(["m1"]);
+    // A same-session response at the SAME revision is stale too.
+    store.setSnapshot(makeSnapshot({ revision: 6, messages: [userMsg("m2", "dupe")] }));
+    expect(store.state?.messages.map((m) => m.id)).toEqual(["m1"]);
+    // A different session replaces freely (session switch).
+    store.setSnapshot(makeSnapshot({ revision: 1, session: { ...makeSnapshot().session, id: "s-next" } }));
+    expect(store.state?.session.id).toBe("s-next");
+  });
+});
+
+describe("streaming delta sync", () => {
+  beforeEach(() => {
+    clearAllStreamingMessages();
+  });
+
+  const assistant = (id: string, body: string): ChatMessage => ({
+    id,
+    role: "Assistant",
+    body,
+    created_at: "",
+  });
+
+  it("delta-only patches grow the assistant text in the snapshot", () => {
+    const store = new SessionStore();
+    const base = makeSnapshot({
+      revision: 5,
+      messages: [assistant("m1", "Hel")],
+      timeline: [{ Message: "m1" }],
+    });
+    store.setSnapshot(base);
+    // The PC streams via delta-only patches: empty messages/timeline/tools.
+    const p = patchFor(base, {
+      revision: 6,
+      session: { ...base.session, status: "Streaming" },
+      message_deltas: [{ id: "m1", append: "lo world" }],
+    });
+    store.applyEventFrame({ kind: "snapshot_patch", patch: p });
+    expect(store.state?.revision).toBe(6);
+    expect(store.state?.messages[0].body).toBe("Hello world");
+  });
+
+  it("delta + tool updates in one patch both land", () => {
+    const store = new SessionStore();
+    const base = makeSnapshot({
+      revision: 5,
+      messages: [assistant("m1", "")],
+      tools: [tool("t1", "run")],
+      timeline: [{ Message: "m1" }, { Tool: "t1" }],
+    });
+    store.setSnapshot(base);
+    const p = patchFor(base, {
+      revision: 6,
+      message_deltas: [{ id: "m1", append: "text" }],
+      tools: [tool("t1", "running")],
+    });
+    store.applyEventFrame({ kind: "snapshot_patch", patch: p });
+    expect(store.state?.messages[0].body).toBe("text");
+    expect(store.state?.tools[0].summary).toBe("running");
+  });
+
+  it("a same-revision patch with deltas still lands", () => {
+    const store = new SessionStore();
+    const base = makeSnapshot({
+      revision: 5,
+      messages: [assistant("m1", "par")],
+      timeline: [{ Message: "m1" }],
+    });
+    store.setSnapshot(base);
+    const p = patchFor(base, {
+      revision: 5,
+      message_deltas: [{ id: "m1", append: "tial" }],
+    });
+    store.applyEventFrame({ kind: "snapshot_patch", patch: p });
+    expect(store.state?.messages[0].body).toBe("partial");
+  });
+
+  it("materialize prefers the longer continuation but never shrinks a full body", () => {
+    const snap = makeSnapshot({ messages: [assistant("m1", "full body")] });
+    // Streaming store holds a stale prefix: snapshot body wins.
+    expect(materializeStreamingMessageBodies(snap).messages[0].body).toBe("full body");
+  });
+
+  it("a revision gap triggers a resync request instead of a misaligned merge", () => {
+    const store = new SessionStore();
+    store.setSnapshot(makeSnapshot({ revision: 5 }));
+    let resyncs = 0;
+    store.setResyncHandler(() => {
+      resyncs += 1;
+    });
+    // Patch 7 skips revision 6: a frame was lost on the wire.
+    const p = patchFor(store.state!, { revision: 7, messages: [userMsg("m1", "x")] });
+    store.applyEventFrame({ kind: "snapshot_patch", patch: p });
+    expect(resyncs).toBe(1);
+    expect(store.state?.revision).toBe(5);
+    // Consecutive in-order patches do not request resyncs.
+    const ok = patchFor(store.state!, { revision: 6, messages: [userMsg("m2", "y")] });
+    store.applyEventFrame({ kind: "snapshot_patch", patch: ok });
+    expect(resyncs).toBe(1);
+    expect(store.state?.revision).toBe(6);
+    store.setResyncHandler(null);
+  });
+
+  it("beginSession drops accumulated streaming bodies from the previous session", () => {
+    const store = new SessionStore();
+    const base = makeSnapshot({
+      revision: 5,
+      messages: [assistant("m1", "old")],
+      timeline: [{ Message: "m1" }],
+    });
+    store.setSnapshot(base);
+    const p = patchFor(base, { revision: 6, message_deltas: [{ id: "m1", append: "bodyXYZ" }] });
+    store.applyEventFrame({ kind: "snapshot_patch", patch: p });
+    expect(store.state?.messages[0].body).toBe("oldbodyXYZ");
+    // Switch to a new session that happens to reuse the message id: the
+    // stale streaming body must not bleed into the fresh full snapshot.
+    store.beginSession("s-2");
+    store.setSnapshot(
+      makeSnapshot({
+        revision: 1,
+        session: { ...makeSnapshot().session, id: "s-2" },
+        messages: [assistant("m1", "old")],
+        timeline: [{ Message: "m1" }],
+      }),
+    );
+    expect(store.state?.messages[0].body).toBe("old");
   });
 });
 // end of file

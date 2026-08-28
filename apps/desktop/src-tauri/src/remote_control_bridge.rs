@@ -177,66 +177,145 @@ impl ControlHandler for DesktopControlHandler {
 
 /// Adapts `Application::subscribe_updates` + `UiPatchCursor` to the
 /// driver's `EventSource` trait. On each `AppUpdate` signal it fetches the
-/// Full/Patch delta via `poll_active_and_get_update` and wraps it into an
-/// `EventFrame` envelope. `PermissionRequested` signals become
-/// `EventFrame::PermissionRequest`. Ends (returns None) when the signal
-/// stream lapses (relay reconnect re-subscribes).
+/// Full/Patch delta via `poll_active_and_get_remote_update` and wraps it into
+/// an `EventFrame` envelope. `PermissionRequested` signals become
+/// `EventFrame::PermissionRequest`. Returns None only when the update
+/// pipeline is gone (the driver keeps running its inbound loop alone).
+///
+/// Robustness (mirrors the local snapshot bridge in `main.rs`): the broadcast
+/// receiver is bound to ONE `Application`, so it is re-subscribed whenever the
+/// active workspace key changes — otherwise a workspace switch (or a relay
+/// reconnect that happens before any workspace finished opening) silently
+/// kills the phone's event stream and the conversation stops updating. A
+/// 220ms fallback wake catches missed signals and workspace switches even
+/// when no signal ever fires; the revision-based cursor makes extra polls
+/// free (they return `None` until something changed).
 pub struct AppUpdateEventSource {
-    rx: broadcast::Receiver<AppUpdate>,
+    rx: Option<broadcast::Receiver<AppUpdate>>,
+    last_workspace_key: Option<String>,
     cursor: UiPatchCursor,
     app: AppHandle,
 }
 
+const EVENT_FALLBACK_WAKE_MS: u64 = 220;
+
 impl AppUpdateEventSource {
     pub fn new(app: AppHandle) -> Self {
-        let rx = app
+        let last_workspace_key = app
             .state::<AppState>()
-            .subscribe_active_updates()
+            .active_workspace_key()
             .ok()
-            .flatten()
-            .unwrap_or_else(|| {
-                let (_, rx) = broadcast::channel(1);
-                rx
-            });
+            .flatten();
+        let rx = Self::subscribe(&app);
         Self {
             rx,
+            last_workspace_key,
             cursor: UiPatchCursor::default(),
             app,
         }
+    }
+
+    fn subscribe(app: &AppHandle) -> Option<broadcast::Receiver<AppUpdate>> {
+        app.state::<AppState>()
+            .subscribe_active_updates()
+            .ok()
+            .flatten()
+    }
+
+    /// Re-subscribe when the active workspace changed and reset the cursor so
+    /// the next poll emits a Full snapshot for the new target. Returns true
+    /// when the subscription was refreshed.
+    fn refresh_subscription(&mut self) -> bool {
+        let key = self
+            .app
+            .state::<AppState>()
+            .active_workspace_key()
+            .ok()
+            .flatten();
+        if key == self.last_workspace_key {
+            return false;
+        }
+        self.last_workspace_key = key;
+        self.rx = Self::subscribe(&self.app);
+        self.cursor = UiPatchCursor::default();
+        true
+    }
+
+    /// Fetch this subscriber's Full/Patch delta and wrap it into an event
+    /// envelope. `None` when nothing changed (or no workspace is open).
+    fn poll_delta(&mut self) -> Option<Envelope> {
+        let update = self
+            .app
+            .state::<AppState>()
+            .poll_active_and_get_remote_update(&mut self.cursor)
+            .ok()
+            .flatten()?;
+        let frame = match update {
+            UiSnapshotUpdate::Full(snapshot) => EventFrame::SnapshotFull { snapshot },
+            UiSnapshotUpdate::Patch(patch) => EventFrame::SnapshotPatch { patch },
+        };
+        Envelope::from_message(None, &Message::Event(frame)).ok()
     }
 }
 
 impl EventSource for AppUpdateEventSource {
     async fn next_event(&mut self) -> Option<Envelope> {
         loop {
-            match self.rx.recv().await {
-                Ok(AppUpdate::PermissionRequested { request, .. }) => {
+            self.refresh_subscription();
+            // Signal-driven wake with a fallback tick (same cadence as the
+            // local bridge): a missed broadcast, a receiver bound to a
+            // not-yet-open workspace, or a workspace switch must never wedge
+            // the phone's stream. A timeout here leaves any late signal in
+            // the channel for the next iteration to consume.
+            let signal: Option<Result<AppUpdate, broadcast::error::RecvError>> =
+                match self.rx.as_mut() {
+                    Some(rx) => {
+                        match tokio::time::timeout(
+                            std::time::Duration::from_millis(EVENT_FALLBACK_WAKE_MS),
+                            rx.recv(),
+                        )
+                        .await
+                        {
+                            Ok(result) => Some(result),
+                            // Timed out without a signal.
+                            Err(_elapsed) => None,
+                        }
+                    }
+                    None => {
+                        tokio::time::sleep(std::time::Duration::from_millis(
+                            EVENT_FALLBACK_WAKE_MS,
+                        ))
+                        .await;
+                        None
+                    }
+                };
+            match signal {
+                // Timed out without a signal: poll the cursor anyway so a
+                // missed wake still catches up.
+                None => {
+                    if let Some(envelope) = self.poll_delta() {
+                        return Some(envelope);
+                    }
+                }
+                Some(Ok(AppUpdate::PermissionRequested { request, .. })) => {
                     let frame = EventFrame::PermissionRequest { request };
                     return Envelope::from_message(None, &Message::Event(frame)).ok();
                 }
-                Ok(AppUpdate::UiUpdated { .. }) => {
-                    // Fetch this subscriber's Full/Patch delta. A failure
-                    // (no active workspace) just skips; we keep waiting.
-                    if let Ok(Some(update)) = self
-                        .app
-                        .state::<AppState>()
-                        .poll_active_and_get_remote_update(&mut self.cursor)
-                    {
-                        let frame = match update {
-                            UiSnapshotUpdate::Full(snapshot) => {
-                                EventFrame::SnapshotFull { snapshot }
-                            }
-                            UiSnapshotUpdate::Patch(patch) => {
-                                EventFrame::SnapshotPatch { patch }
-                            }
-                        };
-                        return Envelope::from_message(None, &Message::Event(frame)).ok();
+                Some(Ok(AppUpdate::UiUpdated { .. })) => {
+                    if let Some(envelope) = self.poll_delta() {
+                        return Some(envelope);
                     }
-                    // No delta available right now; continue draining signals.
-                    continue;
+                    // No delta available right now; keep draining signals.
                 }
-                Err(broadcast::error::RecvError::Lagged(_)) => continue,
-                Err(broadcast::error::RecvError::Closed) => return None,
+                // Missed signals are harmless: the cursor tracks revisions,
+                // so the next poll produces the full delta since our revision.
+                Some(Err(broadcast::error::RecvError::Lagged(_))) => {}
+                // The Application the receiver was bound to is gone (workspace
+                // closed). Drop it; refresh_subscription re-subscribes to the
+                // new active workspace on the next loop iteration.
+                Some(Err(broadcast::error::RecvError::Closed)) => {
+                    self.rx = None;
+                }
             }
         }
     }

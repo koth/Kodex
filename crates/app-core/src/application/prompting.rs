@@ -54,14 +54,17 @@ impl Application {
         Ok(())
     }
 
-    pub fn send_prompt_background(&mut self, prompt: impl Into<String>) -> anyhow::Result<()> {
+    pub fn send_prompt_background(
+        &mut self,
+        prompt: impl Into<String>,
+    ) -> anyhow::Result<PromptSendOutcome> {
         self.send_prompt_content_background(vec![UserPromptContent::text(prompt.into())])
     }
 
     pub fn send_prompt_content_background(
         &mut self,
         prompt: Vec<UserPromptContent>,
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<PromptSendOutcome> {
         self.send_prompt_content_background_inner(prompt, None)
     }
 
@@ -69,7 +72,7 @@ impl Application {
         &mut self,
         message_id: &str,
         text: String,
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<PromptSendOutcome> {
         let message_id = uuid::Uuid::parse_str(message_id)
             .map_err(|_| anyhow::anyhow!("无效的消息 ID：{message_id}"))?;
         self.send_prompt_content_background_inner(
@@ -82,9 +85,41 @@ impl Application {
         &mut self,
         mut prompt: Vec<UserPromptContent>,
         existing_user_message_id: Option<uuid::Uuid>,
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<PromptSendOutcome> {
+        // User is sending a new prompt or command — drain any buffered replay
+        // events from session/load before sending, so they don't mix with real
+        // responses. This must also cover the `/compact` command path below:
+        // its compaction lifecycle events arrive while the session stays Idle,
+        // and a still-active skip_replay would make the idle drain in
+        // `poll_prompt_progress` silently drop them (no notices at all).
+        if self.skip_replay {
+            self.session.drain_events();
+            self.skip_replay = false;
+        }
+
+        // Harness `/compact` shortcut: sending the literal `/compact` prompt
+        // runs a manual context compaction instead of reaching the model.
+        // Intercepted before the steer branch so a mid-turn send surfaces the
+        // harness's busy rejection rather than steering the model with the
+        // bare command text. Only harness sessions take this path — the
+        // harness prompt wire is plain text (its compaction seam is reached
+        // via `commands/execute`, see `force_compact_session`), while ACP
+        // agents (e.g. codex) parse slash commands natively and must keep
+        // receiving the raw text. Fire-and-forget: the outcome surfaces as
+        // mapped harness events, no turn starts, so the session stays Idle.
+        if is_compact_slash_prompt(&prompt)
+            && crate::settings::is_deepseek_harness_command(&self.agent_command)
+        {
+            let body = prompt_text(&prompt).unwrap_or_else(|| "/compact".into());
+            self.append_user_prompt_message(body);
+            self.force_compact_session().map_err(anyhow::Error::msg)?;
+            return Ok(PromptSendOutcome::Command);
+        }
+
         if self.in_flight_prompt.is_some() {
-            return self.send_steer_content_background_inner(prompt, existing_user_message_id);
+            return self
+                .send_steer_content_background_inner(prompt, existing_user_message_id)
+                .map(|()| PromptSendOutcome::Steer);
         }
 
         if prompt_has_image(&prompt) && !self.ui.prompt_capabilities.image {
@@ -167,26 +202,19 @@ impl Application {
                 .update_session_title(&self.ui.session.id.to_string(), &title);
         }
 
-        // User is sending a new prompt — drain any buffered replay events
-        // from session/load before sending, so they don't mix with real responses.
-        if self.skip_replay {
-            self.session.drain_events();
-            self.skip_replay = false;
-        }
-
         if needs_image_degradation {
             // Spawn the image degradation on a background thread so the user
             // message is shown immediately. `poll_prompt_progress` picks up the
             // result and dispatches the (degraded) prompt to the agent.
             self.spawn_image_degradation(prompt);
             self.bump_revision();
-            return Ok(());
+            return Ok(PromptSendOutcome::Turn);
         }
 
         let task = self.session.send_prompt_content_async(prompt)?;
         self.in_flight_prompt = Some(InFlightPrompt { task });
         self.bump_revision();
-        Ok(())
+        Ok(PromptSendOutcome::Turn)
     }
 
     fn send_steer_content_background_inner(
@@ -1290,6 +1318,31 @@ impl Application {
         if result.ui_changed || result.had_file_changes {
             self.bump_revision();
         }
+        Ok(())
+    }
+
+    /// Request a manual context compaction on a DeepSeek Harness session by
+    /// executing the harness `/compact` command. Fire-and-forget: the bridge
+    /// runs the command without blocking (the compaction is a full LLM
+    /// summarization that takes minutes on large contexts), and the outcome
+    /// reaches the UI as mapped harness events — `compaction/start` →
+    /// `compaction/end` bracket the lifecycle, and the paired `command/done`
+    /// result renders the authoritative completion notice.
+    ///
+    /// Only meaningful on harness sessions whose preset composes the
+    /// compaction seam (`standard`); `minimal` sessions have neither the
+    /// command nor auto-compaction, and busy sessions are rejected here.
+    pub fn force_compact_session(&mut self) -> Result<(), String> {
+        // The harness `/compact` handler requires an idle agent; a queued
+        // prompt would only fail at the RPC layer with an opaque error.
+        if self.in_flight_prompt.is_some() || self.ui.session.status != SessionStatus::Idle {
+            return Err("会话运行中无法压缩，请等当前轮次结束".into());
+        }
+
+        self.session
+            .force_compact()
+            .map_err(|error| error.to_string())?;
+        self.bump_revision();
         Ok(())
     }
 

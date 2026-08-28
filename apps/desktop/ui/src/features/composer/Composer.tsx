@@ -1,4 +1,4 @@
-﻿import { useState, useRef, useCallback, useMemo, useEffect } from "react";
+import { useState, useRef, useCallback, useMemo, useEffect } from "react";
 import type { AvailableCommand, SessionConfigControl, UiSnapshot, UserPromptContent } from "../../types";
 import { editorGetContent, sessionCancel, sessionSendPrompt, sessionReconnect, sessionSetConfigControl } from "../../lib/tauri";
 import { composerDraftKey, useComposerDraft, type ComposerAttachmentDraft } from "./composer-draft-store";
@@ -340,7 +340,14 @@ export function Composer({
     mention.close();
     setOptimisticTurnActive(true);
     try {
-      await sessionSendPrompt(prompt);
+      const outcome = await sessionSendPrompt(prompt);
+      if (outcome === "command") {
+        // A client-side command (e.g. the harness `/compact`) ran instead of
+        // starting a turn: no turn begins and the session stays Idle, so drop
+        // the optimistic turn state right away. The command's outcome arrives
+        // as a system message in the conversation.
+        setOptimisticTurnActive(false);
+      }
       onStateChange();
     } catch (error) {
       setOptimisticTurnActive(false);

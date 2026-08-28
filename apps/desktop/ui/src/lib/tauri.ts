@@ -9,6 +9,7 @@ import type {
   FileEntry,
   SessionConfigState,
   UserPromptContent,
+  PromptSendOutcome,
   SearchResult,
   AgentCliId,
   AgentProviderFamily,
@@ -79,7 +80,7 @@ export async function sessionGetRevision(): Promise<[string, number]> {
 
 export async function sessionSendPrompt(
   prompt: UserPromptContent[],
-): Promise<void> {
+): Promise<PromptSendOutcome> {
   return invoke("session_send_prompt", { prompt });
 }
 

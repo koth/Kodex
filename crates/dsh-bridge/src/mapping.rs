@@ -566,6 +566,34 @@ pub fn map_session_event(
             };
             vec![ClientEvent::ContextCompacted { message }]
         }
+        // Manual `/compact` outcome (see @deepseek-ai/dsh-commands): the
+        // command runner emits `command/run` / `command/done` around the
+        // execution. Track the compact runs so the paired `command/done`
+        // renders the authoritative result text ("Compacted 12 history items
+        // (~45k tokens).", the busy/no-history rejections, …) as the
+        // completion notice — outcomes that never start a compaction produce
+        // no `compaction/*` events at all. Other commands are ignored: kodex
+        // executes no others today.
+        "command/run" => {
+            let data: Option<CommandRunData> = event.data();
+            if let Some(data) = data
+                && data.name == "compact"
+            {
+                _sink.track_compact_command(data.command_id);
+            }
+            Vec::new()
+        }
+        "command/done" => {
+            let data: Option<CommandDoneData> = event.data();
+            match data {
+                Some(data) if _sink.take_compact_command(&data.command_id) => {
+                    vec![ClientEvent::ContextCompacted {
+                        message: compact_command_outcome_notice(&data.kind, data.text.as_deref()),
+                    }]
+                }
+                _ => Vec::new(),
+            }
+        }
         // turn/start, step/start, step/end, user/message, request/context,
         // session/end-seed, compaction/summary, compaction/prune: log-only or
         // surface metadata not represented in ClientEvent in v1. Ignorable per
@@ -584,6 +612,40 @@ struct CompactionStartData {
 struct CompactionEndData {
     #[serde(default)]
     error: Option<String>,
+}
+
+/// `command/run` session event payload (`@deepseek-ai/dsh-commands`):
+/// `{ commandId, name, args?, source }`.
+#[derive(serde::Deserialize)]
+struct CommandRunData {
+    #[serde(rename = "commandId")]
+    command_id: String,
+    name: String,
+    #[serde(default)]
+    args: Option<String>,
+}
+
+/// `command/done` session event payload: `{ commandId, kind, text?,
+/// sourceEventSeq? }`.
+#[derive(serde::Deserialize)]
+struct CommandDoneData {
+    #[serde(rename = "commandId")]
+    command_id: String,
+    kind: String,
+    #[serde(default)]
+    text: Option<String>,
+}
+
+/// Human-facing notice for a manual `compact` command outcome. Mirrors the
+/// wording of the bridge's other compaction notices.
+fn compact_command_outcome_notice(kind: &str, text: Option<&str>) -> String {
+    let text = text.map(str::trim).filter(|text| !text.is_empty());
+    match (kind, text) {
+        ("success", Some(text)) => format!("上下文压缩完成：{text}"),
+        ("success", None) => "上下文已压缩".to_string(),
+        (_, Some(text)) => format!("上下文压缩失败：{text}"),
+        (_, None) => "上下文压缩失败".to_string(),
+    }
 }
 
 #[derive(serde::Deserialize)]
@@ -1764,6 +1826,37 @@ mod tests {
     }
 
     #[test]
+    fn maps_compact_command_run_and_done_to_outcome_notice() {
+        let (sink, _rx) = test_sink();
+        let run = mux(session_event(
+            "command/run",
+            20,
+            serde_json::json!({ "commandId": "cmd-c1", "name": "compact", "source": "user" }),
+        ));
+        assert!(map_mux_frame(&run, &sink).events.is_empty());
+
+        let done = mux(session_event(
+            "command/done",
+            21,
+            serde_json::json!({
+                "commandId": "cmd-c1",
+                "kind": "success",
+                "text": "Compacted 12 history items (~45k tokens)."
+            }),
+        ));
+        let mapped = map_mux_frame(&done, &sink);
+        match &mapped.events[0] {
+            ClientEvent::ContextCompacted { message } => {
+                assert_eq!(
+                    message,
+                    "上下文压缩完成：Compacted 12 history items (~45k tokens)."
+                );
+            }
+            other => panic!("expected ContextCompacted, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn maps_compaction_end_to_context_compacted() {
         let (sink, _rx) = test_sink();
         let frame = mux(session_event(
@@ -1796,6 +1889,83 @@ mod tests {
             }
             other => panic!("expected ContextCompacted, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn command_run_and_done_pair_maps_outcome_text() {
+        let (sink, _rx) = test_sink();
+        let run = mux(session_event(
+            "command/run",
+            30,
+            serde_json::json!({ "commandId": "cmd-c1", "name": "compact" }),
+        ));
+        assert!(map_mux_frame(&run, &sink).events.is_empty());
+
+        let done = mux(session_event(
+            "command/done",
+            31,
+            serde_json::json!({
+                "commandId": "cmd-c1",
+                "kind": "success",
+                "text": "Compacted 12 history items (~45k tokens)."
+            }),
+        ));
+        let mapped = map_mux_frame(&done, &sink);
+        match &mapped.events[0] {
+            ClientEvent::ContextCompacted { message } => {
+                assert!(
+                    message.contains("Compacted 12 history items"),
+                    "message={message}"
+                );
+                assert!(message.starts_with("上下文压缩完成："), "message={message}");
+            }
+            other => panic!("expected ContextCompacted, got {other:?}"),
+        }
+
+        // The outcome is one-shot: a duplicate done for the same id is ignored.
+        let again = map_mux_frame(&done, &sink);
+        assert!(again.events.is_empty());
+    }
+
+    #[test]
+    fn compact_command_done_error_surfaces_rejection() {
+        let (sink, _rx) = test_sink();
+        let run = mux(session_event(
+            "command/run",
+            30,
+            serde_json::json!({ "commandId": "cmd-c2", "name": "compact" }),
+        ));
+        assert!(map_mux_frame(&run, &sink).events.is_empty());
+
+        let done = mux(session_event(
+            "command/done",
+            31,
+            serde_json::json!({
+                "commandId": "cmd-c2",
+                "kind": "error",
+                "text": "Compaction is unavailable because this process has an active compaction, or the agent is not idle."
+            }),
+        ));
+        let mapped = map_mux_frame(&done, &sink);
+        match &mapped.events[0] {
+            ClientEvent::ContextCompacted { message } => {
+                assert!(message.contains("失败"), "message={message}");
+                assert!(message.contains("not idle"), "message={message}");
+            }
+            other => panic!("expected ContextCompacted, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn command_done_for_other_commands_is_ignored() {
+        let (sink, _rx) = test_sink();
+        let frame = mux(session_event(
+            "command/done",
+            31,
+            serde_json::json!({ "commandId": "cmd-other", "kind": "success", "text": "done" }),
+        ));
+        let mapped = map_mux_frame(&frame, &sink);
+        assert!(mapped.events.is_empty());
     }
 
     #[test]

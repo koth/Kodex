@@ -65,6 +65,15 @@ pub enum RuntimeCommand {
         tool_call_id: String,
         reply_tx: mpsc::Sender<anyhow::Result<Vec<ClientEvent>>>,
     },
+    /// Force a manual context compaction on the session (DeepSeek Harness
+    /// `/compact`). Fire-and-forget dispatch: `reply_tx` only carries the
+    /// dispatch ack — the compaction runs a full LLM summarization that must
+    /// not block the caller, and its outcome reaches the UI as mapped harness
+    /// events (`compaction/start` → `compaction/end` plus the paired
+    /// `command/done` result).
+    ForceCompact {
+        reply_tx: mpsc::Sender<anyhow::Result<()>>,
+    },
     Shutdown,
 }
 

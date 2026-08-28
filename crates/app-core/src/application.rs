@@ -14,7 +14,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::time::{Duration, Instant};
 use workspace_model::{
-    AgentCliId, ChatMessage, MessageRole, PendingSteer, RemoteLinuxWorkspace,
+    AgentCliId, ChatMessage, MessageRole, PendingSteer, PromptSendOutcome, RemoteLinuxWorkspace,
     SessionAttentionState, SessionConfigSource, SessionListItem, SessionRuntimeStatus,
     SessionStatus, TimelineItem, ToolInvocation, ToolLogEntry, ToolStatus, UsageDailyBucket,
     UsageSummaryRequest, UsageSummaryRow, UserPromptContent,
@@ -49,8 +49,8 @@ use diff_utils::{
 use inline_think::InlineThinkFilter;
 pub use path_utils::{normalize_path_for_storage, normalize_tracked_path};
 use prompt_content::{
-    degrade_prompt_for_image_fallback, prompt_display_body, prompt_has_file, prompt_has_image,
-    prompt_text,
+    degrade_prompt_for_image_fallback, is_compact_slash_prompt, prompt_display_body,
+    prompt_has_file, prompt_has_image, prompt_text,
 };
 use titles::{
     extract_title_from_prompt, extract_title_from_response, is_placeholder_session_title,

@@ -65,7 +65,9 @@ impl RemoteControl for DesktopRemoteControl {
             .state::<AppState>()
             .with_app(|app| {
                 app.set_remote_mode(true);
-                app.send_prompt_content_background(prompt).map_err(|e| e.to_string())
+                app.send_prompt_content_background(prompt)
+                    .map(|_outcome| ())
+                    .map_err(|e| e.to_string())
             });
         async move { result }
     }

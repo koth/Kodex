@@ -421,6 +421,18 @@ pub enum UserPromptContent {
     },
 }
 
+/// What happened when a prompt was submitted: a new agent turn started, the
+/// content was steered into the running turn, or it was handled as a
+/// client-side command (e.g. the harness `/compact`) instead of reaching the
+/// model — in which case no turn begins and the session stays Idle.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PromptSendOutcome {
+    Turn,
+    Steer,
+    Command,
+}
+
 impl UserPromptContent {
     pub fn text(text: impl Into<String>) -> Self {
         Self::Text { text: text.into() }

@@ -1,4 +1,4 @@
-use super::codebuddy::send_codebuddy_interruption_resolution;
+﻿use super::codebuddy::send_codebuddy_interruption_resolution;
 use super::permissions::PermissionBroker;
 use super::prompt_content::{
     prompt_contains_file, prompt_contains_image, prompt_content_to_acp, prompt_title_text,
@@ -261,6 +261,13 @@ pub(super) async fn run_command_loop(
                             RuntimeCommand::ResolveHarnessApproval { reply_tx, .. } => {
                                 let _ = reply_tx.send(Err(anyhow::anyhow!(
                                     "ResolveHarnessApproval is not supported by the ACP backend"
+                                )));
+                            }
+                            // Manual compaction is a DeepSeek Harness surface;
+                            // the ACP backend rejects it (see the outer loop arm).
+                            RuntimeCommand::ForceCompact { reply_tx } => {
+                                let _ = reply_tx.send(Err(anyhow::anyhow!(
+                                    "当前会话后端不支持强制压缩"
                                 )));
                             }
                             RuntimeCommand::ResolveCodeBuddyInterruption {
@@ -629,6 +636,15 @@ pub(super) async fn run_command_loop(
             RuntimeCommand::ResolveHarnessApproval { reply_tx, .. } => {
                 let _ = reply_tx.send(Err(anyhow::anyhow!(
                     "ResolveHarnessApproval is not supported by the ACP backend"
+                )));
+            }
+            // Manual compaction is a DeepSeek Harness surface (`/compact` over
+            // the harness host RPC). ACP sessions compact via their own
+            // agent-side flows (e.g. codex `/compact`), so this backend
+            // rejects the command.
+            RuntimeCommand::ForceCompact { reply_tx } => {
+                let _ = reply_tx.send(Err(anyhow::anyhow!(
+                    "当前会话后端不支持强制压缩"
                 )));
             }
         }
