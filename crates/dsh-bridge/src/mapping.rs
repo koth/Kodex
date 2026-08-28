@@ -22,6 +22,7 @@ use crate::frame::{
     ToolResultView, TurnEndReason,
 };
 use crate::host::{PendingApprovalKind, SessionSink};
+use crate::mojibake::{self, StreamTextKind};
 
 /// Outcome of mapping one frame: zero or more [`ClientEvent`]s to emit.
 #[derive(Default)]
@@ -246,31 +247,50 @@ pub fn map_session_event(
                     _sink.mark_text_seen(d.turn, d.step);
                 }
             }
-            match data.map(|d| d.chunk) {
-                Some(StreamChunk::TextDelta { text, .. }) => {
-                    // Mojibake trace: fingerprint the mapped text right before it
-                    // leaves the bridge, to compare against the raw WS frame.
-                    if text.matches('\u{FFFD}').count() > 0 || text.matches('Ã').count() > 0 {
+            match data.map(|d| (d.turn, d.step, d.chunk)) {
+                Some((turn, step, StreamChunk::TextDelta { index, text })) => {
+                    // Mojibake trace: fingerprint the raw (pre-repair) text as it
+                    // enters the bridge, to compare against the raw WS frame.
+                    let mojibake_hits = mojibake::signature_hits(&text);
+                    let fffd = text.matches('\u{FFFD}').count();
+                    if fffd > 0 || mojibake_hits > 0 {
                         tracing::debug!(
                             target: "dsh-bridge::mapping",
                             bytes = text.len(),
-                            fffd = text.matches('\u{FFFD}').count(),
-                            latin1 = text.matches('Ã').count(),
+                            fffd,
+                            signature_hits = mojibake_hits,
                             "assistant chunk mapped with mojibake markers"
                         );
                     }
-                    vec![ClientEvent::MessageChunk {
-                        role: MessageRole::Assistant,
-                        content: text,
-                    }]
+                    // Repair Latin-1 double-encoded corruption (observed from
+                    // some upstreams) across delta boundaries; may legitimately
+                    // return an empty string while a sequence accumulates.
+                    let repaired =
+                        _sink.repair_stream_text(turn, step, index, StreamTextKind::Text, &text);
+                    if repaired.is_empty() {
+                        Vec::new()
+                    } else {
+                        vec![ClientEvent::MessageChunk {
+                            role: MessageRole::Assistant,
+                            content: repaired,
+                        }]
+                    }
                 }
-                Some(StreamChunk::ReasoningDelta { text, .. }) => {
-                    vec![
-                        ClientEvent::ThinkingActivity { active: true },
-                        ClientEvent::ThinkingChunk { text },
-                    ]
+                Some((turn, step, StreamChunk::ReasoningDelta { index, text })) => {
+                    let repaired = _sink.repair_stream_text(
+                        turn,
+                        step,
+                        index,
+                        StreamTextKind::Reasoning,
+                        &text,
+                    );
+                    let mut out = vec![ClientEvent::ThinkingActivity { active: true }];
+                    if !repaired.is_empty() {
+                        out.push(ClientEvent::ThinkingChunk { text: repaired });
+                    }
+                    out
                 }
-                Some(StreamChunk::Usage { usage }) => vec![usage_event(&usage)],
+                Some((_, _, StreamChunk::Usage { usage })) => vec![usage_event(&usage)],
                 _ => Vec::new(),
             }
         }
@@ -284,12 +304,26 @@ pub fn map_session_event(
             let data: Option<AssistantMessageData> = event.data();
             let mut out = Vec::new();
             if let Some(data) = data {
+                // Flush any mojibake-repair tails held for this step's block
+                // streams (a corrupted stream can end mid-sequence or below
+                // the pre-engagement threshold).
+                for (kind, tail) in _sink.flush_stream_repairs(data.turn, data.step) {
+                    match kind {
+                        StreamTextKind::Text => out.push(ClientEvent::MessageChunk {
+                            role: MessageRole::Assistant,
+                            content: tail,
+                        }),
+                        StreamTextKind::Reasoning => {
+                            out.push(ClientEvent::ThinkingChunk { text: tail })
+                        }
+                    }
+                }
                 if _sink.is_replaying() && !_sink.text_seen(data.turn, data.step) {
                     for block in &data.message.content {
                         if let ContentBlock::Text { text } = block {
                             out.push(ClientEvent::MessageChunk {
                                 role: MessageRole::Assistant,
-                                content: text.clone(),
+                                content: mojibake::repair_mojibake(text),
                             });
                         }
                     }

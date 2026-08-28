@@ -1,9 +1,12 @@
 import { describe, it, expect } from "vitest";
 import {
   BOUND_DEVICE_KEY,
-  persistBoundDevice,
-  loadBoundDevice,
-  clearBoundDevice,
+  BOUND_DEVICES_KEY,
+  loadBoundDevices,
+  saveBoundDevices,
+  upsertBoundDevice,
+  removeBoundDevice,
+  clearAllBoundDevices,
   bindOutcomeFromResponse,
   canReconnectWithoutRescan,
   type BoundDevice,
@@ -17,53 +20,97 @@ import {
 } from "../account/subscription";
 import type { BindDeviceResponse, SubscriptionStatus } from "../types/relay-protocol";
 
-// Mirrors the relay_client binding/subscription tests: bind success persists
-// the BoundDevice; a subscription-rejection surfaces SubscriptionRequired; an
-// active+bound state can reconnect without re-scan; expiry demotes to free
-// tier without killing the session.
+// Multi-machine binding persistence: every scanned QR yields its own pairing
+// token, so the phone stores a LIST of BoundDevice (keyed by peer_device_id).
+// The legacy single-record key migrates into the list on first load.
 
-function makeBound(): BoundDevice {
+function makeBound(peer = "pc-dev"): BoundDevice {
   return {
     device_id: "phone-dev",
     auth_token: "tok-abc",
-    pairing_token: "ptok",
-    peer_device_id: "pc-dev",
+    pairing_token: `ptok-${peer}`,
+    peer_device_id: peer,
     peer_static_pubkey_b64: "pc-x25519",
   };
 }
 
-describe("BoundDevice secure-storage persistence", () => {
-  it("persists and reloads a bound device from the SecretStore", async () => {
+describe("BoundDevice multi-machine persistence", () => {
+  it("stores and reloads several machines under the list key", async () => {
     const store = new InMemorySecretStore();
-    await persistBoundDevice(store, makeBound());
-    const loaded = await loadBoundDevice(store);
-    expect(loaded).not.toBeNull();
-    expect(loaded).toEqual(makeBound());
+    await upsertBoundDevice(store, makeBound("pc-a"));
+    await upsertBoundDevice(store, makeBound("pc-b"));
+    const loaded = await loadBoundDevices(store);
+    expect(loaded.map((d) => d.peer_device_id).sort()).toEqual(["pc-a", "pc-b"]);
+    // The SessionKey is never persisted here: bindings hold only the account
+    // + pairing tokens (the E2E key is re-derived per resume).
+    const raw = JSON.parse(new TextDecoder().decode((await store.get(BOUND_DEVICES_KEY))!));
+    expect(Array.isArray(raw)).toBe(true);
+    expect("session_key" in raw[0]).toBe(false);
   });
 
-  it("returns null when no binding is stored", async () => {
+  it("upserts by peer_device_id instead of duplicating a machine", async () => {
     const store = new InMemorySecretStore();
-    expect(await loadBoundDevice(store)).toBeNull();
+    await upsertBoundDevice(store, makeBound("pc-a"));
+    const updated = { ...makeBound("pc-a"), pairing_token: "ptok-refreshed" };
+    await upsertBoundDevice(store, updated);
+    const loaded = await loadBoundDevices(store);
+    expect(loaded).toHaveLength(1);
+    expect(loaded[0].pairing_token).toBe("ptok-refreshed");
   });
 
-  it("clears a stored binding so a later load returns null", async () => {
+  it("removes one machine while keeping the others", async () => {
     const store = new InMemorySecretStore();
-    await persistBoundDevice(store, makeBound());
-    expect(await loadBoundDevice(store)).not.toBeNull();
-    await clearBoundDevice(store);
-    expect(await loadBoundDevice(store)).toBeNull();
+    await upsertBoundDevice(store, makeBound("pc-a"));
+    await upsertBoundDevice(store, makeBound("pc-b"));
+    const remaining = await removeBoundDevice(store, "pc-a");
+    expect(remaining.map((d) => d.peer_device_id)).toEqual(["pc-b"]);
+    expect((await loadBoundDevices(store)).map((d) => d.peer_device_id)).toEqual(["pc-b"]);
   });
 
-  it("stores the binding under the constant key (separate from SessionKey)", async () => {
+  it("clears every machine (and the legacy key) via clearAllBoundDevices", async () => {
     const store = new InMemorySecretStore();
-    await persistBoundDevice(store, makeBound());
-    const raw = await store.get(BOUND_DEVICE_KEY);
-    expect(raw).not.toBeNull();
-    const decoded = JSON.parse(new TextDecoder().decode(raw!)) as BoundDevice;
-    expect(decoded.auth_token).toBe("tok-abc");
-    // SessionKey is never persisted here: the binding holds only the account
-    // + pairing tokens (the E2E key is re-derived per pairing).
-    expect("session_key" in decoded).toBe(false);
+    await upsertBoundDevice(store, makeBound("pc-a"));
+    await clearAllBoundDevices(store);
+    expect(await loadBoundDevices(store)).toEqual([]);
+  });
+
+  it("returns an empty list when nothing is stored", async () => {
+    const store = new InMemorySecretStore();
+    expect(await loadBoundDevices(store)).toEqual([]);
+  });
+
+  it("migrates the legacy single-record binding into the list on first load", async () => {
+    const store = new InMemorySecretStore();
+    const legacy = makeBound("pc-legacy");
+    await store.set(BOUND_DEVICE_KEY, new TextEncoder().encode(JSON.stringify(legacy)));
+    const loaded = await loadBoundDevices(store);
+    expect(loaded).toEqual([legacy]);
+    // Migration is durable: the legacy key is gone, the list carries the record.
+    expect(await store.get(BOUND_DEVICE_KEY)).toBeNull();
+    expect((await loadBoundDevices(store))).toEqual([legacy]);
+    expect(await store.get(BOUND_DEVICES_KEY)).not.toBeNull();
+  });
+
+  it("drops a corrupt legacy record instead of crashing", async () => {
+    const store = new InMemorySecretStore();
+    await store.set(BOUND_DEVICE_KEY, new TextEncoder().encode("{not json"));
+    expect(await loadBoundDevices(store)).toEqual([]);
+    expect(await store.get(BOUND_DEVICE_KEY)).toBeNull();
+  });
+
+  it("drops corrupt list bytes and falls back to the legacy record", async () => {
+    const store = new InMemorySecretStore();
+    const legacy = makeBound("pc-legacy");
+    await store.set(BOUND_DEVICES_KEY, new TextEncoder().encode("{broken"));
+    await store.set(BOUND_DEVICE_KEY, new TextEncoder().encode(JSON.stringify(legacy)));
+    expect(await loadBoundDevices(store)).toEqual([legacy]);
+  });
+
+  it("saveBoundDevices round-trips an explicit list", async () => {
+    const store = new InMemorySecretStore();
+    const list = [makeBound("pc-a"), makeBound("pc-b")];
+    await saveBoundDevices(store, list);
+    expect(await loadBoundDevices(store)).toEqual(list);
   });
 });
 

@@ -20,6 +20,7 @@ mod approval;
 mod frame;
 mod host;
 mod mapping;
+mod mojibake;
 mod process;
 mod rpc_types;
 mod session;

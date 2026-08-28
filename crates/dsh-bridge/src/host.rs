@@ -20,6 +20,7 @@ use tokio::sync::Notify;
 
 use crate::approval::PendingApprovals;
 use crate::frame::{HostFrame, MuxFrame};
+use crate::mojibake::{StreamRepairer, StreamTextKind};
 use crate::rpc_types::{RpcId, ServerRequest, SessionId};
 use crate::transport::HttpClient;
 
@@ -56,6 +57,12 @@ pub struct SessionSink {
     /// `assistant/message` after a mid-stream gap does not append the full text
     /// over text already shown.
     streamed_text_steps: Mutex<std::collections::HashSet<(u64, u64)>>,
+    /// Streaming mojibake repairers keyed by `(turn, step, block index)` — one
+    /// per assistant text/reasoning block stream. A corrupted upstream stream
+    /// delivers one Latin-1 char per delta, so repair needs cross-delta state
+    /// (see `crate::mojibake`); entries are removed when the step's finalized
+    /// `assistant/message` flushes them.
+    stream_repairs: Mutex<StreamRepairTable>,
     /// Tool-call arguments keyed by call id, captured while mapping `tool/call`
     /// so a later `tool/result` can still synthesize diff previews for file
     /// editor tools whose dsh card variant did not carry a diff view.
@@ -90,6 +97,11 @@ pub struct SessionSink {
     inflight: Mutex<Option<Arc<AtomicBool>>>,
 }
 
+/// Per-block-stream mojibake repairer table: `(turn, step, block index)` maps
+/// to the stream kind plus its [`StreamRepairer`] state.
+type StreamRepairTable =
+    std::collections::HashMap<(u64, u64, u64), (StreamTextKind, StreamRepairer)>;
+
 #[derive(Debug, Clone)]
 pub struct PendingEntry {
     pub ui_id: String,
@@ -105,6 +117,7 @@ impl SessionSink {
             last_seq: AtomicU64::new(0),
             replaying: AtomicBool::new(false),
             streamed_text_steps: Mutex::new(std::collections::HashSet::new()),
+            stream_repairs: Mutex::new(StreamRepairTable::new()),
             tool_call_args: Mutex::new(std::collections::HashMap::new()),
             pending: Mutex::new(Vec::new()),
             question_rpc_ids: Mutex::new(Vec::new()),
@@ -129,6 +142,52 @@ impl SessionSink {
         if let Ok(mut seen) = self.streamed_text_steps.lock() {
             seen.insert((turn, step));
         }
+    }
+
+    /// Feed one assistant text/reasoning delta through the block stream's
+    /// mojibake repairer; returns the text safe to emit now (possibly empty
+    /// while a corrupted sequence is still accumulating). On lock failure the
+    /// delta passes through unrepaired.
+    pub fn repair_stream_text(
+        &self,
+        turn: u64,
+        step: u64,
+        index: u64,
+        kind: StreamTextKind,
+        delta: &str,
+    ) -> String {
+        match self.stream_repairs.lock() {
+            Ok(mut repairs) => {
+                let entry = repairs
+                    .entry((turn, step, index))
+                    .or_insert_with(|| (kind, StreamRepairer::new()));
+                entry.1.push(delta)
+            }
+            Err(_) => delta.to_string(),
+        }
+    }
+
+    /// Flush the held-back repair tails of all block streams of a step (called
+    /// when the step's finalized `assistant/message` arrives) and drop their
+    /// repairers. Returns the non-empty tails with their stream kind.
+    pub fn flush_stream_repairs(&self, turn: u64, step: u64) -> Vec<(StreamTextKind, String)> {
+        let mut out = Vec::new();
+        if let Ok(mut repairs) = self.stream_repairs.lock() {
+            let keys: Vec<(u64, u64, u64)> = repairs
+                .keys()
+                .filter(|k| k.0 == turn && k.1 == step)
+                .copied()
+                .collect();
+            for key in keys {
+                if let Some((kind, mut repairer)) = repairs.remove(&key) {
+                    let tail = repairer.flush();
+                    if !tail.is_empty() {
+                        out.push((kind, tail));
+                    }
+                }
+            }
+        }
+        out
     }
 
     /// Whether assistant text for the step has already been emitted through

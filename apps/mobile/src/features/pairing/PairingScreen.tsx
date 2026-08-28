@@ -14,10 +14,15 @@ type Phase = "idle" | "dialing" | "authenticating" | "pairing" | "connected" | "
 // dial the relay over TLS WebSocket, run DeviceAuth + the E2E handshake, and
 // resync state. Manual entry accepts the raw QR JSON as a fallback. Free-tier
 // pairing needs no account; a successful pair lands on the session list.
+// Reached from the machines list via "Pair a new PC"; `onCancel` (when given)
+// returns there without pairing — each successful scan binds an ADDITIONAL
+// machine, it never overwrites the existing bindings.
 export function PairingScreen({
   onOpenDiagnostics,
+  onCancel,
 }: {
   onOpenDiagnostics?: () => void;
+  onCancel?: () => void;
 }) {
   const controller = useAppController();
   const connState = useConnectionState();
@@ -83,6 +88,22 @@ export function PairingScreen({
 
   return (
     <ScrollView style={styles.screen} contentContainerStyle={{ padding: spacing.lg, paddingBottom: spacing.xxl }}>
+      {onCancel ? (
+        <Pressable
+          onPress={onCancel}
+          hitSlop={10}
+          style={({ pressed }) => ({
+            alignSelf: "flex-start",
+            paddingHorizontal: spacing.sm,
+            paddingVertical: spacing.xs,
+            borderRadius: 999,
+            backgroundColor: pressed ? colors.accentTint : "transparent",
+            marginBottom: spacing.xs,
+          })}
+        >
+          <Text style={{ color: colors.accent, fontSize: 15, fontWeight: "600" }}>{"\u2039"} Machines</Text>
+        </Pressable>
+      ) : null}
       <View style={{ alignItems: "center", marginTop: spacing.xl, marginBottom: spacing.xl }}>
         <View
           style={{

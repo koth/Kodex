@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import { AppController } from "../app/services";
 import { InMemorySecretStore } from "../util/in-memory-store";
 import { RelayConnection } from "../relay/connection";
+import type { RelayTransport } from "../relay/transport";
 import { linkedPair } from "./mock-relay";
 import { fromMessage } from "../relay/framing";
 import { getPublicKey, ecdhSharedSecret, deriveSessionKey } from "../crypto";
@@ -23,19 +24,29 @@ import type { UiSnapshot, ToolInvocation, WorkspaceSessionList } from "../types"
 // resync. Mirrors the requirements-doc acceptance criteria.
 
 const PC_SECRET = Uint8Array.from({ length: 32 }, (_, i) => 200 + i);
+/** A second machine's static X25519 secret (multi-machine switch test). */
+const PC2_SECRET = Uint8Array.from({ length: 32 }, (_, i) => 100 + i);
 
-function qrJson(): string {
+function qrJsonFor(secret: Uint8Array): string {
   return JSON.stringify({
     relay_endpoint: "wss://relay.example.com",
     pairing_code: "PAIR123",
-    pc_device_pubkey: encodeBase64UrlNoPad(getPublicKey(PC_SECRET)),
+    pc_device_pubkey: encodeBase64UrlNoPad(getPublicKey(secret)),
   });
 }
 
-function makeSnapshot(sessionId: string, status: UiSnapshot["session"]["status"] = "Idle"): UiSnapshot {
+function qrJson(): string {
+  return qrJsonFor(PC_SECRET);
+}
+
+function makeSnapshot(
+  sessionId: string,
+  workspaceName = "demo",
+  status: UiSnapshot["session"]["status"] = "Idle",
+): UiSnapshot {
   return {
     revision: 1,
-    workspace: { id: "ws-1", name: "demo", root: "/demo" },
+    workspace: { id: "ws-1", name: workspaceName, root: "/demo" },
     workspace_connected: true,
     session: { id: sessionId, workspace_id: "ws-1", title: "Session", model: "m", mode: null, agent_cli: null, status },
     session_config: { hydrated: false, controls: [] },
@@ -98,18 +109,35 @@ async function waitFor<T>(fn: () => T | undefined | null, timeoutMs = 1500): Pro
 }
 
 /** Fake PC: acks DeviceAuth, completes the E2E handshake from PC_SECRET, then
- * serves control requests and streams events over the encrypted channel. */
+ * serves control requests and streams events over the encrypted channel.
+ * Options parametrize a second machine (own static key / device id / token). */
 class FakePc {
   private conn: RelayConnection;
   private phoneDeviceId = "phone-dev";
+  private readonly pcDeviceId: string;
+  private readonly pairingToken: string;
+  private readonly secret: Uint8Array;
+  private readonly workspaceName: string;
   private snapshot: UiSnapshot;
   private stop = false;
   /** Handshake message types received from the phone, in order. */
   readonly handshakeTypes: string[] = [];
 
-  constructor(conn: RelayConnection) {
+  constructor(
+    conn: RelayConnection,
+    opts: {
+      pcDeviceId?: string;
+      pairingToken?: string;
+      secret?: Uint8Array;
+      workspaceName?: string;
+    } = {},
+  ) {
     this.conn = conn;
-    this.snapshot = makeSnapshot("init");
+    this.pcDeviceId = opts.pcDeviceId ?? "pc-dev";
+    this.pairingToken = opts.pairingToken ?? "ptok";
+    this.secret = opts.secret ?? PC_SECRET;
+    this.workspaceName = opts.workspaceName ?? "demo";
+    this.snapshot = makeSnapshot("init", this.workspaceName);
   }
 
   async run(): Promise<void> {
@@ -125,15 +153,15 @@ class FakePc {
       console.log("[fake-pc] got pairing_resume");
       const resume = initEnv.payload as { pairing_token: string; phone_ephemeral_pubkey: string };
       const phoneEphPub = decodeBase64UrlNoPad(resume.phone_ephemeral_pubkey);
-      const shared = ecdhSharedSecret(PC_SECRET, phoneEphPub);
+      const shared = ecdhSharedSecret(this.secret, phoneEphPub);
       const key = deriveSessionKey(shared);
       await this.conn.sendEnvelope(
         fromMessage(null, {
           type: "pairing_confirm",
           payload: {
             pairing_token: resume.pairing_token,
-            session_key_material: encodeBase64UrlNoPad(getPublicKey(PC_SECRET)),
-            pc_device_id: "pc-dev",
+            session_key_material: encodeBase64UrlNoPad(getPublicKey(this.secret)),
+            pc_device_id: this.pcDeviceId,
             phone_device_id: this.phoneDeviceId,
           },
         }),
@@ -144,15 +172,15 @@ class FakePc {
     if (!initEnv || initEnv.type !== "pairing_initiate") throw new Error("expected pairing_initiate");
     const init = initEnv.payload as PairingInitiate;
     const phoneEphPub = decodeBase64UrlNoPad(init.phone_ephemeral_pubkey!);
-    const shared = ecdhSharedSecret(PC_SECRET, phoneEphPub);
+    const shared = ecdhSharedSecret(this.secret, phoneEphPub);
     const key = deriveSessionKey(shared);
     await this.conn.sendEnvelope(
       fromMessage(null, {
         type: "pairing_confirm",
         payload: {
-          pairing_token: "ptok",
+          pairing_token: this.pairingToken,
           session_key_material: init.phone_ephemeral_pubkey!,
-          pc_device_id: "pc-dev",
+          pc_device_id: this.pcDeviceId,
           phone_device_id: this.phoneDeviceId,
         },
       }),
@@ -346,7 +374,7 @@ describe("integration: phone <-> fake PC over relay", () => {
     await controller.disconnect();
   });
 
-  it("cold restart resumes without re-scanning (pairing resume handshake)", async () => {
+  it("cold start lands on the machines list; picking a machine resumes via pairing_resume", async () => {
     // First boot: pair.
     const store = new InMemorySecretStore();
     const [phoneT1, pcT1] = linkedPair();
@@ -359,36 +387,35 @@ describe("integration: phone <-> fake PC over relay", () => {
     // NOTE: the persisted session key is deliberately KEPT. A restored key
     // must never be trusted for the cached fast path (the PC holds its copy
     // in memory only; any PC restart would make every fast-path frame
-    // undecryptable and hang the phone until timeout), so the restart below
+    // undecryptable and hang the phone until timeout), so the reconnect below
     // must run the explicit pairing_resume handshake.
     // Simulate app kill: tear down the transport + loop without clearing
-    // the persisted store (identity, BoundDevice, session key survive).
+    // the persisted store (identity, BoundDevice list, session key survive).
     await controller1.disconnect();
     pc1.stopLoop();
     await pcRun1;
 
-    // Second boot with the same store: boot() must auto-resume via the
-    // pairing resume handshake, not require a fresh QR scan.
+    // Second boot with the same store: boot() must NOT auto-connect — the
+    // machines list is shown and the user picks a machine to connect to.
     const [phoneT2, pcT2] = linkedPair();
     const controller2 = new AppController(store, async () => phoneT2);
     const pc2 = new FakePc(new RelayConnection(pcT2));
     const pcRun2 = pc2.run();
 
-    let booted = false;
-    try {
-      booted = await controller2.boot();
-    } catch (e) {
-      throw new Error(`boot threw: ${e instanceof Error ? e.message : e}`);
-    }
-    if (!booted) {
-      const log = await (await import("../util/diagnostics")).diagnostics.readAll();
-      throw new Error(`boot returned false; diagnostics:\n${log}`);
-    }
-    expect(booted).toBe(true);
+    const machines = await controller2.listMachines();
+    expect(machines).toHaveLength(1);
+    expect(machines[0].peer_device_id).toBe("pc-dev");
+
+    const booted = await controller2.boot();
+    expect(booted).toBe(false);
+    expect(controller2.connectionState).toBe("disconnected");
+
+    // The user taps the machine: DeviceAuth + pairing_resume with the
+    // machine's own pairing token, then a GetState resync.
+    await controller2.connectToBoundDevice("pc-dev");
     expect(controller2.connectionState).toBe("connected");
-    // Fix for "bound once, then never connects again": a cold start with a
-    // restored session key goes straight to pairing_resume instead of the
-    // stale-key fast path that the PC silently drops.
+    // A cold start with a restored session key goes straight to
+    // pairing_resume, never the stale-key fast path the PC silently drops.
     expect(pc2.handshakeTypes).toEqual(["pairing_resume"]);
     await waitFor(() => (controller2.snapshot?.session.id === "init" ? true : undefined));
     expect(controller2.snapshot?.session.id).toBe("init");
@@ -396,6 +423,92 @@ describe("integration: phone <-> fake PC over relay", () => {
     await controller2.disconnect();
     pc2.stopLoop();
     await pcRun2;
+  });
+
+  it("binds several machines, connects to each, and unbinds one", async () => {
+    const store = new InMemorySecretStore();
+    let nextTransport: RelayTransport | null = null;
+    const controller = new AppController(store, async () => {
+      if (!nextTransport) throw new Error("no transport wired for this step");
+      const t = nextTransport;
+      nextTransport = null;
+      return t;
+    });
+
+    // Scan machine A's QR (fresh pairing, direct transport).
+    const [phoneA1, pcTA1] = linkedPair();
+    const pcA1 = new FakePc(new RelayConnection(pcTA1));
+    const runA1 = pcA1.run();
+    await controller.pairFromTransport(phoneA1, qrJson(), false);
+    expect(controller.connectionState).toBe("connected");
+    await controller.disconnect();
+    pcA1.stopLoop();
+    await runA1;
+
+    // Scan machine B's QR — a SECOND binding, not a replacement.
+    const [phoneB1, pcTB1] = linkedPair();
+    const pcB1 = new FakePc(new RelayConnection(pcTB1), {
+      pcDeviceId: "pc-b",
+      pairingToken: "ptok-b",
+      secret: PC2_SECRET,
+      workspaceName: "pc-b-ws",
+    });
+    const runB1 = pcB1.run();
+    await controller.pairFromTransport(phoneB1, qrJsonFor(PC2_SECRET), false);
+    expect(controller.connectionState).toBe("connected");
+    await controller.disconnect();
+    pcB1.stopLoop();
+    await runB1;
+
+    const machines = await controller.listMachines();
+    expect(machines.map((m) => m.peer_device_id).sort()).toEqual(["pc-b", "pc-dev"]);
+    // Each machine carries its own pairing token + static key.
+    const a = machines.find((m) => m.peer_device_id === "pc-dev")!;
+    const b = machines.find((m) => m.peer_device_id === "pc-b")!;
+    expect(a.pairing_token).toBe("ptok");
+    expect(b.pairing_token).toBe("ptok-b");
+    expect(a.peer_static_pubkey_b64).not.toBe(b.peer_static_pubkey_b64);
+
+    // Connect to A: resume handshake with A's token, A's snapshot arrives.
+    const [phoneA2, pcTA2] = linkedPair();
+    const pcA2 = new FakePc(new RelayConnection(pcTA2));
+    const runA2 = pcA2.run();
+    nextTransport = phoneA2;
+    await controller.connectToBoundDevice("pc-dev");
+    expect(controller.connectionState).toBe("connected");
+    expect(pcA2.handshakeTypes).toEqual(["pairing_resume"]);
+    await waitFor(() => (controller.snapshot?.session.id === "init" ? true : undefined));
+
+    // Switch to B: A's cached key must not leak across machines — B runs its
+    // own resume handshake and serves its own workspace snapshot.
+    const [phoneB2, pcTB2] = linkedPair();
+    const pcB2 = new FakePc(new RelayConnection(pcTB2), {
+      pcDeviceId: "pc-b",
+      pairingToken: "ptok-b",
+      secret: PC2_SECRET,
+      workspaceName: "pc-b-ws",
+    });
+    const runB2 = pcB2.run();
+    nextTransport = phoneB2;
+    await controller.connectToBoundDevice("pc-b");
+    expect(controller.connectionState).toBe("connected");
+    expect(pcB2.handshakeTypes).toEqual(["pairing_resume"]);
+    await waitFor(() => (controller.snapshot?.workspace.name === "pc-b-ws" ? true : undefined));
+    expect(controller.snapshot?.workspace.name).toBe("pc-b-ws");
+
+    // Unbind B while it is the active machine: list shrinks, connecting to it
+    // now fails as unbound.
+    const remaining = await controller.removeMachine("pc-b");
+    expect(remaining.map((m) => m.peer_device_id)).toEqual(["pc-dev"]);
+    expect(controller.connectionState).toBe("disconnected");
+    await expect(controller.connectToBoundDevice("pc-b")).rejects.toThrow(/not bound/);
+    expect((await controller.listMachines()).map((m) => m.peer_device_id)).toEqual(["pc-dev"]);
+
+    await controller.disconnect();
+    pcA2.stopLoop();
+    pcB2.stopLoop();
+    await runA2;
+    await runB2;
   });
 });
 // end of file

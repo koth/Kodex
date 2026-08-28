@@ -17,12 +17,12 @@ export function SettingsScreen({
 
   const unbind = () => {
     Alert.alert(
-      "Unbind device?",
-      "This clears the bound account. You will need to re-scan to pair again.",
+      "Unbind all machines?",
+      "This clears every bound machine from this phone. You will need to re-scan a QR code to pair again.",
       [
         { text: "Cancel", style: "cancel" },
         {
-          text: "Unbind",
+          text: "Unbind all",
           style: "destructive",
           onPress: async () => {
             await controller.unbindAndClear();
@@ -86,7 +86,7 @@ export function SettingsScreen({
           style={({ pressed }) => [styles.buttonGhost, { marginTop: spacing.lg, borderColor: colors.danger, opacity: pressed ? 0.7 : 1 }]}
           onPress={unbind}
         >
-          <Text style={[styles.text, { color: colors.danger, fontWeight: "600" }]}>Unbind & re-pair</Text>
+          <Text style={[styles.text, { color: colors.danger, fontWeight: "600" }]}>Unbind all machines</Text>
         </Pressable>
         {onOpenDiagnostics ? (
           <Pressable

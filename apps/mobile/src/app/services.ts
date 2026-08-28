@@ -21,10 +21,10 @@ import {
 } from "../pairing/pairing-flow";
 import type { UiSnapshot, PermissionInputResponse } from "../types";
 import {
-  loadBoundDevice,
-  persistBoundDevice,
-  clearBoundDevice,
-  canReconnectWithoutRescan,
+  loadBoundDevices,
+  upsertBoundDevice,
+  removeBoundDevice as removeBoundDeviceRecord,
+  clearAllBoundDevices,
 } from "../account/binding";
 import type { BoundDevice } from "../account/binding";
 import { diagnostics } from "../util/diagnostics";
@@ -63,6 +63,9 @@ export class AppController {
   private connectionGeneration = 0;
   private lastSessionKey: SessionKey | null = null;
   private lastPeerDeviceId: string | null = null;
+  /** The machine the user paired with or explicitly connected to. Auto-resume
+   * (live-drop recovery) always targets this machine, never the whole list. */
+  private activeBound: BoundDevice | null = null;
   /** True while `lastSessionKey` was restored from storage rather than
    * established in-process. A restored key cannot be trusted for the cached
    * fast path: the PC keeps its copy in memory only, so any PC restart (or
@@ -159,8 +162,13 @@ export class AppController {
       peer_device_id: result.pcDeviceId,
       peer_static_pubkey_b64: result.pcStaticPubkeyB64,
       relay_endpoint: qr.relay_endpoint,
+      bound_at: Date.now(),
     };
-    await persistBoundDevice(this.secretStore, bound);
+    // Multi-machine: every scan produces its own pairing token, so machines
+    // accumulate in the list (keyed by peer device id) instead of the new
+    // scan overwriting the previous binding.
+    await upsertBoundDevice(this.secretStore, bound);
+    this.activeBound = bound;
     // Diagnostic: log session key prefix + peer id so it can be matched
     // against the PC's derived key. (Hermes console -> logcat ReactNativeJS.)
     const keyHex = Array.from(result.sessionKey.bytes.slice(0, 8))
@@ -265,15 +273,119 @@ export class AppController {
     }
   }
 
-  /** Best-effort bound reconnect: re-scan is required unless bound+active. */
-  async canReconnectWithoutRescan(): Promise<boolean> {
-    const bound = await loadBoundDevice(this.secretStore);
-    return canReconnectWithoutRescan(this.subscription.active, bound);
+  // --- Multi-machine binding management ---
+
+  /** Every persisted machine binding (for the machines list screen). */
+  async listMachines(): Promise<BoundDevice[]> {
+    return loadBoundDevices(this.secretStore);
   }
 
-  async loadBoundIfAny(): Promise<boolean> {
-    const bound = await loadBoundDevice(this.secretStore);
-    return bound !== null && this.subscription.active;
+  /** Forget one machine. If it is the active one, drop its session state too
+   * and disconnect when a live connection exists. Returns the remaining list. */
+  async removeMachine(peerDeviceId: string): Promise<BoundDevice[]> {
+    const remaining = await removeBoundDeviceRecord(this.secretStore, peerDeviceId);
+    if (this.activeBound?.peer_device_id === peerDeviceId) {
+      this.activeBound = null;
+      this.lastSessionKey = null;
+      this.lastPeerDeviceId = null;
+      await clearSession(this.secretStore);
+      if (this.conn) await this.disconnect();
+    }
+    return remaining;
+  }
+
+  /**
+   * User-initiated connect from the machines list: dial the machine's relay
+   * endpoint, run DeviceAuth + a fresh E2E resume handshake with ITS pairing
+   * token + static key, restart the receive loop, and resync state via
+   * GetState. Single attempt — failures surface to the caller so the UI can
+   * show the error next to the machine row (no background retry loop).
+   */
+  async connectToBoundDevice(peerDeviceId: string): Promise<void> {
+    if (this.connectingPromise) {
+      // A retry loop (auto-resume) or another connect is in flight; unroll it
+      // before starting the user-directed attempt.
+      this.stopLoop = true;
+      this.connectionGeneration += 1;
+      try {
+        await this.connectingPromise;
+      } catch {
+        // Auto-resume failure is irrelevant here — the user picked a machine.
+      }
+      this.connectingPromise = null;
+    }
+    const devices = await loadBoundDevices(this.secretStore);
+    const bound = devices.find((d) => d.peer_device_id === peerDeviceId);
+    if (!bound) {
+      throw new Error("machine is not bound; scan its QR code first");
+    }
+    // Tear down any live connection (or lingering half-open one) before
+    // dialing the selected machine: switching machines must not leave the
+    // previous machine's receive loop running against a replaced socket.
+    if (this.conn) {
+      await this.disconnect();
+    }
+    // Switching machines invalidates the previous machine's cached key and
+    // snapshot: the persisted session key is per-peer and the session store
+    // must not show machine A's sessions while talking to machine B.
+    if (this.lastPeerDeviceId !== peerDeviceId) {
+      this.lastSessionKey = null;
+      this.lastPeerDeviceId = null;
+      this.sessionKeyNeedsResume = true;
+      await clearSession(this.secretStore);
+      this.sessionStore.clear();
+    }
+    this.activeBound = bound;
+    this.connectingPromise = (async () => {
+      await this.connectOnce(bound);
+      return true;
+    })().finally(() => {
+      this.connectingPromise = null;
+    });
+    await this.connectingPromise;
+  }
+
+  /** One-shot connect to a specific machine. Throws on failure after rolling
+   * the state machine back and tearing the half-open connection down. */
+  private async connectOnce(bound: BoundDevice): Promise<boolean> {
+    if (!this.reconnectTransportFactory) {
+      throw new Error("no transport factory configured");
+    }
+    const endpoint = bound.relay_endpoint;
+    if (!endpoint) {
+      throw new Error("machine record is missing a relay endpoint; re-scan required");
+    }
+    try {
+      const ws = await this.reconnectTransportFactory(endpoint);
+      await this.establishBoundConnection(ws, bound);
+      const generation = ++this.connectionGeneration;
+      this.stopLoop = false;
+      this.loopPromise = this.runLoop(generation).catch(() => {});
+      this.startHeartbeat();
+      if (this.control) {
+        await this.getState();
+      }
+      this.connState.transition("connected");
+      this.reconnectAttempt = 0;
+      diagnostics.log("services", `connected to machine ${bound.peer_device_id.slice(0, 8)}…`);
+      return true;
+    } catch (e) {
+      diagnostics.log(
+        "services",
+        `connect to machine failed: ${e instanceof Error ? e.message : String(e)}`,
+      );
+      this.stopHeartbeat();
+      this.stopLoop = true;
+      try {
+        await this.conn?.close();
+      } catch {
+        // ignore
+      }
+      this.conn = null;
+      this.control = null;
+      this.connState.transition("disconnected");
+      throw e;
+    }
   }
 
   /**
@@ -337,13 +449,13 @@ export class AppController {
 
   /**
    * Reconnect using a persisted pairing token + peer static key, dialing a
-   * fresh transport when only the endpoint is known. Used both for app
-   * startup and for live-drop recovery.
+   * fresh transport when only the endpoint is known. Used for live-drop
+   * recovery of the ACTIVE machine (never picks a machine on its own).
    */
   async resumeFromBoundTransport(transport?: RelayTransport): Promise<void> {
-    const bound = await loadBoundDevice(this.secretStore);
+    const bound = this.activeBound;
     if (!bound) {
-      throw new Error("no persisted pairing to resume");
+      throw new Error("no active machine to resume");
     }
     const endpoint = bound.relay_endpoint;
     if (!transport && !endpoint) {
@@ -356,10 +468,11 @@ export class AppController {
     // memory, so after any PC restart the restored key is stale and every
     // encrypted frame would be dropped silently. Keep it around only as a
     // diagnostic fallback; the resume handshake below always re-establishes
-    // the key authoritatively.
+    // the key authoritatively. The persisted key is per-peer — a key saved
+    // for a different machine must be discarded, not reused.
     if (!this.lastSessionKey || !this.lastPeerDeviceId) {
       const persisted = await loadSession(this.secretStore);
-      if (persisted) {
+      if (persisted && persisted.peer_device_id === bound.peer_device_id) {
         this.lastSessionKey = persisted.key;
         this.lastPeerDeviceId = persisted.peer_device_id;
         this.sessionKeyNeedsResume = true;
@@ -419,10 +532,20 @@ export class AppController {
   }
 
   private async doAutoResume(): Promise<boolean> {
+    if (!this.activeBound) {
+      // No machine selected (fresh start or the binding was removed): the
+      // machines list is the landing state, there is nothing to auto-resume.
+      this.connState.transition("disconnected");
+      return false;
+    }
     while (!this.stopLoop) {
       try {
         diagnostics.log("services", `resume attempt ${this.reconnectAttempt + 1}`);
         await this.resumeFromBoundTransport();
+        // The user may have hit the kill switch (or picked another machine)
+        // while the resume handshake was in flight: do not yank the UI back
+        // to connected after a deliberate disconnect.
+        if (this.stopLoop) return false;
         if (this.control) {
           diagnostics.log("services", "resume connected; requesting initial state");
           await this.getState();
@@ -443,14 +566,18 @@ export class AppController {
         this.connState.transition("connecting");
         if (this.reconnectAttempt >= 8) {
           // Repeated resume failures usually mean the persisted binding is
-          // stale (e.g. the PC or phone identity rotated). Drop the stale
-          // binding so the user is prompted to re-scan a fresh QR instead
-          // of looping forever on a dead identity.
-          await this.unbindAndClear();
-          diagnostics.log(
-            "services",
-            "auto resume exhausted; cleared stale binding; re-scan required",
-          );
+          // stale (e.g. the PC or phone identity rotated). Drop ONLY the
+          // failing machine so the other bindings on the machines list stay
+          // usable; the user is prompted to re-scan that machine's QR.
+          if (this.activeBound) {
+            const stale = this.activeBound.peer_device_id;
+            this.activeBound = null;
+            await removeBoundDeviceRecord(this.secretStore, stale);
+            diagnostics.log(
+              "services",
+              "auto resume exhausted; removed stale machine binding; re-scan required",
+            );
+          }
           this.connState.transition("disconnected");
           return false;
         }
@@ -461,27 +588,26 @@ export class AppController {
     return false;
   }
 
-  /** App startup: mark the connection as bootstrapping, then attempt a
-   * persisted resume. Returns true if a connection was established. */
+  /** App startup: load the device identity and the persisted machine list.
+   * Deliberately does NOT auto-connect: the machines list screen is the
+   * landing state, and the user picks which machine to connect to (a phone
+   * may be bound to several PCs). Migration of the legacy single-record
+   * binding happens inside `loadBoundDevices`. */
   async boot(): Promise<boolean> {
     await this.ensureIdentity();
-    const bound = await loadBoundDevice(this.secretStore);
-    if (!bound) {
-      this.connState.transition("disconnected");
-      return false;
-    }
-    // A persisted pairing exists: try resuming without a fresh scan. The
-    // connecting state keeps the UI on the boot spinner until resume either
-    // succeeds (→ connected) or exhausts retries (→ disconnected).
-    this.connState.transition("connecting");
-    return this.tryAutoResume();
+    const devices = await loadBoundDevices(this.secretStore);
+    this.connState.transition("disconnected");
+    diagnostics.log("services", `boot: ${devices.length} bound machine(s); awaiting selection`);
+    return false;
   }
 
+  /** Forget every machine and the persisted session (Settings kill path). */
   async unbindAndClear(): Promise<void> {
-    await clearBoundDevice(this.secretStore);
+    await clearAllBoundDevices(this.secretStore);
     await clearSession(this.secretStore);
     this.lastSessionKey = null;
     this.lastPeerDeviceId = null;
+    this.activeBound = null;
   }
 
   setSubscriptionFromStatus(status: SubscriptionStatus): void {
@@ -616,6 +742,7 @@ export class AppController {
   async disconnect(): Promise<void> {
     this.stopLoop = true;
     this.stopHeartbeat();
+    this.activeBound = null;
     try {
       await this.conn?.close();
     } catch {
