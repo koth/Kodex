@@ -1,4 +1,4 @@
-﻿use anyhow::{Context, Result};
+use anyhow::{Context, Result};
 use rusqlite::{Connection, OptionalExtension, ToSql, params, params_from_iter};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
@@ -1680,6 +1680,35 @@ impl SessionStore {
             |row| row.get(0),
         )?;
         Ok(messages + tools)
+    }
+
+    /// Full message history for a session (all messages, seq-ascending).
+    ///
+    /// The UI window only materializes a tail slice; fork branch-point
+    /// resolution and the fork picker need the complete transcript.
+    pub fn load_session_messages(&self, id: &str) -> Result<Vec<ChatMessage>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, role, body, created_at, is_steer FROM messages
+             WHERE session_id = ?1
+             ORDER BY seq ASC",
+        )?;
+        let mapped = stmt.query_map(params![id], |row| {
+            let id_str: String = row.get(0)?;
+            let role_str: String = row.get(1)?;
+            let role = match role_str.as_str() {
+                "User" => MessageRole::User,
+                "Assistant" => MessageRole::Assistant,
+                _ => MessageRole::System,
+            };
+            Ok(ChatMessage {
+                id: Uuid::parse_str(&id_str).unwrap_or_else(|_| Uuid::new_v4()),
+                role,
+                body: row.get(2)?,
+                created_at: row.get(3)?,
+                is_steer: row.get::<_, i64>(4)? != 0,
+            })
+        })?;
+        Ok(mapped.collect::<rusqlite::Result<Vec<ChatMessage>>>()?)
     }
 
     /// Fetch one tool invocation's full stored detail (uncapped raw fields +

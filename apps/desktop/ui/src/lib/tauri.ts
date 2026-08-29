@@ -346,6 +346,43 @@ export async function sessionCreate(
   return invoke("session_create", { workspaceRoot, agent, preset: preset ?? null });
 }
 
+/** How a forked conversation branch is hosted. */
+export type SessionForkMode = "workspace" | "worktree";
+
+/** Result of forking a conversation from a message. The backend switches the
+ *  active session (and, for worktree forks, the active workspace) before
+ *  returning; the caller only needs to refresh its snapshot. */
+export interface SessionForkOutcome {
+  session_id: string;
+  /** Workspace root the forked session lives in; differs from the source
+   *  workspace only for worktree forks. */
+  workspace_root: string | null;
+  /** Created git branch name for worktree forks. */
+  worktree_branch: string | null;
+}
+
+/** Fork a conversation from a completed assistant message. */
+export async function sessionFork(
+  messageId: string,
+  mode: SessionForkMode,
+): Promise<SessionForkOutcome> {
+  return invoke<SessionForkOutcome>("session_fork", { messageId, mode });
+}
+
+/** One selectable fork branch point: a turn's opening user prompt plus its
+ *  reply preview. Built from the session's FULL persisted history. */
+export interface SessionForkCandidate {
+  turn_ordinal: number;
+  user_message_id: string;
+  user_excerpt: string;
+  reply_excerpt: string;
+}
+
+/** List every fork branch point of the active session (all turns). */
+export async function sessionForkCandidates(): Promise<SessionForkCandidate[]> {
+  return invoke<SessionForkCandidate[]>("session_fork_candidates");
+}
+
 export async function sessionDelete(
   id: string,
   workspaceRoot?: string,

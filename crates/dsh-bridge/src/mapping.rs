@@ -19,7 +19,7 @@ use workspace_model::{
 use crate::frame::{
     AssistantChunkData, AssistantMessageData, ContentBlock, HostFrame, MuxFrame, SessionEvent,
     StreamChunk, TodoItem, TokenUsage, ToolCallData, ToolCallView, ToolEventView, ToolResultData,
-    ToolResultView, TurnEndReason,
+    ToolResultView, TurnEndReason, UserMessageData,
 };
 use crate::host::{PendingApprovalKind, SessionSink};
 use crate::mojibake::{self, StreamTextKind};
@@ -333,6 +333,30 @@ pub fn map_session_event(
                 }
             }
             out
+        }
+        "user/message" => {
+            // History replay only. Live prompts are appended locally by
+            // app-core at send time, so re-emitting the frame would duplicate
+            // every user message. Rebuilt transcripts (resume into an empty
+            // store, fork children) have no other source for the prompts —
+            // and the fork cut anchors on them as turn boundaries.
+            if !_sink.is_replaying() {
+                return Vec::new();
+            }
+            let data: Option<UserMessageData> = event.data();
+            let Some(data) = data else {
+                return Vec::new();
+            };
+            data.content
+                .into_iter()
+                .filter_map(|block| match block {
+                    ContentBlock::Text { text } => Some(ClientEvent::MessageChunk {
+                        role: MessageRole::User,
+                        content: mojibake::repair_mojibake(&text),
+                    }),
+                    _ => None,
+                })
+                .collect()
         }
         "tool/call" => {
             let data: Option<ToolCallData> = event.data();
@@ -1256,6 +1280,39 @@ mod tests {
             vec![ClientEvent::MessageChunk {
                 role: MessageRole::Assistant,
                 content: "from history".to_string(),
+            }]
+        );
+        sink.set_replaying(false);
+    }
+
+    #[test]
+    fn replay_user_message_emits_user_chunk_only_during_replay() {
+        // Live frames never carry user text through the mapping (app-core
+        // appends the prompt locally at send time — emitting it again would
+        // duplicate every user message). History replay must emit it: rebuilt
+        // transcripts (resume / fork child) have no other source for the
+        // prompts, and the fork cut anchors on them as turn boundaries.
+        let (sink, _rx) = test_sink();
+        let frame = mux(session_event(
+            "user/message",
+            3,
+            serde_json::json!({
+                "id": "m-1",
+                "role": "user",
+                "content": [{ "type": "text", "text": "第一个问题" }]
+            }),
+        ));
+
+        let live = map_mux_frame(&frame, &sink);
+        assert!(live.events.is_empty(), "live user/message must stay unmapped");
+
+        sink.set_replaying(true);
+        let replayed = map_mux_frame(&frame, &sink);
+        assert_eq!(
+            replayed.events,
+            vec![ClientEvent::MessageChunk {
+                role: MessageRole::User,
+                content: "第一个问题".to_string(),
             }]
         );
         sink.set_replaying(false);

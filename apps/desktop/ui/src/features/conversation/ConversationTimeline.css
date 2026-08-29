@@ -465,6 +465,9 @@
   margin: 0 0 8px;
   border-radius: 12px;
   background: var(--app-bg);
+  /* 复制/分叉操作行独占一行，落到回复正文下方（而不是被横向 flex
+     挤到正文右侧顶格）。 */
+  flex-wrap: wrap;
 }
 
 /* Tool rows already carry their own bullet; drop the redundant message
@@ -489,6 +492,8 @@
 }
 
 .msg-assistant-actions {
+  /* 强制换到正文下一行：占满整行宽度，flex-wrap 会把它排到正文下方。 */
+  flex-basis: 100%;
   display: flex;
   justify-content: flex-start;
   margin-top: 6px;
@@ -526,6 +531,177 @@
 .msg-copy-btn-copied {
   opacity: 1;
   color: var(--accent, var(--text-strong));
+}
+
+/* 分叉按钮 + 「从这里创建聊天分支」菜单 */
+/* ── 分叉点选择器（从这里创建聊天分支）── */
+.fork-dialog-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 200;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.45);
+  padding: 24px;
+}
+
+.fork-dialog {
+  display: flex;
+  flex-direction: column;
+  width: min(520px, 100%);
+  max-height: min(560px, 80vh);
+  padding: 16px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 14px;
+  background: var(--panel-bg, var(--bg-elevated, #1b1b1f));
+  box-shadow: 0 18px 48px rgba(0, 0, 0, 0.45);
+  gap: 12px;
+}
+
+.fork-dialog-header {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+}
+
+.fork-dialog-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  flex: 0 0 auto;
+  border-radius: 9px;
+  background: color-mix(in srgb, var(--accent) 16%, transparent);
+  color: var(--accent);
+}
+
+.fork-dialog-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-strong);
+}
+
+.fork-dialog-subtitle {
+  margin-top: 2px;
+  font-size: 12px;
+  color: var(--text-muted);
+  line-height: 1.45;
+}
+
+.fork-dialog-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-height: 120px;
+  overflow-y: auto;
+  border: 1px solid var(--border-subtle);
+  border-radius: 10px;
+  padding: 6px;
+}
+
+.fork-dialog-item {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  width: 100%;
+  padding: 8px 10px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text-strong);
+  text-align: left;
+  cursor: pointer;
+  transition: background 120ms ease, border-color 120ms ease;
+}
+
+.fork-dialog-item:hover:not(:disabled),
+.fork-dialog-item:focus-visible {
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+  outline: none;
+}
+
+.fork-dialog-item-selected {
+  border-color: color-mix(in srgb, var(--accent) 55%, transparent);
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+}
+
+.fork-dialog-item-turn {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--accent);
+  letter-spacing: 0.02em;
+}
+
+.fork-dialog-item-user {
+  font-size: 13px;
+  line-height: 1.4;
+  overflow: hidden;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+}
+
+.fork-dialog-item-reply {
+  font-size: 11.5px;
+  color: var(--text-muted);
+  line-height: 1.4;
+  overflow: hidden;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+}
+
+.fork-dialog-empty {
+  padding: 18px 10px;
+  font-size: 12.5px;
+  color: var(--text-muted);
+  text-align: center;
+}
+
+.fork-dialog-error {
+  padding: 7px 10px;
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--danger, #e5484d) 14%, transparent);
+  color: color-mix(in srgb, var(--danger, #e5484d) 88%, var(--text-strong));
+  font-size: 12px;
+  line-height: 1.4;
+  word-break: break-word;
+}
+
+.fork-dialog-footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.fork-dialog-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 8px 14px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 9px;
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  color: var(--text-strong);
+  font-size: 12.5px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 120ms ease, opacity 120ms ease;
+}
+
+.fork-dialog-btn:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--accent) 20%, transparent);
+}
+
+.fork-dialog-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.fork-dialog-btn-worktree {
+  background: transparent;
 }
 
 .msg-system {

@@ -1,4 +1,4 @@
-﻿use super::codebuddy::send_codebuddy_interruption_resolution;
+use super::codebuddy::send_codebuddy_interruption_resolution;
 use super::permissions::PermissionBroker;
 use super::prompt_content::{
     prompt_contains_file, prompt_contains_image, prompt_content_to_acp, prompt_title_text,
@@ -14,8 +14,9 @@ use crate::mapping::{
     session_config_from_options,
 };
 use agent_client_protocol::schema::{
-    CancelNotification, ContentBlock, PromptRequest, PromptResponse, SessionNotification,
-    SetSessionConfigOptionRequest, SetSessionModeRequest, SetSessionModelRequest, StopReason,
+    CancelNotification, ContentBlock, ForkSessionRequest, Meta, PromptRequest, PromptResponse,
+    SessionNotification, SetSessionConfigOptionRequest, SetSessionModeRequest,
+    SetSessionModelRequest, StopReason,
 };
 use agent_client_protocol::{ActiveSession, Agent, Dispatch};
 use anyhow::anyhow;
@@ -29,6 +30,10 @@ use workspace_model::{MessageRole, PromptInputCapabilities, UserPromptContent};
 const KODEX_PROVIDER_VALUE_PREFIX: &str = "kodex-provider:";
 const KODEX_PROVIDER_SLASH_VALUE_PREFIX: &str = "kodex-provider/";
 const STALE_PROMPT_COMPLETION_GRACE: Duration = Duration::from_millis(750);
+/// Kodex `_meta` extension on `session/fork` (mirrored by codex-acp): the
+/// 1-based turn ordinal to keep through — the agent cuts the seed at the end
+/// of that turn.
+const KODEX_FORK_AT_USER_TURN_META: &str = "kodex.ai/at_user_turn";
 
 struct PromptCompletion {
     generation: u64,
@@ -268,6 +273,13 @@ pub(super) async fn run_command_loop(
                             RuntimeCommand::ForceCompact { reply_tx } => {
                                 let _ = reply_tx.send(Err(anyhow::anyhow!(
                                     "当前会话后端不支持强制压缩"
+                                )));
+                            }
+                            // Forking requires an idle turn boundary; a queued
+                            // prompt would only race the seed cut.
+                            RuntimeCommand::ForkSession { reply_tx, .. } => {
+                                let _ = reply_tx.send(Err(anyhow::anyhow!(
+                                    "会话运行中无法分叉，请等当前轮次结束"
                                 )));
                             }
                             RuntimeCommand::ResolveCodeBuddyInterruption {
@@ -646,6 +658,37 @@ pub(super) async fn run_command_loop(
                 let _ = reply_tx.send(Err(anyhow::anyhow!(
                     "当前会话后端不支持强制压缩"
                 )));
+            }
+            // Conversation fork (`session/fork`, ACP unstable extension): ask
+            // the agent to seed a new session with the source's committed
+            // history through the end of `at_user_turn`, then return the
+            // child's agent-side session id. app-core mirrors it locally and
+            // resumes the child (session/load) as a fresh session — the
+            // child's replayed history rebuilds the branch transcript.
+            RuntimeCommand::ForkSession {
+                at_user_turn,
+                reply_tx,
+            } => {
+                let result = async {
+                    let mut request = ForkSessionRequest::new(
+                        session.session_id().clone(),
+                        std::path::PathBuf::from(&config.workspace_root),
+                    )
+                    .mcp_servers(config.mcp_servers.clone());
+                    request.meta = Some(Meta::from_iter([(
+                        KODEX_FORK_AT_USER_TURN_META.to_string(),
+                        json!(at_user_turn),
+                    )]));
+                    let response = session
+                        .connection()
+                        .send_request_to(Agent, request)
+                        .block_task()
+                        .await
+                        .map_err(|err| anyhow!(err.to_string()))?;
+                    Ok(response.session_id.0.to_string())
+                }
+                .await;
+                let _ = reply_tx.send(result);
             }
         }
     }

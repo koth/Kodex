@@ -140,6 +140,31 @@ pub fn session_create(
     save_open_workspace_state(&state)
 }
 
+/// Fork the conversation from a completed assistant message
+/// ("从这里创建聊天分支"). The backend creates the branch session and switches
+/// the active session to it before returning.
+#[tauri::command]
+pub fn session_fork(
+    state: State<'_, AppState>,
+    message_id: String,
+    mode: String,
+) -> Result<workspace_model::SessionForkOutcome, String> {
+    let mode = workspace_model::SessionForkMode::parse(&mode)
+        .ok_or_else(|| format!("未知的分叉方式：{mode}"))?;
+    let outcome = state.with_app(|app| app.session_fork(&message_id, mode))?;
+    save_open_workspace_state(&state)?;
+    Ok(outcome)
+}
+
+/// Fork branch points for the fork picker: every completed turn of the
+/// session (full persisted history, not just the UI's tail window).
+#[tauri::command]
+pub fn session_fork_candidates(
+    state: State<'_, AppState>,
+) -> Result<Vec<workspace_model::SessionForkCandidate>, String> {
+    state.with_app(|app| app.session_fork_candidates())
+}
+
 #[tauri::command]
 pub fn session_delete(
     state: State<'_, AppState>,

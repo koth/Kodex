@@ -496,6 +496,35 @@ pub fn run_harness_session(
                 });
                 let _ = reply_tx.send(Ok(()));
             }
+            RuntimeCommand::ForkSession {
+                at_user_turn,
+                reply_tx,
+            } => {
+                // Conversation fork (`session.fork`): a fast control-plane
+                // call — resolve the completed-turn boundary from the session
+                // history, then POST the fork. Blocking reply: app-core needs
+                // the child session id to create the local branch session.
+                let result = host
+                    .runtime()
+                    .block_on(fork_session_at_turn(&client, &session_id, at_user_turn));
+                match &result {
+                    Ok(child) => tracing::info!(
+                        target: "dsh-bridge::session",
+                        session_id = %session_id,
+                        child_session_id = %child,
+                        at_user_turn,
+                        "session.fork completed",
+                    ),
+                    Err(error) => tracing::warn!(
+                        target: "dsh-bridge::session",
+                        session_id = %session_id,
+                        at_user_turn,
+                        error = %error,
+                        "session.fork failed",
+                    ),
+                }
+                let _ = reply_tx.send(result);
+            }
             RuntimeCommand::Shutdown => break,
             // Config-option changes: the composer's model dropdown sends a
             // Model control change → `session.selectModel`; other controls
@@ -667,6 +696,100 @@ async fn replay_history(
     }
     sink.set_replaying(false);
     Ok(())
+}
+
+/// Fork the harness session so the child inherits everything through the end
+/// of turn `at_user_turn` (1-based, matching the harness per-session turn
+/// counter: one queued `session.prompt` = one turn; steers and out-of-band
+/// events like compaction commands do not consume turn numbers).
+///
+/// The harness fork RPC anchors on an event seq ("first `turn/end` at or after
+/// `atSeq`"), while app-core knows only the local turn ordinal — so this walks
+/// the session history (tail pages, `beforeSeq` strictly-less paging) and maps
+/// the ordinal to the `turn/end` event carrying that turn number.
+async fn fork_session_at_turn(
+    client: &crate::transport::HttpClient,
+    session_id: &SessionId,
+    at_user_turn: u64,
+) -> anyhow::Result<String> {
+    let target_seq = find_completed_turn_end_seq(client, session_id, at_user_turn).await?;
+    let payload = crate::rpc_types::SessionForkPayload {
+        session_id: session_id.clone(),
+        at_seq: Some(target_seq),
+    };
+    let value = client
+        .session_fork(Uuid::new_v4().to_string(), &payload)
+        .await
+        .map_err(|error| anyhow::anyhow!("分叉会话失败：{error}"))?;
+    Ok(value.session_id)
+}
+
+/// Walk the session history and return the seq of the `at_user_turn`-th
+/// (1-based) `turn/end` event, in ascending seq order. One queued harness
+/// prompt = one turn = one `turn/end`; steers and out-of-band events
+/// (compaction commands, projections) never produce `turn/end`, so the
+/// ordinal matches app-core's local turn count without depending on the
+/// harness `data.turn` numbering being contiguous. Errors when the turn never
+/// completed (open turn) or the ordinal is past the session's last turn.
+async fn find_completed_turn_end_seq(
+    client: &crate::transport::HttpClient,
+    session_id: &SessionId,
+    at_user_turn: u64,
+) -> anyhow::Result<u64> {
+    const HISTORY_PAGE_MESSAGES: u32 = 200;
+    /// Hard walk bound so a pathological history cannot spin the session loop
+    /// forever: 250 pages × 200 messages ≫ any real session.
+    const MAX_HISTORY_PAGES: usize = 250;
+
+    let mut before_seq: Option<u64> = None;
+    let mut turn_end_seqs: Vec<u64> = Vec::new();
+    for _ in 0..MAX_HISTORY_PAGES {
+        let payload = crate::rpc_types::SessionHistoryPayload {
+            session_id: session_id.clone(),
+            before_seq,
+            max_messages: Some(HISTORY_PAGE_MESSAGES),
+        };
+        let value = client
+            .session_history(Uuid::new_v4().to_string(), &payload)
+            .await
+            .map_err(|error| anyhow::anyhow!("分叉会话失败：读取会话历史失败：{error}"))?;
+        // Pages run tail → head; events arrive ascending within a page. The
+        // T-th boundary is only known once the whole log is walked, so just
+        // collect and sort at the end.
+        let mut oldest_seq: Option<u64> = None;
+        for entry in &value.events {
+            let Ok(event) = serde_json::from_value::<crate::frame::SessionEvent>(entry.event.clone())
+            else {
+                continue;
+            };
+            oldest_seq = Some(oldest_seq.map_or(event.seq, |min| min.min(event.seq)));
+            if event.type_tag == "turn/end" {
+                turn_end_seqs.push(event.seq);
+            }
+        }
+        if !value.has_more {
+            break;
+        }
+        // `has_more` implies a non-empty page whose oldest event bounds the
+        // next window; an empty page means the paging contract broke — bail
+        // instead of spinning.
+        let Some(seq) = oldest_seq else {
+            break;
+        };
+        before_seq = Some(seq);
+    }
+    turn_end_seqs.sort_unstable();
+    if at_user_turn == 0 {
+        return Err(anyhow::anyhow!("无法分叉：无效的轮次序号"));
+    }
+    turn_end_seqs
+        .get((at_user_turn - 1) as usize)
+        .copied()
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "无法分叉：第 {at_user_turn} 轮尚未完成（或该消息所在轮次不存在）"
+            )
+        })
 }
 
 /// The slash commands kodex can execute on behalf of a harness session. The

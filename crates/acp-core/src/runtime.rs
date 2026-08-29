@@ -74,6 +74,15 @@ pub enum RuntimeCommand {
     ForceCompact {
         reply_tx: mpsc::Sender<anyhow::Result<()>>,
     },
+    /// Fork the conversation from a completed turn (`从这里创建聊天分支`).
+    /// `at_user_turn` is the 1-based ordinal of the turn to keep through — the
+    /// backend cuts the agent-side history at the end of that turn and returns
+    /// the child agent-side session id. The caller (app-core) then creates the
+    /// local session row and switches to it.
+    ForkSession {
+        at_user_turn: u64,
+        reply_tx: mpsc::Sender<anyhow::Result<String>>,
+    },
     Shutdown,
 }
 

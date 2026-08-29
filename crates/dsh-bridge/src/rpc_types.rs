@@ -196,6 +196,25 @@ pub struct SessionCreateValue {
     pub agent_preset: Option<String>,
 }
 
+/// `session.fork` request (`{ sessionId, atSeq? }`). The harness cuts the seed
+/// at the first `turn/end` event with `seq >= atSeq`; an omitted `atSeq` keeps
+/// the last completed turn. Anchoring inside an open turn is rejected by the
+/// host with `fork-unavailable`.
+#[derive(Debug, Clone, Serialize)]
+pub struct SessionForkPayload {
+    #[serde(rename = "sessionId")]
+    pub session_id: SessionId,
+    #[serde(skip_serializing_if = "Option::is_none", rename = "atSeq")]
+    pub at_seq: Option<u64>,
+}
+
+/// `session.fork` response value — the child (forked) session id.
+#[derive(Debug, Clone, Deserialize)]
+pub struct SessionForkValue {
+    #[serde(rename = "sessionId")]
+    pub session_id: SessionId,
+}
+
 /// `agentPreset.list` request payload (empty object).
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct AgentPresetListPayload {}
@@ -314,7 +333,7 @@ pub struct SessionHistoryPayload {
 pub struct SessionHistoryValue {
     #[serde(default)]
     pub events: Vec<HistoryEntryRaw>,
-    #[serde(default)]
+    #[serde(default, rename = "hasMore")]
     pub has_more: bool,
 }
 

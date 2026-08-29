@@ -315,3 +315,147 @@ async fn new_session_create_carries_configured_preset() {
     let _ = _command_tx.send(RuntimeCommand::Shutdown);
     let _ = worker.join();
 }
+
+/// History with three completed turns plus out-of-band compaction events
+/// (turn: null) that must never count as turns for the fork boundary walk.
+fn fork_history_events() -> Vec<serde_json::Value> {
+    use common::history_event;
+    vec![
+        history_event(1, "turn/start", serde_json::json!({ "turn": 1 })),
+        history_event(10, "turn/end", serde_json::json!({ "turn": 1, "reason": { "kind": "completed" } })),
+        history_event(11, "turn/start", serde_json::json!({ "turn": 2 })),
+        history_event(20, "turn/end", serde_json::json!({ "turn": 2, "reason": { "kind": "completed" } })),
+        history_event(21, "turn/start", serde_json::json!({ "turn": 3 })),
+        history_event(30, "turn/end", serde_json::json!({ "turn": 3, "reason": { "kind": "completed" } })),
+        history_event(
+            31,
+            "compaction/start",
+            serde_json::json!({ "compactionId": "c1", "turn": null }),
+        ),
+        history_event(
+            32,
+            "compaction/end",
+            serde_json::json!({ "compactionId": "c1", "turn": null }),
+        ),
+    ]
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn fork_session_command_cuts_at_nth_completed_turn() {
+    // ForkSession walks the session history for the Nth completed turn and
+    // anchors the harness `session.fork` atSeq on that turn's `turn/end` —
+    // the harness then seeds the child with everything through that turn.
+    let mut config_mock = default_config();
+    config_mock.history_events = fork_history_events();
+    let mock = MockHarness::start(config_mock).await;
+    let registry = Arc::new(HarnessHostRegistry::new());
+
+    let (tx, _rx) = mpsc::channel::<ClientEvent>();
+    let (command_tx, command_rx) = mpsc::channel();
+    let config = config_for(mock.endpoint());
+
+    let worker_registry = registry.clone();
+    let worker = thread::spawn(move || {
+        dsh_bridge::run_harness_session(
+            worker_registry,
+            config,
+            tx,
+            command_rx,
+            PermissionBroker::default(),
+            ShutdownSignal::default(),
+        )
+    });
+
+    // Wait for the session to boot (session.create recorded).
+    let start = std::time::Instant::now();
+    while start.elapsed() < Duration::from_secs(5) && mock.creates().is_empty() {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+
+    let (fork_reply_tx, fork_reply_rx) = mpsc::channel();
+    command_tx
+        .send(RuntimeCommand::ForkSession {
+            at_user_turn: 2,
+            reply_tx: fork_reply_tx,
+        })
+        .unwrap();
+    let child = fork_reply_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("ForkSession reply timed out")
+        .expect("fork must succeed");
+    assert_eq!(child, "s-fork", "mock answers the fork child session id");
+
+    let forks = mock.forks();
+    assert_eq!(forks.len(), 1, "exactly one session.fork call: {forks:?}");
+    assert_eq!(
+        forks[0].get("sessionId").and_then(|v| v.as_str()),
+        Some("s-1"),
+        "fork must target the source session: {forks:?}"
+    );
+    assert_eq!(
+        forks[0].get("atSeq").and_then(|v| v.as_u64()),
+        Some(20),
+        "atSeq must anchor on the 2nd turn/end: {forks:?}"
+    );
+
+    let _ = command_tx.send(RuntimeCommand::Shutdown);
+    let _ = worker.join();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn fork_session_command_rejects_uncompleted_turn() {
+    // Only two completed turns exist; forking "from" the third (an open turn
+    // or a nonexistent ordinal) must fail with a user-facing error and never
+    // reach the harness fork RPC.
+    let mut config_mock = default_config();
+    config_mock.history_events = fork_history_events();
+    // Keep only the first two turn/ends: drop the third turn's events and the
+    // out-of-band ones.
+    config_mock.history_events.truncate(4);
+    let mock = MockHarness::start(config_mock).await;
+    let registry = Arc::new(HarnessHostRegistry::new());
+
+    let (tx, _rx) = mpsc::channel::<ClientEvent>();
+    let (command_tx, command_rx) = mpsc::channel();
+    let config = config_for(mock.endpoint());
+
+    let worker_registry = registry.clone();
+    let worker = thread::spawn(move || {
+        dsh_bridge::run_harness_session(
+            worker_registry,
+            config,
+            tx,
+            command_rx,
+            PermissionBroker::default(),
+            ShutdownSignal::default(),
+        )
+    });
+
+    let start = std::time::Instant::now();
+    while start.elapsed() < Duration::from_secs(5) && mock.creates().is_empty() {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+
+    let (fork_reply_tx, fork_reply_rx) = mpsc::channel();
+    command_tx
+        .send(RuntimeCommand::ForkSession {
+            at_user_turn: 3,
+            reply_tx: fork_reply_tx,
+        })
+        .unwrap();
+    let err = fork_reply_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("ForkSession reply timed out")
+        .expect_err("forking an uncompleted turn must fail");
+    assert!(
+        err.to_string().contains("尚未完成"),
+        "error must explain the turn is not finished: {err}"
+    );
+    assert!(
+        mock.forks().is_empty(),
+        "a failed boundary lookup must not call session.fork"
+    );
+
+    let _ = command_tx.send(RuntimeCommand::Shutdown);
+    let _ = worker.join();
+}

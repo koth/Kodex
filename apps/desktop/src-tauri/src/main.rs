@@ -138,6 +138,8 @@ fn main() {
             commands::session::session_list_archived,
             commands::session::session_switch,
             commands::session::session_create,
+            commands::session::session_fork,
+            commands::session::session_fork_candidates,
             commands::session::session_delete,
             commands::session::session_archive,
             commands::session::session_unarchive,

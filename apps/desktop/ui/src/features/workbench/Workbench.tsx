@@ -4,13 +4,15 @@ import type { UiSnapshot, AppTheme, ToolInvocation, PermissionInputResponse, Wor
 import {
   startupPerfMark,
   sessionCancel,
+  sessionFork,
   sessionResolvePermission,
   sessionRetryUserMessage,
   sessionStopTool,
   sessionUnarchive,
   settingsGetAgentSnapshot,
+  type SessionForkMode,
 } from "../../lib/tauri";
-import { ConversationTimeline, type TimelineTurnChangeSet } from "../conversation/ConversationTimeline";
+import { ConversationTimeline, conversationForkCapability, type TimelineTurnChangeSet } from "../conversation/ConversationTimeline";
 import { Composer, type ComposerReferenceRequest } from "../composer/Composer";
 import {
   AgentPlanPanel,
@@ -603,6 +605,26 @@ export function Workbench() {
     await sessionRetryUserMessage(messageId, text);
     await pollState();
   }, [pollState]);
+
+  const handleForkConversation = useCallback(
+    async (messageId: string, mode: SessionForkMode) => {
+      // 后端创建分支会话并切换（工作树分支还会切换活动工作区）；
+      // 成功后拉一次快照渲染新分支，并刷新侧边栏会话列表。
+      await sessionFork(messageId, mode);
+      await pollState();
+      setSessionListRefreshToken((value) => value + 1);
+    },
+    [pollState],
+  );
+
+  // 分叉能力按后端门控：dsh（harness session.fork）与 codex（ACP session/fork）
+  // 支持；其余 agent 暂不开放。新工作树分支要求 agent 支持 fork 时换 cwd ——
+  // 目前仅 codex 支持（harness 会话目录不可变）。session.agent_cli 存的可能是
+  // serde id（"deepseek-harness"）也可能是显示标签（"DeepSeek Harness"），
+  // conversationForkCapability 统一归一化判断（有单测覆盖两种存法）。
+  const conversationForkCapabilityValue = conversationForkCapability(snapshot?.session.agent_cli);
+  const forkSupported = conversationForkCapabilityValue.forkSupported;
+  const forkWorktreeSupported = conversationForkCapabilityValue.worktreeSupported;
 
   const handleCancelTurn = useCallback(async () => {
     if (cancellingTurn) return;
@@ -1352,6 +1374,8 @@ export function Workbench() {
                       onStopTool={handleStopTool}
                       onFilePathClick={handleSearchFileOpen}
                       onLoadOlderHistory={loadOlderHistory}
+                      onForkConversation={forkSupported ? handleForkConversation : undefined}
+                      forkWorktreeSupported={forkWorktreeSupported}
                     />
                   </>
                 ) : (

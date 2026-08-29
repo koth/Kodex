@@ -21,9 +21,9 @@ use std::time::Duration;
 use crate::rpc_types::{
     ClientRequest, ClientResponse, HostDescribePayload, HostDescribeValue, RpcId, RpcReceipt,
     ServerRequest, ServerResponse, SessionCancelPayload, SessionCancelValue, SessionCreatePayload,
-    SessionCreateValue, SessionHistoryPayload, SessionHistoryValue, SessionListPayload,
-    SessionListValue, SessionModelsPayload, SessionPromptPayload, SessionPromptValue,
-    SessionSelectModelPayload,
+    SessionCreateValue, SessionForkPayload, SessionForkValue, SessionHistoryPayload,
+    SessionHistoryValue, SessionListPayload, SessionListValue, SessionModelsPayload,
+    SessionPromptPayload, SessionPromptValue, SessionSelectModelPayload,
 };
 
 /// Default timeout for bounded control calls (a hung host must not leave the
@@ -192,6 +192,18 @@ impl HttpClient {
         payload: &SessionCreatePayload,
     ) -> anyhow::Result<SessionCreateValue> {
         self.call("session.create", rpc_id, payload).await
+    }
+
+    /// Fork a session from a completed-turn prefix (`session.fork`). Returns
+    /// the child session id; the child inherits the source's cwd, composition,
+    /// and seeded history. A fork is a fast control-plane call (no LLM work),
+    /// so the default bounded timeout applies.
+    pub async fn session_fork(
+        &self,
+        rpc_id: RpcId,
+        payload: &SessionForkPayload,
+    ) -> anyhow::Result<SessionForkValue> {
+        self.call("session.fork", rpc_id, payload).await
     }
 
     pub async fn session_prompt(

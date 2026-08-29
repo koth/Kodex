@@ -130,6 +130,8 @@ struct MockState {
     pub calls: Vec<(String, String)>,
     /// `session.create` payloads received, in order.
     pub creates: Vec<Value>,
+    /// `session.fork` payloads received, in order.
+    pub forks: Vec<Value>,
     /// `respond` payloads received (approval/question answers).
     pub responds: Vec<Value>,
     /// `agentPreset.select` preset ids received, in order.
@@ -202,6 +204,11 @@ impl MockHarness {
     /// Payloads of the `session.create` calls received, in order.
     pub fn creates(&self) -> Vec<Value> {
         self.state.lock().unwrap().creates.clone()
+    }
+
+    /// Payloads of the `session.fork` calls received, in order.
+    pub fn forks(&self) -> Vec<Value> {
+        self.state.lock().unwrap().forks.clone()
     }
 
     pub fn responds(&self) -> Vec<Value> {
@@ -396,6 +403,10 @@ async fn handle_connection(
                 let payload = parsed.get("payload").cloned().unwrap_or(Value::Null);
                 state.lock().unwrap().creates.push(payload);
             }
+            if method_name == "session.fork" {
+                let payload = parsed.get("payload").cloned().unwrap_or(Value::Null);
+                state.lock().unwrap().forks.push(payload);
+            }
             if method_name == "session.models" {
                 // Sent by `run_harness_session` only after the session sink is
                 // registered — used as the frame-hold barrier.
@@ -411,6 +422,7 @@ async fn handle_connection(
                 }),
                 "session.list" => serde_json::json!({ "items": [] }),
                 "session.create" => serde_json::json!({ "sessionId": "s-1" }),
+                "session.fork" => serde_json::json!({ "sessionId": "s-fork" }),
                 "session.prompt" => serde_json::json!({ "accepted": true }),
                 "session.cancel" => serde_json::json!({ "accepted": true }),
                 "session.history" => {

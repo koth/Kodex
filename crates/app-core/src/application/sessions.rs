@@ -15,6 +15,25 @@ struct PreparedSessionRuntime {
     image_capabilities: workspace_model::ImageCapabilities,
 }
 
+/// Resume overrides for [`Application::runtime_for_stored_session_with_override`].
+///
+/// The default (`Default`) keeps the stored-session heuristics. The fork
+/// branch needs both knobs flipped: its session row is intentionally empty
+/// (the transcript is rebuilt from the agent-side replay), so the
+/// "no activity → drop stale agent id" cleanup must not fire, and the replay
+/// must be applied (a normal resume already holds the transcript in SQLite
+/// and skips replayed frames to avoid duplicates).
+#[derive(Default)]
+struct RuntimeResumeOverride {
+    /// Use this agent-side session id as the resume id without the activity
+    /// check. For a fork child this is the backend session created by the
+    /// fork call moments ago.
+    force_agent_session_id: Option<String>,
+    /// Keep skip_replay off so the resume replay rebuilds (and persists) the
+    /// branch transcript into the otherwise-empty row.
+    force_replay: bool,
+}
+
 pub(super) fn prepare_web_tools_mcp(
     app_paths: &AppPaths,
     agent_command: &str,
@@ -617,6 +636,232 @@ impl Application {
         Ok(())
     }
 
+    /// Fork the conversation from a completed assistant message
+    /// ("从这里创建聊天分支"). Creates a branch session on the agent backend
+    /// seeded with the history through the end of the selected turn, mirrors it
+    /// as a local session row, and switches the visible session to the branch.
+    pub fn session_fork(
+        &mut self,
+        message_id: &str,
+        mode: workspace_model::SessionForkMode,
+    ) -> Result<workspace_model::SessionForkOutcome, String> {
+        // The fork cut lands at a completed turn; an in-flight turn cannot be
+        // forked, and the source session must be idle (the backend rejects a
+        // fork anchored inside an open turn anyway — fail with a clear message
+        // before touching the backend).
+        if self.in_flight_prompt.is_some() || self.ui.session.status != SessionStatus::Idle {
+            return Err("会话运行中无法分叉，请等当前轮次结束".into());
+        }
+        match mode {
+            workspace_model::SessionForkMode::Workspace => {}
+            workspace_model::SessionForkMode::Worktree => {
+                return Err("新工作树分叉暂未开放，请选择当前工作空间分支".into());
+            }
+        }
+        self.ensure_local_workspace_for("fork conversations")?;
+
+        let at_user_turn = self.fork_turn_ordinal_for_message(message_id)?;
+        // Backend fork → child agent-side session id (harness session id for
+        // dsh, ACP session id for codex). Blocking reply: the fork is a fast
+        // control-plane call, and the local row needs the id before it can be
+        // created. The caller holds the app mutex, but the fork must finish
+        // first — same trade as `session_switch`'s resume handshake.
+        let child_agent_session_id = self
+            .session
+            .fork_session(at_user_turn)
+            .map_err(|error| error.to_string())?;
+
+        // Local branch row in this workspace's store. The transcript itself is
+        // NOT copied locally: the backend replays the child's seeded history
+        // on resume (dsh `session.history` replay / ACP `session/load`), which
+        // rebuilds the UI and repopulates the child's rows.
+        let child_id = uuid::Uuid::new_v4();
+        let source_session_id = self.ui.session.id.to_string();
+        let (source_model, source_provider, source_mode) = self
+            .store
+            .get_session_model_provider_mode(&source_session_id)
+            .map_err(|e| e.to_string())?
+            .unwrap_or_else(|| {
+                (
+                    self.ui.session.model.clone(),
+                    self.current_model_provider_for_persistence(),
+                    self.ui.session.mode.clone(),
+                )
+            });
+        self.store
+            .create_session(&child_id.to_string(), &source_model)
+            .map_err(|e| e.to_string())?;
+        let child_title = if self.ui.session.title.trim().is_empty() {
+            "分叉会话".to_string()
+        } else {
+            format!("{} · 分支", self.ui.session.title.trim())
+        };
+        let _ = self
+            .store
+            .update_session_title(&child_id.to_string(), &child_title);
+        let _ = self
+            .store
+            .update_acp_session_id(&child_id.to_string(), &child_agent_session_id);
+        let _ = self.store.update_session_model_mode_provider(
+            &child_id.to_string(),
+            &source_model,
+            source_provider.as_deref(),
+            source_mode.as_deref(),
+        );
+        if let Some(preset) = self
+            .store
+            .get_session_agent_preset(&source_session_id)
+            .ok()
+            .flatten()
+        {
+            let _ = self
+                .store
+                .update_session_agent_preset(&child_id.to_string(), Some(&preset));
+        }
+        if let Some(agent_cli) = self.ui.session.agent_cli.clone() {
+            let _ = self
+                .store
+                .update_session_agent_cli(&child_id.to_string(), &agent_cli);
+        }
+
+        // Install the branch as the visible session via the stored-session
+        // resume path; the old visible session parks as a background runtime.
+        // Overrides: the child row is empty by design, so (1) resume the
+        // backend fork session explicitly — the activity-gated lookup would
+        // otherwise clear the id and the branch would boot as a blank session
+        // with no context — and (2) keep the replay applied so the harness/ACP
+        // history rebuilds and persists the branch transcript.
+        let runtime = self.runtime_for_stored_session_with_override(
+            &child_id.to_string(),
+            RuntimeResumeOverride {
+                force_agent_session_id: Some(child_agent_session_id.clone()),
+                force_replay: true,
+            },
+        )?;
+        let background_runtime = self.install_runtime_as_visible(runtime);
+        self.runtime_registry.insert(background_runtime);
+        self.bump_revision();
+        self.broadcast_ui_updated();
+
+        Ok(workspace_model::SessionForkOutcome {
+            session_id: child_id,
+            workspace_root: None,
+            worktree_branch: None,
+        })
+    }
+
+    /// Resolve the 1-based fork-turn ordinal for a message: the ordinal of the
+    /// turn containing it, counted by turn-opening user messages. Steers join
+    /// the current turn and `/compact` intercepts never start a turn (mirrors
+    /// the frontend retry heuristic), so both are excluded from the count —
+    /// keeping the ordinal aligned with the backend's completed-turn count.
+    ///
+    /// Walks the session's FULL persisted history: the visible UI only holds a
+    /// tail window on long sessions, and the fork picker must be able to anchor
+    /// on any turn.
+    pub(super) fn fork_turn_ordinal_for_message(
+        &self,
+        message_id: &str,
+    ) -> Result<u64, String> {
+        let session_id = self.ui.session.id.to_string();
+        let messages = self
+            .store
+            .load_session_messages(&session_id)
+            .map_err(|e| e.to_string())?;
+        let mut turn_ordinal: u64 = 0;
+        let mut target_turn: Option<u64> = None;
+        for message in &messages {
+            let is_target = message.id.to_string() == message_id;
+            match message.role {
+                workspace_model::MessageRole::User => {
+                    let is_turn_opening =
+                        !message.is_steer && !message.body.trim().eq_ignore_ascii_case("/compact");
+                    if is_turn_opening {
+                        turn_ordinal += 1;
+                    }
+                    if is_target {
+                        // A turn-opening prompt forks through its own turn; a
+                        // steer or /compact joins the current turn.
+                        target_turn = Some(turn_ordinal);
+                    }
+                }
+                workspace_model::MessageRole::Assistant | workspace_model::MessageRole::System => {
+                    if is_target {
+                        target_turn = Some(turn_ordinal);
+                    }
+                }
+            }
+            if target_turn.is_some() {
+                break;
+            }
+        }
+        match target_turn {
+            Some(turn) if turn >= 1 => Ok(turn),
+            Some(_) => Err("无法分叉：该消息之前还没有已完成的对话轮次".into()),
+            None => Err("无法分叉：未找到该消息".into()),
+        }
+    }
+
+    /// Branch points for the fork picker: every completed turn of the session,
+    /// built from the FULL persisted history (the UI window may hide older
+    /// turns). Each candidate anchors on the turn's opening user prompt —
+    /// forking from it keeps turns 1..N.
+    pub fn session_fork_candidates(
+        &self,
+    ) -> Result<Vec<workspace_model::SessionForkCandidate>, String> {
+        let session_id = self.ui.session.id.to_string();
+        let messages = self
+            .store
+            .load_session_messages(&session_id)
+            .map_err(|e| e.to_string())?;
+
+        const EXCERPT_CHARS: usize = 160;
+        fn excerpt(text: &str) -> String {
+            let trimmed: String = text
+                .lines()
+                .map(str::trim)
+                .filter(|line| !line.is_empty())
+                .collect::<Vec<_>>()
+                .join(" ");
+            let mut owned = trimmed;
+            if owned.chars().count() > EXCERPT_CHARS {
+                owned = owned.chars().take(EXCERPT_CHARS).collect::<String>() + "…";
+            }
+            owned
+        }
+
+        let mut candidates: Vec<workspace_model::SessionForkCandidate> = Vec::new();
+        for message in &messages {
+            match message.role {
+                workspace_model::MessageRole::User => {
+                    let is_turn_opening = !message.is_steer
+                        && !message.body.trim().eq_ignore_ascii_case("/compact")
+                        && !message.body.trim().is_empty();
+                    if is_turn_opening {
+                        candidates.push(workspace_model::SessionForkCandidate {
+                            turn_ordinal: candidates.len() as u64 + 1,
+                            user_message_id: message.id,
+                            user_excerpt: excerpt(&message.body),
+                            reply_excerpt: String::new(),
+                        });
+                    }
+                }
+                workspace_model::MessageRole::Assistant => {
+                    if message.body.trim().is_empty() {
+                        continue;
+                    }
+                    // The turn's latest non-empty reply previews the outcome of
+                    // forking through it.
+                    if let Some(last) = candidates.last_mut() {
+                        last.reply_excerpt = excerpt(&message.body);
+                    }
+                }
+                workspace_model::MessageRole::System => {}
+            }
+        }
+        Ok(candidates)
+    }
+
     pub fn session_delete(&mut self, id: &str) -> Result<(), String> {
         if self.ui.session.id.to_string() == id {
             let replacement_id = self
@@ -774,6 +1019,17 @@ impl Application {
     }
 
     fn runtime_for_stored_session(&mut self, id: &str) -> Result<SessionRuntime, String> {
+        self.runtime_for_stored_session_with_override(id, RuntimeResumeOverride::default())
+    }
+
+    /// Stored-session runtime install with resume overrides — see
+    /// [`RuntimeResumeOverride`]. Used by `session_fork` to resume the freshly
+    /// forked backend session and let its replay rebuild the empty branch row.
+    fn runtime_for_stored_session_with_override(
+        &mut self,
+        id: &str,
+        resume_override: RuntimeResumeOverride,
+    ) -> Result<SessionRuntime, String> {
         // Windowed history load: only the most recent entries are
         // materialized; older history pages in on demand. Keeps long sessions
         // from loading their entire message/tool history into memory.
@@ -826,8 +1082,19 @@ impl Application {
         } else {
             self.agent_command.clone()
         };
-        let resume_acp_id = self.resume_acp_session_id_for_stored_session(id);
+        // A fork child row is empty by design — the fork's backend session id
+        // is authoritative even without local activity, so it bypasses the
+        // activity-gated lookup (which would clear it and drop the context).
+        let resume_acp_id = match &resume_override.force_agent_session_id {
+            Some(forced) => Some(forced.clone()),
+            None => self.resume_acp_session_id_for_stored_session(id),
+        };
         let has_resume_id = resume_acp_id.is_some();
+        // The replay is skipped only when the transcript is already restored
+        // from SQLite. The fork child's row is empty — its replay IS the
+        // transcript — so force_replay keeps skip_replay off and lets the
+        // replayed frames rebuild (and persist) the branch history.
+        let skip_replay = has_resume_id && !resume_override.force_replay;
         // Restore the session's own persisted preset so a switch/resume does
         // not fall back to the global default (which can conflict with the
         // session's fixed preset and cause dsh to reject the resume).
@@ -955,7 +1222,7 @@ impl Application {
             needs_title,
             agent_title_received: false,
             provisional_prompt_title: None,
-            skip_replay: has_resume_id,
+            skip_replay,
             pending_model_restore,
             authoritative_model_selection: None,
             file_tracker: FileChangeTracker::new(&self.ui.workspace.root),

@@ -2,6 +2,8 @@ import { Fragment, useRef, useEffect, useLayoutEffect, useMemo, useState, useCal
 import type { FormEvent } from "react";
 import { createPortal } from "react-dom";
 import { convertFileSrc, isTauri } from "@tauri-apps/api/core";
+import { GitFork } from "lucide-react";
+import { resolveAgentKind } from "../session/AgentIcon";
 import type { FileChangeSummary, MessageRole } from "../../types";
 import type { UiSnapshot } from "../../types";
 import { ChangesBar } from "../changes/ChangesBar";
@@ -13,6 +15,7 @@ import {
   subscribeStreamingMessage,
 } from "./streaming-message-store";
 import "./ConversationTimeline.css";
+import { ForkDialog } from "./ForkDialog";
 import { useProxyRetry, proxyRetryReasonLabel } from "./useProxyRetry";
 
 /** Workspace root for resolving relative file paths inside markdown messages.
@@ -58,6 +61,33 @@ function forceScrollToBottom(element: HTMLElement | null) {
   element.scrollTop = element.scrollHeight;
 }
 
+/** How a forked branch is hosted. `workspace` continues in the current
+ *  workspace; `worktree` continues in a fresh git worktree (agent must
+ *  support re-rooting — gated by `forkWorktreeSupported`). */
+export type ConversationForkMode = "workspace" | "worktree";
+
+export interface ConversationForkCapability {
+  forkSupported: boolean;
+  worktreeSupported: boolean;
+}
+
+/** Fork availability for a session's agent. `agentCli` may carry either the
+ *  serde id (`"deepseek-harness"`) or the display label (`"DeepSeek Harness"`)
+ *  depending on when the session row was written — normalize through the same
+ *  matcher the sidebar agent icons use. dsh forks via the harness
+ *  `session.fork` RPC; codex via ACP `session/fork`. Worktree forks need the
+ *  agent to support re-rooting (harness session cwd is immutable), so only
+ *  codex gets that option. */
+export function conversationForkCapability(
+  agentCli?: string | null,
+): ConversationForkCapability {
+  const kind = resolveAgentKind(agentCli ?? null);
+  return {
+    forkSupported: kind === "deepseek" || kind === "codex",
+    worktreeSupported: kind === "codex",
+  };
+}
+
 interface Props {
   snapshot: UiSnapshot;
   onPermissionSelect: (requestId: string, optionId: string | null, guidance?: string | null) => void;
@@ -71,6 +101,12 @@ interface Props {
   onFilePathClick?: (filePath: string, lineNumber?: number) => void;
   /** Page older history from the backend when the local window is exhausted. */
   onLoadOlderHistory?: (limit?: number) => Promise<boolean>;
+  /** Fork the conversation from a completed assistant message. Absent → the
+   *  fork affordance is hidden entirely (agent backend without fork support). */
+  onForkConversation?: (messageId: string, mode: ConversationForkMode) => Promise<void> | void;
+  /** Whether the "new worktree" fork destination is supported by the active
+   *  agent backend; only gates the menu item's enabled state. */
+  forkWorktreeSupported?: boolean;
 }
 
 export interface TimelineTurnChangeSet {
@@ -87,10 +123,14 @@ interface MessageRowProps {
   streaming: boolean;
   isSteer?: boolean;
   retryable?: boolean;
-  copyable?: boolean;
   onRetry?: (messageId: string, text: string) => Promise<void> | void;
   onFilePathClick?: (filePath: string, lineNumber?: number) => void;
   candidatePaths?: string[];
+  /** Copy/fork actions live only under the latest assistant reply — earlier
+   *  replies render bare (the trailing icon rows were just noise). */
+  showActions?: boolean;
+  /** Open the fork point picker anchored on this message's turn. */
+  onForkOpen?: (messageId: string) => void;
 }
 
 interface StreamingMarkdownProps {
@@ -366,10 +406,11 @@ const MessageRow = memo(function MessageRow({
   streaming,
   isSteer = false,
   retryable = false,
-  copyable = false,
   onRetry,
   onFilePathClick,
   candidatePaths,
+  showActions = false,
+  onForkOpen,
 }: MessageRowProps) {
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(body);
@@ -518,7 +559,7 @@ const MessageRow = memo(function MessageRow({
 
   if (role === "Assistant") {
     return (
-      <div key={id} className="msg msg-assistant">
+      <div key={id} className="msg msg-assistant" data-message-id={id}>
         <span className="msg-prefix msg-prefix-assistant">{"\u2022"} </span>
         <div className="msg-content msg-content-assistant">
           {streaming ? (
@@ -535,15 +576,27 @@ const MessageRow = memo(function MessageRow({
           )}
           {streaming && <span className="streaming-cursor" />}
         </div>
-        {copyable && !streaming && (
+        {!streaming && showActions && (
           <div className="msg-assistant-actions">
             <CopyTextButton
               text={repairCompactMarkdown(body)}
-              label="复制为 Markdown"
+              label="复制回复文本"
               copiedLabel="已复制"
               className="msg-copy-btn"
               copiedClassName="msg-copy-btn-copied"
             />
+            {onForkOpen && (
+              <button
+                type="button"
+                className="msg-copy-btn msg-fork-btn"
+                aria-label="分叉对话"
+                title="分叉对话"
+                aria-haspopup="dialog"
+                onClick={() => onForkOpen(id)}
+              >
+                <GitFork size={14} strokeWidth={2.1} aria-hidden="true" />
+              </button>
+            )}
           </div>
         )}
         {previewImage && createPortal(
@@ -903,7 +956,12 @@ export function ConversationTimeline({
   onStopTool,
   onFilePathClick,
   onLoadOlderHistory,
+  onForkConversation,
+  forkWorktreeSupported = false,
 }: Props) {
+  // 分叉点选择器（从这里创建聊天分支）：记录触发分叉按钮的消息 id，
+  // 打开时预选该消息所在轮次。
+  const [forkPickerMessageId, setForkPickerMessageId] = useState<string | null>(null);
   // Remote workspaces store a synthetic ssh:// key in workspace.root. File
   // link resolution/open needs the real remote filesystem root instead.
   visibleWorkspaceRoot =
@@ -1329,6 +1387,42 @@ export function ConversationTimeline({
     return map;
   }, [snapshot.messages, visibleMessageIds]);
 
+  // 复制/分叉操作行锚定在**每轮对话的收尾回复**下方（每轮一个，而不是每条
+  // 助手消息一个）：以轮次开头的用户消息（非 steer、非 /compact 拦截）为界，
+  // 该轮内最后一条非空助手回复获得操作行。即便轮次以工具调用收尾，操作行
+  // 仍锚在该轮最后的回复上。
+  // 退化兜底：若时间线里完全没有轮次开头的用户消息（旧版分叉子会话在
+  // user/message 回放修复之前重建，转录只有助手回复），则每条非空助手
+  // 回复各自成为锚点，操作行保持可达。
+  const turnFinalAssistantMessageIds = useMemo(() => {
+    const anchors = new Set<string>();
+    const assistantIds = new Set<string>();
+    let sawTurnOpening = false;
+    let currentAnchor: string | null = null;
+    for (const item of snapshot.timeline) {
+      if (typeof item !== "object" || !("Message" in item)) continue;
+      const message = allMessagesById.get(item.Message);
+      if (!message) continue;
+      if (message.role === "User") {
+        const isTurnOpening =
+          !message.is_steer && message.body.trim().toLowerCase() !== "/compact";
+        if (isTurnOpening) {
+          sawTurnOpening = true;
+          if (currentAnchor) anchors.add(currentAnchor);
+          currentAnchor = null;
+        }
+        continue;
+      }
+      if (message.role === "Assistant" && message.body.trim().length > 0) {
+        assistantIds.add(message.id);
+        currentAnchor = message.id;
+      }
+    }
+    if (currentAnchor) anchors.add(currentAnchor);
+    if (!sawTurnOpening) return assistantIds;
+    return anchors;
+  }, [snapshot.timeline, allMessagesById]);
+
   // 对话导航（左侧虚线刻度）：覆盖全部历史用户消息（不含追加指令），
   // 不限于当前可视窗口；超出窗口的轮次点击时先扩大窗口再跳转。
   // 预览文本截取用户消息首部与其后第一条助手回复的首部。
@@ -1607,12 +1701,21 @@ export function ConversationTimeline({
               streaming={isStreaming}
               isSteer={msg.is_steer}
               retryable={retryableMessages.has(msg.id)}
-              copyable={isLastMessage(i)}
               onRetry={onRetryUserMessage}
               onFilePathClick={onFilePathClick}
               candidatePaths={
                 msg.role === "Assistant"
                   ? [...(filePathCandidatePool.byMessageId.get(msg.id) ?? filePathCandidatePool.all)]
+                  : undefined
+              }
+              showActions={
+                msg.role === "Assistant" && turnFinalAssistantMessageIds.has(msg.id)
+              }
+              // 分叉只对已完成轮次开放：轮次进行中隐藏（copy 仍可用），
+              // 由后端再兜底校验一次。点击打开分叉点选择器。
+              onForkOpen={
+                onForkConversation && !(turnIsActive && msg.role === "Assistant" && isCurrentTurnMessage)
+                  ? (messageId) => setForkPickerMessageId(messageId)
                   : undefined
               }
             />
@@ -1823,8 +1926,44 @@ export function ConversationTimeline({
           )}
         </nav>
       )}
+
+      {/* 分叉点选择器：全量轮次列表 + 分叉方式（当前工作空间 / 新工作树）。 */}
+      {forkPickerMessageId && onForkConversation && (
+        <ForkDialog
+          initialMessageId={turnOpeningUserMessageIdBefore(
+            forkPickerMessageId,
+            snapshot.timeline,
+            allMessagesById,
+          )}
+          worktreeSupported={forkWorktreeSupported}
+          onFork={onForkConversation}
+          onClose={() => setForkPickerMessageId(null)}
+        />
+      )}
     </div>
   );
+}
+
+/** The turn-opening user prompt at-or-before a message: the fork picker
+ *  preselects the turn containing the clicked fork button's reply. */
+function turnOpeningUserMessageIdBefore(
+  messageId: string,
+  timeline: UiSnapshot["timeline"],
+  messagesById: Map<string, UiSnapshot["messages"][number]>,
+): string | null {
+  const index = timeline.findIndex(
+    (item) => typeof item === "object" && "Message" in item && item.Message === messageId,
+  );
+  const start = index >= 0 ? index : timeline.length - 1;
+  for (let i = start; i >= 0; i -= 1) {
+    const item = timeline[i];
+    if (typeof item !== "object" || !("Message" in item)) continue;
+    const message = messagesById.get(item.Message);
+    if (!message || message.role !== "User") continue;
+    if (message.is_steer || message.body.trim().toLowerCase() === "/compact") continue;
+    return message.id;
+  }
+  return null;
 }
 
 function shouldHidePermissionTool(

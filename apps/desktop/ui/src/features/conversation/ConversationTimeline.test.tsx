@@ -1,7 +1,8 @@
-import { afterEach, describe, it, expect, vi } from "vitest";
-import { act, cleanup, fireEvent, render, waitFor, within } from "@testing-library/react";
+import { afterEach, beforeEach, describe, it, expect, vi } from "vitest";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { clearMocks, mockConvertFileSrc } from "@tauri-apps/api/mocks";
-import { ConversationTimeline, type TimelineTurnChangeSet } from "./ConversationTimeline";
+import { sessionForkCandidates } from "../../lib/tauri";
+import { ConversationTimeline, conversationForkCapability, type TimelineTurnChangeSet } from "./ConversationTimeline";
 import {
   appendStreamingMessageDelta,
   ensureStreamingMessageBody,
@@ -13,6 +14,16 @@ import type {
   ToolInvocation,
   UiSnapshot,
 } from "../../types/index";
+
+// 分叉点选择器从后端拉取全量轮次；其余 tauri 包装保持原实现（未调用）。
+vi.mock("../../lib/tauri", async (importOriginal) => ({
+  ...(await importOriginal<Record<string, unknown>>()),
+  sessionForkCandidates: vi.fn(),
+}));
+
+beforeEach(() => {
+  vi.mocked(sessionForkCandidates).mockReset().mockResolvedValue([]);
+});
 
 afterEach(() => {
   cleanup();
@@ -815,7 +826,7 @@ describe("ThinkingIndicator", () => {
     );
 
     expect(container.querySelector(".streaming-cursor")).toBeNull();
-    const copyButton = within(container).getByRole("button", { name: "复制为 Markdown" });
+    const copyButton = within(container).getByRole("button", { name: "复制回复文本" });
 
     fireEvent.click(copyButton);
 
@@ -839,10 +850,10 @@ describe("ThinkingIndicator", () => {
       <ConversationTimeline snapshot={snapshot} onPermissionSelect={() => {}} />,
     );
 
-    expect(within(container).queryByRole("button", { name: "复制为 Markdown" })).toBeNull();
+    expect(within(container).queryByRole("button", { name: "复制回复文本" })).toBeNull();
   });
 
-  it("only shows the copy button on the final assistant message, not earlier ones", () => {
+  it("shows copy and fork actions under each turn's final assistant reply", () => {
     const snapshot = makeSnapshot({
       session: {
         id: "s-1",
@@ -853,24 +864,310 @@ describe("ThinkingIndicator", () => {
         agent_cli: null,
         status: "Idle",
       },
-      timeline: [{ Message: "msg-1" }, { Message: "msg-2" }],
+      timeline: [{ Message: "u-1" }, { Message: "a-1" }, { Message: "u-2" }, { Message: "a-2" }],
       messages: [
-        { id: "msg-1", role: "Assistant", body: "earlier conclusion" },
-        { id: "msg-2", role: "Assistant", body: "final conclusion" },
+        { id: "u-1", role: "User", body: "第一个问题" },
+        { id: "a-1", role: "Assistant", body: "第一轮的回复" },
+        { id: "u-2", role: "User", body: "第二个问题" },
+        { id: "a-2", role: "Assistant", body: "第二轮的回复" },
       ],
+    });
+
+    const { container } = render(
+      <ConversationTimeline
+        snapshot={snapshot}
+        onPermissionSelect={() => {}}
+        onForkConversation={() => {}}
+      />,
+    );
+
+    // 每轮的收尾回复各有一组操作行（共 2 组）。
+    expect(
+      within(container).queryAllByRole("button", { name: "复制回复文本" }),
+    ).toHaveLength(2);
+    expect(within(container).getAllByRole("button", { name: "分叉对话" })).toHaveLength(2);
+    for (const anchorId of ["a-1", "a-2"]) {
+      const row = container.querySelector(`[data-message-id="${anchorId}"]`);
+      expect(row?.querySelector(".msg-assistant-actions")).not.toBeNull();
+      expect(row?.querySelector(".msg-copy-btn")).not.toBeNull();
+      expect(row?.querySelector(".msg-fork-btn")).not.toBeNull();
+    }
+  });
+
+  it("keeps intermediate same-turn replies free of action rows", () => {
+    const snapshot = makeSnapshot({
+      session: { ...makeSnapshot().session, status: "Idle" },
+      timeline: [{ Message: "u-1" }, { Message: "a-1" }, { Message: "a-1b" }],
+      messages: [
+        { id: "u-1", role: "User", body: "问题" },
+        { id: "a-1", role: "Assistant", body: "第一轮的中间回复" },
+        { id: "a-1b", role: "Assistant", body: "第一轮的收尾回复" },
+      ],
+    });
+
+    const { container } = render(
+      <ConversationTimeline
+        snapshot={snapshot}
+        onPermissionSelect={() => {}}
+        onForkConversation={() => {}}
+      />,
+    );
+
+    // 同轮多条回复时只有收尾回复有操作行；中间条目即使渲染也不带按钮。
+    expect(
+      within(container).queryAllByRole("button", { name: "复制回复文本" }),
+    ).toHaveLength(1);
+    const midRow = container.querySelector('[data-message-id="a-1"]');
+    // 中间回复可能被折叠不渲染（query 为 null）——两种情况都不该有操作行。
+    expect(midRow?.querySelector(".msg-assistant-actions") ?? null).toBeNull();
+    const finalRow = container.querySelector('[data-message-id="a-1b"]');
+    expect(finalRow?.querySelector(".msg-assistant-actions")).not.toBeNull();
+  });
+
+  it("opens the fork point picker listing every turn of the session", async () => {
+    const snapshot = makeSnapshot({
+      session: { ...makeSnapshot().session, status: "Idle" },
+      timeline: [{ Message: "a-2" }],
+      messages: [{ id: "a-2", role: "Assistant", body: "done" }],
+    });
+    vi.mocked(sessionForkCandidates).mockResolvedValue([
+      {
+        turn_ordinal: 1,
+        user_message_id: "u-1",
+        user_excerpt: "第一轮的问题",
+        reply_excerpt: "第一轮的回复",
+      },
+      {
+        turn_ordinal: 2,
+        user_message_id: "u-2",
+        user_excerpt: "第二轮的问题",
+        reply_excerpt: "第二轮的回复",
+      },
+    ]);
+
+    const { container } = render(
+      <ConversationTimeline
+        snapshot={snapshot}
+        onPermissionSelect={() => {}}
+        onForkConversation={() => {}}
+        forkWorktreeSupported
+      />,
+    );
+
+    fireEvent.click(within(container).getByRole("button", { name: "分叉对话" }));
+
+    // 选择器列出全量轮次（来自后端完整历史，而非当前 UI 窗口）。
+    const dialog = await screen.findByRole("dialog", { name: "从这里创建聊天分支" });
+    await waitFor(() => {
+      expect(within(dialog).getAllByRole("option")).toHaveLength(2);
+    });
+    expect(within(dialog).getByText("第一轮的问题")).toBeTruthy();
+    expect(within(dialog).getByText("第二轮的问题")).toBeTruthy();
+    // 两种分叉方式都在底部操作区。
+    expect(within(dialog).getByRole("button", { name: "在此工作空间中创建分支" })).toBeTruthy();
+    expect(within(dialog).getByRole("button", { name: "在新工作树中创建分支" })).toBeTruthy();
+  });
+
+  it("disables fork actions in the picker until a turn is selected and gates worktree support", async () => {
+    const snapshot = makeSnapshot({
+      session: { ...makeSnapshot().session, status: "Idle" },
+      timeline: [{ Message: "a-2" }],
+      messages: [{ id: "a-2", role: "Assistant", body: "done" }],
+    });
+    vi.mocked(sessionForkCandidates).mockResolvedValue([
+      {
+        turn_ordinal: 1,
+        user_message_id: "u-1",
+        user_excerpt: "第一轮的问题",
+        reply_excerpt: "第一轮的回复",
+      },
+    ]);
+
+    const { container } = render(
+      <ConversationTimeline
+        snapshot={snapshot}
+        onPermissionSelect={() => {}}
+        onForkConversation={() => {}}
+      />,
+    );
+
+    fireEvent.click(within(container).getByRole("button", { name: "分叉对话" }));
+    const dialog = await screen.findByRole("dialog", { name: "从这里创建聊天分支" });
+    await waitFor(() => {
+      expect(within(dialog).getAllByRole("option")).toHaveLength(1);
+    });
+
+    // 未选择轮次时两个分叉动作都不可用；worktree 不支持时始终禁用。
+    const workspaceBtn = within(dialog).getByRole("button", { name: "在此工作空间中创建分支" });
+    const worktreeBtn = within(dialog).getByRole("button", { name: "在新工作树中创建分支" });
+    expect(workspaceBtn).toBeDisabled();
+    expect(worktreeBtn).toBeDisabled();
+
+    fireEvent.click(within(dialog).getByRole("option", { selected: false }));
+    expect(workspaceBtn).not.toBeDisabled();
+    expect(worktreeBtn).toBeDisabled();
+  });
+
+  it("hides the fork affordance entirely when the backend has no fork support", () => {
+    const snapshot = makeSnapshot({
+      timeline: [{ Message: "msg-1" }],
+      messages: [{ id: "msg-1", role: "Assistant", body: "done" }],
     });
 
     const { container } = render(
       <ConversationTimeline snapshot={snapshot} onPermissionSelect={() => {}} />,
     );
 
-    const copyButtons = within(container).queryAllByRole("button", {
-      name: "复制为 Markdown",
+    expect(within(container).queryByRole("button", { name: "分叉对话" })).toBeNull();
+  });
+
+  it("invokes onForkConversation with the selected turn and mode from the picker", async () => {
+    const snapshot = makeSnapshot({
+      session: { ...makeSnapshot().session, status: "Idle" },
+      timeline: [{ Message: "a-2" }],
+      messages: [{ id: "a-2", role: "Assistant", body: "done" }],
     });
-    expect(copyButtons).toHaveLength(1);
-    const assistantRows = container.querySelectorAll(".msg-assistant");
-    expect(assistantRows[1]?.contains(copyButtons[0])).toBe(true);
-    expect(assistantRows[0]?.contains(copyButtons[0])).toBe(false);
+    const handleFork = vi.fn().mockResolvedValue(undefined);
+    vi.mocked(sessionForkCandidates).mockResolvedValue([
+      {
+        turn_ordinal: 1,
+        user_message_id: "u-1",
+        user_excerpt: "第一轮的问题",
+        reply_excerpt: "第一轮的回复",
+      },
+    ]);
+
+    const { container } = render(
+      <ConversationTimeline
+        snapshot={snapshot}
+        onPermissionSelect={() => {}}
+        onForkConversation={handleFork}
+        forkWorktreeSupported
+      />,
+    );
+
+    fireEvent.click(within(container).getByRole("button", { name: "分叉对话" }));
+    const dialog = await screen.findByRole("dialog", { name: "从这里创建聊天分支" });
+    await waitFor(() => {
+      expect(within(dialog).getAllByRole("option")).toHaveLength(1);
+    });
+
+    fireEvent.click(within(dialog).getByRole("option"));
+    fireEvent.click(within(dialog).getByRole("button", { name: "在此工作空间中创建分支" }));
+    await waitFor(() => {
+      expect(handleFork).toHaveBeenCalledWith("u-1", "workspace");
+    });
+
+    // 成功后选择器关闭；重新打开并选择工作树分支。
+    await waitFor(() => {
+      expect(screen.queryByRole("dialog", { name: "从这里创建聊天分支" })).toBeNull();
+    });
+    fireEvent.click(within(container).getByRole("button", { name: "分叉对话" }));
+    const reopened = await screen.findByRole("dialog", { name: "从这里创建聊天分支" });
+    await waitFor(() => {
+      expect(within(reopened).getAllByRole("option")).toHaveLength(1);
+    });
+    fireEvent.click(within(reopened).getByRole("option"));
+    fireEvent.click(within(reopened).getByRole("button", { name: "在新工作树中创建分支" }));
+    await waitFor(() => {
+      expect(handleFork).toHaveBeenCalledWith("u-1", "worktree");
+    });
+  });
+
+  it("keeps the fork picker open and shows the error when the fork fails", async () => {
+    const snapshot = makeSnapshot({
+      session: { ...makeSnapshot().session, status: "Idle" },
+      timeline: [{ Message: "a-2" }],
+      messages: [{ id: "a-2", role: "Assistant", body: "done" }],
+    });
+    const handleFork = vi.fn().mockRejectedValue(new Error("分叉失败：会话未完成"));
+    vi.mocked(sessionForkCandidates).mockResolvedValue([
+      {
+        turn_ordinal: 1,
+        user_message_id: "u-1",
+        user_excerpt: "第一轮的问题",
+        reply_excerpt: "第一轮的回复",
+      },
+    ]);
+
+    const { container } = render(
+      <ConversationTimeline
+        snapshot={snapshot}
+        onPermissionSelect={() => {}}
+        onForkConversation={handleFork}
+      />,
+    );
+
+    fireEvent.click(within(container).getByRole("button", { name: "分叉对话" }));
+    const dialog = await screen.findByRole("dialog", { name: "从这里创建聊天分支" });
+    await waitFor(() => {
+      expect(within(dialog).getAllByRole("option")).toHaveLength(1);
+    });
+
+    fireEvent.click(within(dialog).getByRole("option"));
+    fireEvent.click(within(dialog).getByRole("button", { name: "在此工作空间中创建分支" }));
+
+    const alert = await within(dialog).findByRole("alert");
+    expect(alert.textContent).toContain("分叉失败：会话未完成");
+    // 失败后选择器保持打开，可重试。
+    expect(screen.getByRole("dialog", { name: "从这里创建聊天分支" })).toBeTruthy();
+  });
+
+  it("anchors every assistant reply when the transcript has no user prompts", () => {
+    // 退化转录：旧版分叉子会话在 user/message 回放修复之前重建，本地只有
+    // 助手回复。此时每条非空助手回复各自成为操作行锚点，保持按钮可达。
+    const snapshot = makeSnapshot({
+      session: { ...makeSnapshot().session, status: "Idle" },
+      timeline: [{ Message: "a-1" }, { Message: "a-2" }, { Message: "a-3" }],
+      messages: [
+        { id: "a-1", role: "Assistant", body: "第一段回复" },
+        { id: "a-2", role: "Assistant", body: "第二段回复" },
+        { id: "a-3", role: "Assistant", body: "第三段回复" },
+      ],
+    });
+
+    const { container } = render(
+      <ConversationTimeline
+        snapshot={snapshot}
+        onPermissionSelect={() => {}}
+        onForkConversation={() => {}}
+      />,
+    );
+
+    expect(
+      within(container).queryAllByRole("button", { name: "复制回复文本" }),
+    ).toHaveLength(3);
+    expect(within(container).getAllByRole("button", { name: "分叉对话" })).toHaveLength(3);
+    for (const anchorId of ["a-1", "a-2", "a-3"]) {
+      const row = container.querySelector(`[data-message-id="${anchorId}"]`);
+      expect(row?.querySelector(".msg-assistant-actions")).not.toBeNull();
+    }
+  });
+
+  it("gates fork capability by agent, accepting both serde ids and display labels", () => {
+    // 后端在会话行里可能存 serde id 也可能存显示标签（历史行），两种都要识别。
+    expect(conversationForkCapability("deepseek-harness")).toEqual({
+      forkSupported: true,
+      worktreeSupported: false,
+    });
+    expect(conversationForkCapability("DeepSeek Harness")).toEqual({
+      forkSupported: true,
+      worktreeSupported: false,
+    });
+    expect(conversationForkCapability("codex-acp")).toEqual({
+      forkSupported: true,
+      worktreeSupported: true,
+    });
+    expect(conversationForkCapability("Codex")).toEqual({
+      forkSupported: true,
+      worktreeSupported: true,
+    });
+    // 其余后端（claude / codebuddy / goose / 未知 / 空）不显示分叉。
+    expect(conversationForkCapability("claude-agent-acp").forkSupported).toBe(false);
+    expect(conversationForkCapability("Claude").forkSupported).toBe(false);
+    expect(conversationForkCapability("CodeBuddy").forkSupported).toBe(false);
+    expect(conversationForkCapability(null).forkSupported).toBe(false);
+    expect(conversationForkCapability(undefined).forkSupported).toBe(false);
   });
 
   it("does not let stale snapshot bodies overwrite newer streaming deltas", () => {

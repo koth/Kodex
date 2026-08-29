@@ -460,6 +460,17 @@ pub struct AssistantMessage {
     pub source: Option<Value>,
 }
 
+/// `user/message` data — a user-role message on the shared message shape
+/// (`{ id, role: 'user', content: [ContentBlock] }`; no turn/step wrapper).
+#[derive(Debug, Clone, Deserialize)]
+pub struct UserMessageData {
+    #[serde(default)]
+    pub id: Option<String>,
+    #[serde(default)]
+    pub role: String,
+    pub content: Vec<ContentBlock>,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "type")]
 pub enum ContentBlock {

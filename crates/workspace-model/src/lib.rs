@@ -261,6 +261,68 @@ pub struct SessionSummary {
     pub status: SessionStatus,
 }
 
+/// How a forked conversation branch is hosted ("从这里创建聊天分支").
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionForkMode {
+    /// Continue the branch in the current workspace.
+    Workspace,
+    /// Continue the branch in a fresh git worktree (requires the agent to
+    /// support forking with a different working directory).
+    Worktree,
+}
+
+impl SessionForkMode {
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "workspace" => Some(Self::Workspace),
+            "worktree" => Some(Self::Worktree),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Workspace => "workspace",
+            Self::Worktree => "worktree",
+        }
+    }
+}
+
+/// Result of forking a conversation from a message. The backend creates the
+/// branch session and switches the active session (and, for worktree forks,
+/// the active workspace) before returning; the caller only needs to refresh
+/// its snapshot.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SessionForkOutcome {
+    pub session_id: Uuid,
+    /// Workspace root the forked session lives in; differs from the source
+    /// workspace only for worktree forks.
+    #[serde(default)]
+    pub workspace_root: Option<String>,
+    /// Created git branch name for worktree forks.
+    #[serde(default)]
+    pub worktree_branch: Option<String>,
+}
+
+/// One selectable fork branch point in the fork picker: a turn's opening user
+/// prompt, with the turn's reply preview. Built from the session's FULL
+/// persisted history (the picker must see every turn, not just the UI's
+/// tail window).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SessionForkCandidate {
+    /// 1-based turn ordinal (the fork cut lands at the end of this turn).
+    pub turn_ordinal: u64,
+    /// The turn-opening user message id — the fork call's message anchor.
+    pub user_message_id: Uuid,
+    /// Trimmed user prompt excerpt (first line(s), bounded length).
+    pub user_excerpt: String,
+    /// The turn's final assistant reply excerpt; empty when the turn never
+    /// produced one (failed prompt).
+    #[serde(default)]
+    pub reply_excerpt: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum SessionConfigCategory {
     Model,
