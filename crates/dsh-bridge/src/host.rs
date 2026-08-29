@@ -57,6 +57,16 @@ pub struct SessionSink {
     /// `assistant/message` after a mid-stream gap does not append the full text
     /// over text already shown.
     streamed_text_steps: Mutex<std::collections::HashSet<(u64, u64)>>,
+    /// Assistant steps (`(turn, step)`) whose per-call `TokenUsage` this sink
+    /// has already emitted as a `TurnDelta` usage event. dsh surfaces the same
+    /// model call's usage twice — a terminal `assistant/chunk`
+    /// `{type:"usage"}` stream chunk and a finalized `assistant/message`
+    /// `usage` rollup — and history replay (resume / stream-gap re-baseline)
+    /// re-delivers both, so the mapping layer claims each step's usage exactly
+    /// once per sink lifetime. Without this, every resume/reconnect re-appends
+    /// the session's whole usage history (observed as 2×/4×/…/18× inflated
+    /// `usage_events` rows).
+    usage_emitted_steps: Mutex<std::collections::HashSet<(u64, u64)>>,
     /// Streaming mojibake repairers keyed by `(turn, step, block index)` — one
     /// per assistant text/reasoning block stream. A corrupted upstream stream
     /// delivers one Latin-1 char per delta, so repair needs cross-delta state
@@ -123,6 +133,7 @@ impl SessionSink {
             last_seq: AtomicU64::new(0),
             replaying: AtomicBool::new(false),
             streamed_text_steps: Mutex::new(std::collections::HashSet::new()),
+            usage_emitted_steps: Mutex::new(std::collections::HashSet::new()),
             stream_repairs: Mutex::new(StreamRepairTable::new()),
             tool_call_args: Mutex::new(std::collections::HashMap::new()),
             pending: Mutex::new(Vec::new()),
@@ -205,6 +216,19 @@ impl SessionSink {
             .ok()
             .map(|seen| seen.contains(&(turn, step)))
             .unwrap_or(false)
+    }
+
+    /// Claim a step's per-call usage emission. Returns `true` on the first
+    /// claim (the caller must emit the `TurnDelta` usage event); `false` when
+    /// this sink already emitted usage for the step (duplicate chunk/rollup
+    /// delivery, or a history replay pass re-delivering the same call).
+    /// Fail-open on lock poisoning: emitting a duplicate is recoverable,
+    /// silently dropping usage is not.
+    pub fn claim_usage_emission(&self, turn: u64, step: u64) -> bool {
+        match self.usage_emitted_steps.lock() {
+            Ok(mut seen) => seen.insert((turn, step)),
+            Err(_) => true,
+        }
     }
 
     /// Record a tool call's parsed arguments for later synthetic diff rendering.

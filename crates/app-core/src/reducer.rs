@@ -1524,7 +1524,7 @@ fn apply_usage_update(ui: &mut UiSnapshot, mut usage: UsageEvent) {
     // (the dsh harness's per-turn `TokenUsage` has no used/window fields, though
     // its `contextPressure` session projection now feeds a `ContextSnapshot`
     // event that sets `used_tokens` directly): approximate the current context
-    // load as the cumulative input + output + cache tokens seen this session.
+    // load as the cumulative cache-inclusive input + output seen this session.
     // This is a rough proxy — it over-counts when context compaction drops
     // history — but lets the UI render a context bar for agents that never
     // report `used_tokens` (and before the first occupancy projection lands).
@@ -1701,12 +1701,13 @@ fn has_usage_tokens(tokens: &UsageTokenBreakdown) -> bool {
         || tokens.total_tokens.is_some()
 }
 fn usage_token_breakdown_sum(tokens: &UsageTokenBreakdown) -> u64 {
+    // Cumulative consumption under Kodex's usage convention: `input_tokens`
+    // is the cache-INCLUSIVE prompt size (the cache axes are display-only
+    // subsets of it) and reasoning is a subset of output, so input + output
+    // is the full billed figure. Adding the cache axes again would
+    // double-count the cached prefix.
     let sum = |opt: Option<u64>| opt.unwrap_or(0);
-    sum(tokens.input_tokens)
-        .saturating_add(sum(tokens.output_tokens))
-        .saturating_add(sum(tokens.cache_read_tokens))
-        .saturating_add(sum(tokens.cache_write_tokens))
-        .saturating_add(sum(tokens.reasoning_tokens))
+    sum(tokens.input_tokens).saturating_add(sum(tokens.output_tokens))
 }
 
 fn add_usage_tokens(target: &mut UsageTokenBreakdown, delta: &UsageTokenBreakdown) {

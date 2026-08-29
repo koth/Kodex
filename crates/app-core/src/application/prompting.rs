@@ -1,6 +1,6 @@
 use super::*;
 use super::diff_utils::tool_start_should_record_write_baseline;
-use workspace_model::ChangeSetStatus;
+use workspace_model::{ChangeSetStatus, UsageEventScope};
 
 pub(super) struct RuntimeEventApplyResult {
     pub(super) ui_changed: bool,
@@ -547,17 +547,27 @@ impl Application {
                 // and break turn-collapse calculations. Keep only non-history
                 // session metadata (config/title/capabilities) needed after a
                 // resume; discard replayed assistant/tool/turn/thinking frames.
+                //
+                // UsageUpdated is kept per-scope: the dsh history replay
+                // re-delivers every past call's per-call `TurnDelta` usage
+                // (already persisted in SQLite), so re-appending it inflated
+                // `usage_events` by the whole session history on every resume.
+                // Live cumulative projections (`SessionTotal` /
+                // `ContextSnapshot`) are not replay artifacts and stay so the
+                // dock's totals and context occupancy refresh after resume.
                 for event in events {
-                    let keep = matches!(
-                        &event,
+                    let keep = match &event {
                         ClientEvent::SessionStarted { .. }
-                            | ClientEvent::SessionConfigUpdated { .. }
-                            | ClientEvent::SessionConfigValueChanged { .. }
-                            | ClientEvent::PromptCapabilitiesUpdated { .. }
-                            | ClientEvent::AvailableCommandsUpdated { .. }
-                            | ClientEvent::SessionTitleUpdated { .. }
-                            | ClientEvent::UsageUpdated { .. }
-                    );
+                        | ClientEvent::SessionConfigUpdated { .. }
+                        | ClientEvent::SessionConfigValueChanged { .. }
+                        | ClientEvent::PromptCapabilitiesUpdated { .. }
+                        | ClientEvent::AvailableCommandsUpdated { .. }
+                        | ClientEvent::SessionTitleUpdated { .. } => true,
+                        ClientEvent::UsageUpdated { usage } => {
+                            usage.scope != UsageEventScope::TurnDelta
+                        }
+                        _ => false,
+                    };
                     if keep {
                         self.apply_event_and_restore_model(event);
                     }

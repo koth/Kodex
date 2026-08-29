@@ -290,7 +290,17 @@ pub fn map_session_event(
                     }
                     out
                 }
-                Some((_, _, StreamChunk::Usage { usage })) => vec![usage_event(&usage)],
+                Some((turn, step, StreamChunk::Usage { usage })) => {
+                    // One model call surfaces the same `TokenUsage` twice (the
+                    // terminal `usage` chunk and the finalized message rollup)
+                    // and history replay re-delivers both; emit exactly one
+                    // TurnDelta per call via the sink's step claim.
+                    if _sink.claim_usage_emission(turn, step) {
+                        vec![usage_event(&usage)]
+                    } else {
+                        Vec::new()
+                    }
+                }
                 _ => Vec::new(),
             }
         }
@@ -329,7 +339,12 @@ pub fn map_session_event(
                     }
                 }
                 if let Some(usage) = &data.usage {
-                    out.push(usage_event(usage));
+                    // The rollup carries the same call's `TokenUsage` the
+                    // terminal `usage` chunk already delivered; the sink claim
+                    // keeps it to one TurnDelta per (turn, step).
+                    if _sink.claim_usage_emission(data.turn, data.step) {
+                        out.push(usage_event(usage));
+                    }
                 }
             }
             out
@@ -1007,7 +1022,23 @@ fn render_read_view(view: &Value) -> Option<String> {
     if out.is_empty() { None } else { Some(out) }
 }
 
+/// Map a dsh per-call `TokenUsage` into a Kodex `TurnDelta` usage event.
+///
+/// dsh's `TokenUsage` buckets are DISJOINT (`@deepseek-ai/dsh-llm/types`:
+/// "`inputTokens` is uncached input only; cached input is reported separately
+/// as `cacheReadTokens`/`cacheWriteTokens`; billed input = sum of the three").
+/// Kodex's convention is the opposite — `input_tokens` is the cache-INCLUSIVE
+/// prompt size and the cache axes are display-only subsets; the reducer,
+/// session-store summaries and the UI all rely on that invariant (see
+/// `codebuddy-proxy/src/usage.rs`, which normalizes the same Anthropic-shaped
+/// disjoint semantics). Fold the cache axes into `input_tokens` here: without
+/// it, cache reads exceed "input" by 10-100× and every total understates the
+/// billed usage by exactly the cached prefix.
 fn usage_event(usage: &TokenUsage) -> ClientEvent {
+    let input_tokens = usage
+        .input_tokens
+        .saturating_add(usage.cache_read_tokens.unwrap_or(0))
+        .saturating_add(usage.cache_write_tokens.unwrap_or(0));
     ClientEvent::UsageUpdated {
         usage: UsageEvent {
             scope: workspace_model::UsageEventScope::TurnDelta,
@@ -1015,7 +1046,7 @@ fn usage_event(usage: &TokenUsage) -> ClientEvent {
             provider: None,
             agent_cli: None,
             tokens: workspace_model::UsageTokenBreakdown {
-                input_tokens: Some(usage.input_tokens),
+                input_tokens: Some(input_tokens),
                 output_tokens: Some(usage.output_tokens),
                 cache_read_tokens: usage.cache_read_tokens,
                 cache_write_tokens: usage.cache_write_tokens,
@@ -1065,6 +1096,12 @@ fn context_pressure_usage_event(value: &Value) -> Option<ClientEvent> {
 /// `session/projection` `tokenUsage` value — durable cumulative provider usage
 /// for the whole session. Emitted as `SessionTotal` so the reducer replaces the
 /// per-turn-delta estimate with the harness's authoritative cumulative.
+///
+/// Like the per-call `TokenUsage`, the projection's four buckets are disjoint
+/// (`@deepseek-ai/dsh-token-meter/projection`: "The four buckets are
+/// disjoint"), so `uncachedInputTokens` alone must NOT become
+/// `input_tokens` — fold in the cache axes to keep the cache-inclusive
+/// convention the rest of Kodex relies on.
 #[derive(serde::Deserialize)]
 struct TokenUsageProjection {
     #[serde(default, rename = "uncachedInputTokens")]
@@ -1079,11 +1116,15 @@ struct TokenUsageProjection {
 
 fn token_usage_projection_event(value: &Value) -> Option<ClientEvent> {
     let usage: TokenUsageProjection = serde_json::from_value(value.clone()).ok()?;
+    let input_tokens = usage
+        .uncached_input_tokens
+        .saturating_add(usage.cache_read_tokens)
+        .saturating_add(usage.cache_write_tokens);
     Some(ClientEvent::UsageUpdated {
         usage: UsageEvent {
             scope: UsageEventScope::SessionTotal,
             tokens: UsageTokenBreakdown {
-                input_tokens: Some(usage.uncached_input_tokens),
+                input_tokens: Some(input_tokens),
                 output_tokens: Some(usage.output_tokens),
                 cache_read_tokens: Some(usage.cache_read_tokens),
                 cache_write_tokens: Some(usage.cache_write_tokens),
@@ -1836,6 +1877,11 @@ mod tests {
     fn maps_token_usage_projection_to_session_total() {
         // The durable cumulative `tokenUsage` projection replaces the
         // per-turn-delta estimate with the harness's authoritative total.
+        // The projection's four buckets are disjoint (dsh-token-meter), so
+        // `input_tokens` must fold in the cache axes: 1000 + 200 + 50 = 1250
+        // is the cache-inclusive billed input, with the cache axes kept as
+        // display-only subsets (the invariant the reducer/session-store/UI
+        // rely on).
         let (sink, _rx) = test_sink();
         let frame = mux(serde_json::json!({
             "type": "session/projection",
@@ -1854,13 +1900,166 @@ mod tests {
         match &mapped.events[0] {
             ClientEvent::UsageUpdated { usage } => {
                 assert_eq!(usage.scope, UsageEventScope::SessionTotal);
-                assert_eq!(usage.tokens.input_tokens, Some(1_000));
+                assert_eq!(usage.tokens.input_tokens, Some(1_250));
                 assert_eq!(usage.tokens.output_tokens, Some(500));
                 assert_eq!(usage.tokens.cache_read_tokens, Some(200));
                 assert_eq!(usage.tokens.cache_write_tokens, Some(50));
             }
             other => panic!("expected UsageUpdated, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn usage_chunk_folds_disjoint_cache_buckets_into_input() {
+        // dsh's per-call `TokenUsage` is disjoint: `inputTokens` counts
+        // uncached input only and the cached prefix lives in
+        // `cacheReadTokens`/`cacheWriteTokens`. Kodex's `input_tokens` is
+        // cache-inclusive, so 512 + 101568 + 0 must land as the input while
+        // the cache axes stay subsets.
+        let (sink, _rx) = test_sink();
+        let frame = mux(session_event(
+            "assistant/chunk",
+            1,
+            serde_json::json!({
+                "turn": 1, "step": 1,
+                "chunk": { "type": "usage", "usage": {
+                    "inputTokens": 512,
+                    "outputTokens": 39,
+                    "cacheReadTokens": 101568,
+                    "reasoningTokens": 20
+                } }
+            }),
+        ));
+        let mapped = map_mux_frame(&frame, &sink);
+        assert_eq!(mapped.events.len(), 1);
+        match &mapped.events[0] {
+            ClientEvent::UsageUpdated { usage } => {
+                assert_eq!(usage.scope, UsageEventScope::TurnDelta);
+                assert_eq!(usage.tokens.input_tokens, Some(512 + 101_568));
+                assert_eq!(usage.tokens.output_tokens, Some(39));
+                assert_eq!(usage.tokens.cache_read_tokens, Some(101_568));
+                assert_eq!(usage.tokens.cache_write_tokens, None);
+                assert_eq!(usage.tokens.reasoning_tokens, Some(20));
+            }
+            other => panic!("expected UsageUpdated, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn usage_chunk_and_message_rollup_emit_a_single_turn_delta() {
+        // One model call surfaces its usage twice (terminal `usage` chunk then
+        // the finalized `assistant/message` rollup). The sink's step claim must
+        // keep exactly one TurnDelta per call — the live duplicates doubled
+        // every dsh usage row in SQLite.
+        let (sink, _rx) = test_sink();
+        let usage_data = serde_json::json!({
+            "inputTokens": 512, "outputTokens": 39, "cacheReadTokens": 101568
+        });
+        let chunk = mux(session_event(
+            "assistant/chunk",
+            1,
+            serde_json::json!({
+                "turn": 3, "step": 2,
+                "chunk": { "type": "usage", "usage": usage_data }
+            }),
+        ));
+        let message = mux(session_event(
+            "assistant/message",
+            2,
+            serde_json::json!({
+                "turn": 3, "step": 2,
+                "message": { "role": "assistant", "content": [] },
+                "usage": usage_data
+            }),
+        ));
+        let mut events = Vec::new();
+        for frame in [&chunk, &message] {
+            events.extend(map_mux_frame(frame, &sink).events);
+        }
+        let usage_events: Vec<_> = events
+            .iter()
+            .filter(|e| matches!(e, ClientEvent::UsageUpdated { .. }))
+            .collect();
+        assert_eq!(usage_events.len(), 1, "one call = one usage event");
+    }
+
+    #[test]
+    fn replayed_usage_is_not_re_emitted_across_passes() {
+        // History replay (resume / stream-gap re-baseline) re-delivers the
+        // whole session log. Each call's usage must still be emitted exactly
+        // once per sink lifetime — repeated passes previously re-appended the
+        // full usage history (observed 2×–18× row inflation).
+        let (sink, _rx) = test_sink();
+        let frame = mux(session_event(
+            "assistant/message",
+            1,
+            serde_json::json!({
+                "turn": 1, "step": 1,
+                "message": { "role": "assistant", "content": [] },
+                "usage": { "inputTokens": 100, "outputTokens": 10 }
+            }),
+        ));
+        let first = map_mux_frame(&frame, &sink);
+        assert_eq!(
+            first
+                .events
+                .iter()
+                .filter(|e| matches!(e, ClientEvent::UsageUpdated { .. }))
+                .count(),
+            1
+        );
+        // Second pass (re-baseline): same frames re-delivered by the host.
+        let second = map_mux_frame(&frame, &sink);
+        assert!(
+            second
+                .events
+                .iter()
+                .all(|e| !matches!(e, ClientEvent::UsageUpdated { .. })),
+            "replayed usage must not re-emit"
+        );
+        // A different step is a different call and must still emit.
+        let other_step = mux(session_event(
+            "assistant/message",
+            2,
+            serde_json::json!({
+                "turn": 1, "step": 2,
+                "message": { "role": "assistant", "content": [] },
+                "usage": { "inputTokens": 100, "outputTokens": 10 }
+            }),
+        ));
+        let third = map_mux_frame(&other_step, &sink);
+        assert!(
+            third
+                .events
+                .iter()
+                .any(|e| matches!(e, ClientEvent::UsageUpdated { .. })),
+            "the next call's usage must still emit"
+        );
+    }
+
+    #[test]
+    fn usage_chunk_without_message_rollup_still_emits_once() {
+        // An aborted step can carry the usage chunk but never finalize its
+        // message; the consumed tokens must still be reported (exactly once).
+        let (sink, _rx) = test_sink();
+        let chunk = mux(session_event(
+            "assistant/chunk",
+            1,
+            serde_json::json!({
+                "turn": 1, "step": 1,
+                "chunk": { "type": "usage", "usage": { "inputTokens": 42, "outputTokens": 7 } }
+            }),
+        ));
+        assert_eq!(map_mux_frame(&chunk, &sink).events.len(), 1);
+        let message = mux(session_event(
+            "assistant/message",
+            2,
+            serde_json::json!({
+                "turn": 1, "step": 1,
+                "message": { "role": "assistant", "content": [] }
+            }),
+        ));
+        assert!(map_mux_frame(&message, &sink).events.is_empty());
     }
 
     #[test]
