@@ -1,6 +1,10 @@
 import { describe, expect, it, vi, beforeEach } from "vitest";
 import { renderHook, act } from "@testing-library/react";
 import type { UiSnapshot, UiSnapshotPatch } from "../../types";
+import {
+  getStreamingMessageBody,
+  replaceStreamingMessageBody,
+} from "../conversation/streaming-message-store";
 import { useWorkbenchSnapshot } from "./useWorkbenchSnapshot";
 
 // ── Mocks ──────────────────────────────────────────────────────────
@@ -103,6 +107,7 @@ function makeStreamingDeltaPatch(
   snapshot: UiSnapshot,
   messageId: string,
   append: string,
+  baseLen = 0,
 ): UiSnapshotPatch {
   return {
     revision: snapshot.revision,
@@ -112,7 +117,7 @@ function makeStreamingDeltaPatch(
     available_commands: snapshot.available_commands,
     agent_plan: snapshot.agent_plan,
     messages: [],
-    message_deltas: [{ id: messageId, append }],
+    message_deltas: [{ id: messageId, append, base_len: baseLen }],
     timeline_start: snapshot.timeline.length,
     timeline: [],
     tools: [],
@@ -348,5 +353,125 @@ describe("useWorkbenchSnapshot – dropped patch self-heal", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+});
+
+describe("useWorkbenchSnapshot – streaming delta alignment guard", () => {
+  function streamingSession(overrides: Partial<UiSnapshot> = {}): UiSnapshot {
+    return makeSnapshot({
+      revision: 1,
+      session: { ...makeSnapshot().session, status: "Streaming" },
+      messages: [{ id: "msg-align", role: "Assistant", body: "prefix" }],
+      timeline: [{ Message: "msg-align" }],
+      ...overrides,
+    });
+  }
+
+  it("applies an aligned delta and folds it into the snapshot body", async () => {
+    const session = streamingSession();
+    const { result } = renderHook(() => useWorkbenchSnapshot());
+    await act(async () => {
+      result.current.acceptSnapshot(session);
+    });
+    // The streaming render seeds the store from the snapshot body; the
+    // backend's delta base ("prefix") has UTF-16 length 6.
+    replaceStreamingMessageBody("msg-align", "prefix");
+
+    await act(async () => {
+      patchCallback?.({
+        ...makeStreamingDeltaPatch(session, "msg-align", " + tail", 6),
+        revision: 2,
+      });
+    });
+
+    expect(result.current.snapshot?.messages[0].body).toBe("prefix + tail");
+    expect(getStreamingMessageBody("msg-align")).toBe("prefix + tail");
+  });
+
+  it("seeds a missing store entry from the snapshot body when it matches base_len", async () => {
+    const session = streamingSession();
+    const { result } = renderHook(() => useWorkbenchSnapshot());
+    await act(async () => {
+      result.current.acceptSnapshot(session);
+    });
+    // No store entry yet (the delta raced the streaming mount).
+
+    await act(async () => {
+      patchCallback?.({
+        ...makeStreamingDeltaPatch(session, "msg-align", " + tail", 6),
+        revision: 2,
+      });
+    });
+
+    expect(result.current.snapshot?.messages[0].body).toBe("prefix + tail");
+  });
+
+  it("skips a misaligned delta and re-syncs from a full snapshot", async () => {
+    const session = streamingSession();
+    const healed = streamingSession({
+      revision: 2,
+      messages: [{ id: "msg-align", role: "Assistant", body: "prefix + complete tail" }],
+    });
+    mockSessionGetState = () => Promise.resolve(healed);
+    const { result } = renderHook(() => useWorkbenchSnapshot());
+    await act(async () => {
+      result.current.acceptSnapshot(session);
+    });
+    replaceStreamingMessageBody("msg-align", "prefix");
+
+    // base_len 999 ≠ local store length 6: the delta chain desynced upstream
+    // (a dropped/duplicated patch). Appending would permanently misalign the
+    // store — the delta must be skipped and a full re-sync triggered instead.
+    await act(async () => {
+      patchCallback?.({
+        ...makeStreamingDeltaPatch(session, "msg-align", " + tail", 999),
+        revision: 2,
+      });
+    });
+
+    await vi.waitFor(() => {
+      expect(result.current.snapshot?.messages[0].body).toBe("prefix + complete tail");
+      expect(getStreamingMessageBody("msg-align")).toBe("prefix + complete tail");
+    });
+  });
+
+  it("does not append deltas from a revision-gap patch into the stream store", async () => {
+    const session = streamingSession();
+    const { result } = renderHook(() => useWorkbenchSnapshot());
+    await act(async () => {
+      result.current.acceptSnapshot(session);
+    });
+    replaceStreamingMessageBody("msg-align", "prefix");
+
+    await act(async () => {
+      patchCallback?.({
+        ...makeStreamingDeltaPatch(session, "msg-align", " + suffix", 6),
+        revision: 3,
+      });
+    });
+
+    // The gap patch was rejected; its delta must not touch the store.
+    expect(getStreamingMessageBody("msg-align")).toBe("prefix");
+  });
+
+  it("applies a duplicate-delivered patch's deltas only once", async () => {
+    const session = streamingSession();
+    const { result } = renderHook(() => useWorkbenchSnapshot());
+    await act(async () => {
+      result.current.acceptSnapshot(session);
+    });
+    replaceStreamingMessageBody("msg-align", "prefix");
+    const patch = makeStreamingDeltaPatch(session, "msg-align", " + tail", 6);
+
+    await act(async () => {
+      patchCallback?.(patch);
+      // StrictMode re-invokes the updater with the same patch object.
+      patchCallback?.(patch);
+      // A genuine re-delivery arrives as a fresh object with identical
+      // content — the base_len guard must reject the second append.
+      patchCallback?.({ ...patch });
+    });
+
+    expect(getStreamingMessageBody("msg-align")).toBe("prefix + tail");
   });
 });

@@ -131,6 +131,9 @@ export interface ChatMessage {
 export interface ChatMessageDelta {
   id: string;
   append: string;
+  /** UTF-16 length of the base body this delta extends (backend cursor).
+   *  Optional so older PC builds without the field still apply cleanly. */
+  base_len?: number;
 }
 export interface PendingSteer {
   message_id: string;

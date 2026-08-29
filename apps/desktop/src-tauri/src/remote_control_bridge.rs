@@ -19,6 +19,18 @@ use crate::state::AppState;
 /// `RELAY_SALT = "kodex-relay-salt"` and `relay-client`'s default usage.
 const RELAY_E2E_SALT: &[u8] = b"kodex-relay-salt";
 
+/// The patch cursor shared between the control handler and the event source.
+/// Resetting it from the control side forces the next event poll to emit a
+/// Full snapshot — the phone's entry sync for a session the PC already has
+/// active (no revision change → no delta → otherwise no push at all).
+pub type SharedUiPatchCursor = std::sync::Arc<std::sync::Mutex<UiPatchCursor>>;
+
+fn reset_shared_cursor(cursor: &SharedUiPatchCursor) {
+    if let Ok(mut guard) = cursor.lock() {
+        *guard = UiPatchCursor::default();
+    }
+}
+
 /// Adapts the PC's device identity to the driver's `PairingHandler` trait.
 /// On `PairingConfirm` it derives the E2E session key from the PC static
 /// X25519 secret and the phone ephemeral public key carried in
@@ -37,7 +49,7 @@ impl PairingHandler for DesktopPairingHandler {
     async fn derive_session_key(
         &mut self,
         confirm: PairingConfirm,
-    ) -> anyhow::Result<(SessionKey, String)> {
+    ) -> anyhow::Result<(SessionKey, String, bool)> {
         let manager = self.app.state::<AppState>().remote_control();
         let identity = manager.device_identity()?;
         let key = identity.derive_pairing_session_key(
@@ -51,9 +63,17 @@ impl PairingHandler for DesktopPairingHandler {
             .iter()
             .map(|b| format!("{b:02x}"))
             .collect();
-        tracing::debug!(target: "remote_control", key_prefix = %prefix, "derived pairing session key");
+        // The phone's advertised wire capabilities decide the outbound
+        // ciphertext encoding: base64url (~1.33 chars/byte) for phones that
+        // advertise it, the legacy JSON number array (~4 chars/byte) for
+        // older builds. Inbound frames decode either way.
+        let emit_b64 = confirm
+            .capabilities
+            .iter()
+            .any(|cap| cap == relay_protocol::CAPABILITY_CIPHERTEXT_B64);
+        tracing::debug!(target: "remote_control", key_prefix = %prefix, emit_b64, capabilities = ?confirm.capabilities, "derived pairing session key");
         // The phone's device id is the peer for E2E AAD.
-        Ok((key, confirm.phone_device_id))
+        Ok((key, confirm.phone_device_id, emit_b64))
     }
 }
 
@@ -64,12 +84,14 @@ impl PairingHandler for DesktopPairingHandler {
 #[derive(Clone)]
 pub struct DesktopControlHandler {
     control: DesktopRemoteControl,
+    cursor: SharedUiPatchCursor,
 }
 
 impl DesktopControlHandler {
-    pub fn new(app: AppHandle) -> Self {
+    pub fn new(app: AppHandle, cursor: SharedUiPatchCursor) -> Self {
         Self {
             control: DesktopRemoteControl::new(app),
+            cursor,
         }
     }
 }
@@ -124,14 +146,32 @@ impl ControlHandler for DesktopControlHandler {
                 .send_prompt(prompt)
                 .await
                 .map(|_| ControlResponse::SendPrompt { request_id }),
-            ControlRequest::GetState { .. } => self
-                .control
-                .get_state()
-                .await
-                .map(|snapshot| ControlResponse::GetState {
-                    request_id,
-                    snapshot,
-                }),
+            ControlRequest::GetState {
+                known_session_id,
+                known_revision,
+                ..
+            } => {
+                let known = known_session_id.zip(known_revision);
+                self.control
+                    .get_state(known)
+                    .await
+                    .map(|result| match result {
+                        app_core::RemoteGetState::Snapshot(snapshot) => {
+                            ControlResponse::GetState {
+                                request_id,
+                                snapshot: Some(snapshot),
+                                up_to_date: false,
+                            }
+                        }
+                        // Short-circuit: the phone's held (session, revision)
+                        // is still current, so no snapshot crosses the relay.
+                        app_core::RemoteGetState::UpToDate => ControlResponse::GetState {
+                            request_id,
+                            snapshot: None,
+                            up_to_date: true,
+                        },
+                    })
+            }
             ControlRequest::ResolvePermission {
                 permission_request_id,
                 option_id,
@@ -156,6 +196,15 @@ impl ControlHandler for DesktopControlHandler {
                 .await
                 .map(|_| ControlResponse::StopTool { request_id }),
         };
+        // A phone-initiated session switch/create must always be followed by a
+        // Full snapshot push, even when the target session was already active
+        // on the PC (no revision change → no delta). Resetting the shared
+        // cursor makes the event source's next poll emit a Full snapshot. This
+        // runs after the request completed so the reset never races a poll
+        // that was mid-flight against the old session state.
+        if result.is_ok() && is_switch_session {
+            reset_shared_cursor(&self.cursor);
+        }
         if is_list_sessions {
             tracing::debug!(target: "remote_control", request_id = %request_id, "ListSessions finished");
         }
@@ -193,14 +242,17 @@ impl ControlHandler for DesktopControlHandler {
 pub struct AppUpdateEventSource {
     rx: Option<broadcast::Receiver<AppUpdate>>,
     last_workspace_key: Option<String>,
-    cursor: UiPatchCursor,
+    /// Shared with `DesktopControlHandler`: a phone-initiated SwitchSession
+    /// resets it so the next poll re-emits a Full snapshot even when the PC
+    /// has no revision change to report.
+    cursor: SharedUiPatchCursor,
     app: AppHandle,
 }
 
 const EVENT_FALLBACK_WAKE_MS: u64 = 220;
 
 impl AppUpdateEventSource {
-    pub fn new(app: AppHandle) -> Self {
+    pub fn new(app: AppHandle, cursor: SharedUiPatchCursor) -> Self {
         let last_workspace_key = app
             .state::<AppState>()
             .active_workspace_key()
@@ -210,7 +262,7 @@ impl AppUpdateEventSource {
         Self {
             rx,
             last_workspace_key,
-            cursor: UiPatchCursor::default(),
+            cursor,
             app,
         }
     }
@@ -237,19 +289,21 @@ impl AppUpdateEventSource {
         }
         self.last_workspace_key = key;
         self.rx = Self::subscribe(&self.app);
-        self.cursor = UiPatchCursor::default();
+        reset_shared_cursor(&self.cursor);
         true
     }
 
     /// Fetch this subscriber's Full/Patch delta and wrap it into an event
     /// envelope. `None` when nothing changed (or no workspace is open).
     fn poll_delta(&mut self) -> Option<Envelope> {
+        let mut cursor = self.cursor.lock().ok()?;
         let update = self
             .app
             .state::<AppState>()
-            .poll_active_and_get_remote_update(&mut self.cursor)
+            .poll_active_and_get_remote_update(&mut cursor)
             .ok()
             .flatten()?;
+        drop(cursor);
         let frame = match update {
             UiSnapshotUpdate::Full(snapshot) => EventFrame::SnapshotFull { snapshot },
             UiSnapshotUpdate::Patch(patch) => EventFrame::SnapshotPatch { patch },

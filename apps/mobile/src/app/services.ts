@@ -698,9 +698,26 @@ export class AppController {
   }
 
   /** Fetch and install the active session's full snapshot. Call after
-   * switching, not on every pairing/list refresh. */
+   * switching, not on every pairing/list refresh.
+   *
+   * Incremental resume: when the caller did not force a full sync
+   * (`force` — post-switch entry always wipes the store, so the held state is
+   * empty there anyway) the held (session, revision) is offered to the PC. A
+   * matching PC answers `up_to_date` and the snapshot transfer is skipped —
+   * reconnects after a transient drop no longer re-pull the whole session. */
   async getState(expectedSessionId?: string): Promise<void> {
-    const response = await this.controlClient().getState();
+    const held = this.sessionStore.state;
+    const known =
+      !expectedSessionId && held !== null
+        ? { sessionId: held.session.id, revision: held.revision }
+        : undefined;
+    const response = await this.controlClient().getState(known);
+    if (response.up_to_date) {
+      return;
+    }
+    if (!response.snapshot) {
+      throw new Error("get_state response carried neither snapshot nor up_to_date");
+    }
     if (expectedSessionId && response.snapshot.session.id !== expectedSessionId) {
       throw new Error("switched session state mismatch");
     }

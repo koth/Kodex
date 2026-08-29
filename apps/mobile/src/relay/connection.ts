@@ -1,9 +1,10 @@
 import type { RelayTransport } from "./transport";
 import type { Envelope, EncryptedEnvelope, Message } from "../types/relay-protocol";
 import { PROTO_VERSION, DeviceAuth } from "../types/relay-protocol";
-import { encrypt, decrypt } from "../crypto/aead";
+import { encrypt, decrypt, resolveCiphertextBytes } from "../crypto/aead";
 import type { SessionKey } from "../crypto/session-key";
 import { serializeEnvelope, parseEnvelope } from "./framing";
+import { encodeBase64UrlNoPad } from "../util/base64url";
 import { uuidV4 } from "../util/uuid";
 import { diagnostics } from "../util/diagnostics";
 
@@ -151,7 +152,9 @@ export class RelayConnection {
       this.chunks.delete(chunkId);
       return null;
     }
-    entry.received[index] = new Uint8Array(enc.ciphertext);
+    // Fragments may arrive in either ciphertext encoding (compact b64 from
+    // new PCs, legacy number arrays from old ones) — decode to raw bytes.
+    entry.received[index] = resolveCiphertextBytes(enc);
     if (entry.received.some((part) => part === null)) return null;
 
     const ciphertext = new Uint8Array(
@@ -256,30 +259,44 @@ export class RelayConnection {
   }
 }
 
-/** Split an encrypted envelope into one or more serialized chunk frames. */
-function splitEncrypted(enc: EncryptedEnvelope): string[] {
+/** Split an encrypted envelope into one or more serialized chunk frames.
+ * Fragments keep the original envelope's ciphertext encoding (compact b64 or
+ * legacy number array) and payload `encoding` flag. Exported for tests that
+ * exercise the peer's chunk-reassembly path. */
+export function splitEncrypted(enc: EncryptedEnvelope): string[] {
   const single = JSON.stringify(enc);
   if (single.length <= CHUNK_SINGLE_FRAME_BYTES) {
     return [single];
   }
   const chunkId = uuidV4();
+  const bytes = resolveCiphertextBytes(enc);
+  const emitB64 = typeof enc.ciphertext_b64 === "string";
   const pieces: Uint8Array[] = [];
-  const bytes = new Uint8Array(enc.ciphertext);
   for (let i = 0; i < bytes.length; i += CHUNK_PAYLOAD_BYTES) {
     pieces.push(bytes.subarray(i, i + CHUNK_PAYLOAD_BYTES));
   }
   const total = pieces.length;
-  return pieces.map((piece, index) =>
-    JSON.stringify({
+  return pieces.map((piece, index) => {
+    const base = {
       to_device_id: enc.to_device_id,
       nonce: enc.nonce,
-      ciphertext: Array.from(piece),
       chunk_id: chunkId,
       chunk_index: index,
       chunk_total: total,
       // Chunks inherit the original payload encoding flag.
       ...(enc.encoding ? { encoding: enc.encoding } : {}),
-    } as EncryptedEnvelope),
-  );
+    };
+    return JSON.stringify(
+      emitB64
+        ? {
+            ...base,
+            ciphertext_b64: encodeBase64UrlNoPad(piece),
+          }
+        : {
+            ...base,
+            ciphertext: Array.from(piece),
+          },
+    );
+  });
 }
 // end of file

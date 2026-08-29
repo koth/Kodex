@@ -640,6 +640,13 @@ impl Default for ChatMessage {
 pub struct ChatMessageDelta {
     pub id: Uuid,
     pub append: String,
+    /// UTF-16 code-unit length of the base body this delta extends (the
+    /// backend-side patch-cursor body). The frontend stream store is
+    /// append-only and can never recover from a desync by appending, so it
+    /// compares this against its local body length: a mismatch means a delta
+    /// was dropped/duplicated upstream and the client must re-sync from a
+    /// full snapshot instead of appending a misaligned suffix.
+    pub base_len: u64,
 }
 
 /// A steer (追加指令) the user sent while a turn was already running.

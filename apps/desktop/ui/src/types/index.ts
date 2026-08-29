@@ -248,6 +248,12 @@ export interface ChatMessage {
 export interface ChatMessageDelta {
   id: string;
   append: string;
+  /** UTF-16 code-unit length of the base body this delta extends (the
+   *  backend patch-cursor body). The stream store is append-only and cannot
+   *  recover from a desync by appending, so `useWorkbenchSnapshot` compares
+   *  this against its local body length and re-syncs from a full snapshot on
+   *  mismatch instead of appending a misaligned suffix. */
+  base_len: number;
 }
 
 /**

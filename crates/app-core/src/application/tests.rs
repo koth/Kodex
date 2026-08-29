@@ -14,7 +14,7 @@ use super::{
     normalize_tracked_path, sanitize_acp_error_text, turn_finished_notice,
     update_signal::AppUpdate,
 };
-use crate::{AppCoreRemoteControl, RemoteControl};
+use crate::{AppCoreRemoteControl, RemoteControl, RemoteGetState};
 use acp_core::{ClientEvent, PromptTask, RemoteSshSessionConfig, diff_to_hunks};
 use std::{
     collections::HashMap,
@@ -1940,10 +1940,35 @@ fn loopback_remote_control_drives_gateway() {
         .expect("create_session via trait should succeed");
     assert!(!session_id.is_empty());
 
-    let snapshot = rt
-        .block_on(control.get_state())
+    let state = rt
+        .block_on(control.get_state(None))
         .expect("get_state via trait should succeed");
+    let RemoteGetState::Snapshot(snapshot) = state else {
+        panic!("first get_state without known state must return a snapshot");
+    };
     assert_eq!(snapshot.session.id.to_string(), session_id);
+
+    // Incremental resume: reporting the held (session, revision) back must
+    // short-circuit instead of re-transferring the snapshot...
+    let held_revision = snapshot.revision;
+    let up_to_date = rt
+        .block_on(control.get_state(Some((
+            session_id.clone(),
+            held_revision,
+        ))))
+        .expect("get_state with known state should succeed");
+    assert!(
+        matches!(up_to_date, RemoteGetState::UpToDate),
+        "matching known (session, revision) must answer UpToDate, got {up_to_date:?}"
+    );
+    // ...while a stale revision falls back to a full snapshot.
+    let refreshed = rt
+        .block_on(control.get_state(Some((session_id.clone(), held_revision + 50))))
+        .expect("get_state with stale revision should succeed");
+    assert!(
+        matches!(refreshed, RemoteGetState::Snapshot(_)),
+        "stale known revision must return a snapshot"
+    );
 
     let mut rx2 = control.subscribe_updates();
     {

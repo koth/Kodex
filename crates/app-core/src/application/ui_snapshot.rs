@@ -260,6 +260,134 @@ fn snapshot_path_key(path: &str, workspace_root: &Path) -> String {
     normalize_tracked_path(&normalize_path_for_storage(path, workspace_root))
 }
 
+// ── Remote (mobile relay) projection ─────────────────────────────────────
+//
+// The phone renders only the conversation surface: timeline, messages, tool
+// cards (incl. pending permission sheets). Everything else the desktop
+// snapshot carries — git repository state, inspector sections, change lists,
+// plan entries, available commands, session config controls, usage stats,
+// thinking text — is dead weight on the relay link, and a Full snapshot for a
+// long session can otherwise reach multiple megabytes. These projections cut
+// the wire payload to the conversation window plus the fields the mobile
+// reducer consumes.
+
+/// Timeline entries kept in a remote Full snapshot. Older entries page in
+/// through the desktop UI's history paging; the phone has no history pager,
+/// so anything older than this window is unreachable there anyway.
+const REMOTE_TIMELINE_WINDOW: usize = 200;
+/// Per-message body cap for remote payloads (matches the previous behavior).
+const REMOTE_MESSAGE_BODY_CHARS: usize = 2 * 1024;
+/// Per-tool free-text cap for remote payloads.
+const REMOTE_TOOL_TEXT_CHARS: usize = 2 * 1024;
+
+/// Trim a Full snapshot for the mobile relay path.
+///
+/// - Windows the timeline to the last [`REMOTE_TIMELINE_WINDOW`] entries and
+///   keeps only the messages/tools those entries reference (plus tools with a
+///   pending permission request, which the phone surfaces from `snapshot.tools`
+///   even when their timeline entry was trimmed). This bounds the payload on
+///   long-running turns where the in-memory timeline keeps growing.
+/// - Caps message bodies and tool free-text fields.
+/// - Zeroes the fields the mobile UI never reads (changes, plan, commands,
+///   config controls, usage, repository, thinking text).
+///
+/// Patch cursor invariants: the caller must keep its `UiPatchCursor` reset
+/// from the UNPROJECTED snapshot (as `lightweight_ui_update` does), so delta
+/// chains keep tracking the real bodies while only the wire payload shrinks.
+pub fn project_remote_snapshot(
+    mut snapshot: workspace_model::UiSnapshot,
+) -> workspace_model::UiSnapshot {
+    // Aligned window: trim the timeline tail first, then keep only the
+    // referenced entities so the phone renders no "(missing …)" placeholders.
+    if snapshot.timeline.len() > REMOTE_TIMELINE_WINDOW {
+        let start = snapshot.timeline.len() - REMOTE_TIMELINE_WINDOW;
+        snapshot.timeline.drain(0..start);
+    }
+    let mut referenced_messages = HashSet::new();
+    let mut referenced_tools = HashSet::new();
+    for item in &snapshot.timeline {
+        match item {
+            workspace_model::TimelineItem::Message(id) => {
+                referenced_messages.insert(*id);
+            }
+            workspace_model::TimelineItem::Tool(id) => {
+                referenced_tools.insert(*id);
+            }
+            workspace_model::TimelineItem::Thinking => {}
+        }
+    }
+    snapshot.messages.retain(|m| referenced_messages.contains(&m.id));
+    // Pending-permission tools must survive the trim: the phone derives the
+    // approval sheet from `snapshot.tools`, not from the timeline.
+    snapshot.tools.retain(|t| {
+        referenced_tools.contains(&t.id)
+            || (t.permission_input.is_some() && t.permission_decision.is_none())
+    });
+
+    for message in &mut snapshot.messages {
+        cap_string_in_place(&mut message.body, REMOTE_MESSAGE_BODY_CHARS);
+    }
+    for tool in &mut snapshot.tools {
+        cap_string_in_place(&mut tool.summary, REMOTE_TOOL_TEXT_CHARS);
+        if let Some(err) = &mut tool.error {
+            cap_string_in_place(err, REMOTE_TOOL_TEXT_CHARS);
+        }
+    }
+
+    zero_remote_only_fields(&mut snapshot);
+    snapshot
+}
+
+/// Project a patch for the mobile relay path: keeps the conversation delta
+/// (messages/deltas/timeline/tools/session/status/steers) and zeroes the
+/// heavyweight fields the phone ignores. Sending them as empty is
+/// byte-compatible with the mobile reducer, which replaces those fields
+/// verbatim; the desktop local bridge uses `lightweight_ui_update` directly
+/// and is unaffected.
+///
+/// `thinking_text` is the worst offender: it is re-sent in full (uncapped) on
+/// every patch while a turn streams, and the mobile reducer never applies it.
+pub fn project_remote_patch(mut patch: workspace_model::UiSnapshotPatch) -> workspace_model::UiSnapshotPatch {
+    patch.session_config = workspace_model::SessionConfigState {
+        hydrated: false,
+        controls: Vec::new(),
+    };
+    patch.available_commands = Vec::new();
+    patch.agent_plan = Vec::new();
+    patch.repository = None;
+    patch.inspector_sections = Vec::new();
+    patch.session_changes = Vec::new();
+    patch.review_changes = Vec::new();
+    patch.turn_changes = Vec::new();
+    patch.thinking_text = String::new();
+    patch.usage = workspace_model::SessionUsageSnapshot::default();
+    patch
+}
+
+fn zero_remote_only_fields(snapshot: &mut workspace_model::UiSnapshot) {
+    snapshot.session_config = workspace_model::SessionConfigState {
+        hydrated: false,
+        controls: Vec::new(),
+    };
+    snapshot.available_commands = Vec::new();
+    snapshot.agent_plan = Vec::new();
+    snapshot.inspector_sections = Vec::new();
+    snapshot.session_changes = Vec::new();
+    snapshot.review_changes = Vec::new();
+    snapshot.turn_changes = Vec::new();
+    // The phone never renders the thinking body — only the status indicator.
+    snapshot.thinking_text = String::new();
+    snapshot.usage = workspace_model::SessionUsageSnapshot::default();
+    // Repository state (branch/changes/diffs) is desktop-only today.
+    snapshot.repository = workspace_model::RepositorySnapshot {
+        branch: String::new(),
+        head: String::new(),
+        changed_files: Vec::new(),
+        ahead_count: 0,
+        behind_count: 0,
+    };
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -296,9 +424,271 @@ mod tests {
         );
         assert!(parsed.get("content").is_none());
     }
+
+    // ── Remote projection ──
+
+    fn remote_fixture(entries: usize) -> workspace_model::UiSnapshot {
+        // Build a timeline of `entries` message+tool pairs; only the tail is
+        // kept by the projection. Messages/tools carry the referenced ids.
+        let mut messages = Vec::new();
+        let mut tools = Vec::new();
+        let mut timeline = Vec::new();
+        for i in 0..entries {
+            let message_id = uuid::Uuid::from_u128(1000 + i as u128);
+            let tool_id = uuid::Uuid::from_u128(2000 + i as u128);
+            messages.push(workspace_model::ChatMessage {
+                id: message_id,
+                role: workspace_model::MessageRole::Assistant,
+                body: "b".repeat(REMOTE_MESSAGE_BODY_CHARS * 2),
+                created_at: String::new(),
+                is_steer: false,
+            });
+            tools.push(workspace_model::ToolInvocation {
+                id: tool_id,
+                call_id: format!("call-{i}"),
+                parent_call_id: None,
+                name: "shell".into(),
+                kind: "shell".into(),
+                summary: "s".repeat(REMOTE_TOOL_TEXT_CHARS * 2),
+                status: workspace_model::ToolStatus::Succeeded,
+                is_subagent: false,
+                detail_text: String::new(),
+                logs: Vec::new(),
+                diff_paths: Vec::new(),
+                diff_previews: Vec::new(),
+                raw_input: None,
+                raw_output: None,
+                terminal_output: None,
+                error: None,
+                permission_options: Vec::new(),
+                permission_input: None,
+                permission_decision: None,
+                can_stop: false,
+                stop_kind: None,
+                stop_status: None,
+            });
+            timeline.push(workspace_model::TimelineItem::Message(message_id));
+            timeline.push(workspace_model::TimelineItem::Tool(tool_id));
+        }
+        workspace_model::UiSnapshot {
+            revision: 7,
+            workspace: workspace_model::WorkspaceDescriptor {
+                id: uuid::Uuid::nil(),
+                name: "w".into(),
+                root: "/w".into(),
+                location: workspace_model::WorkspaceLocation::Local,
+                kind: workspace_model::WorkspaceKind::Project,
+            },
+            workspace_connected: true,
+            session: workspace_model::SessionSummary {
+                id: uuid::Uuid::nil(),
+                workspace_id: uuid::Uuid::nil(),
+                title: "t".into(),
+                model: "m".into(),
+                mode: None,
+                agent_cli: None,
+                status: workspace_model::SessionStatus::Idle,
+            },
+            session_config: workspace_model::SessionConfigState {
+                hydrated: true,
+                controls: Vec::new(),
+            },
+            prompt_capabilities: workspace_model::PromptInputCapabilities::default(),
+            image_capabilities: workspace_model::ImageCapabilities::default(),
+            available_commands: Vec::new(),
+            agent_plan: Vec::new(),
+            messages,
+            timeline,
+            tools,
+            repository: workspace_model::RepositorySnapshot {
+                branch: "main".into(),
+                head: "abc".into(),
+                changed_files: Vec::new(),
+                ahead_count: 1,
+                behind_count: 0,
+            },
+            inspector_tab: workspace_model::InspectorTab::Activity,
+            inspector_sections: Vec::new(),
+            session_changes: Vec::new(),
+            review_changes: Vec::new(),
+            turn_changes: Vec::new(),
+            thinking_status: Some(workspace_model::ThinkingStatus::Active),
+            thinking_text: "thinking".into(),
+            usage: workspace_model::SessionUsageSnapshot::default(),
+            pending_steers: Vec::new(),
+            history_total: entries as i64,
+            history_earliest_seq: Some(1),
+        }
+    }
+
+    #[test]
+    fn remote_projection_windows_timeline_and_referenced_entities() {
+        // 150 pairs = 300 timeline entries → keep the last 200 entries, which
+        // must cover exactly the last 100 pairs.
+        let snapshot = remote_fixture(150);
+        let projected = project_remote_snapshot(snapshot);
+        assert_eq!(projected.timeline.len(), REMOTE_TIMELINE_WINDOW);
+        // Every referenced message/tool survives; the trimmed head is dropped.
+        let referenced: HashSet<uuid::Uuid> = projected
+            .timeline
+            .iter()
+            .filter_map(|item| match item {
+                workspace_model::TimelineItem::Message(id) => Some(*id),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(referenced.len(), projected.messages.len());
+        for message in &projected.messages {
+            assert!(referenced.contains(&message.id), "message must be referenced");
+        }
+        // Oldest message pair (ids 1000/2000) fell out of the window.
+        let oldest_message = uuid::Uuid::from_u128(1000);
+        assert!(
+            projected
+                .messages
+                .iter()
+                .all(|m| m.id != oldest_message)
+        );
+    }
+
+    #[test]
+    fn remote_projection_caps_bodies_and_zeroes_desktop_only_fields() {
+        let snapshot = remote_fixture(3);
+        let projected = project_remote_snapshot(snapshot);
+
+        assert!(projected
+            .messages
+            .iter()
+            .all(|m| m.body.len() <= REMOTE_MESSAGE_BODY_CHARS + "\n...".len()));
+        assert!(projected
+            .tools
+            .iter()
+            .all(|t| t.summary.len() <= REMOTE_TOOL_TEXT_CHARS + "\n...".len()));
+
+        assert!(projected.session_changes.is_empty());
+        assert!(projected.review_changes.is_empty());
+        assert!(projected.turn_changes.is_empty());
+        assert!(projected.inspector_sections.is_empty());
+        assert!(projected.available_commands.is_empty());
+        assert!(projected.agent_plan.is_empty());
+        assert!(projected.thinking_text.is_empty());
+        assert!(projected.repository.changed_files.is_empty());
+        assert!(projected.repository.branch.is_empty());
+        assert!(!projected.session_config.hydrated);
+        // Conversation-relevant fields survive.
+        assert!(projected.thinking_status.is_some());
+        assert_eq!(projected.revision, 7);
+        assert_eq!(projected.history_total, 3);
+    }
+
+    #[test]
+    fn remote_projection_keeps_pending_permission_tools() {
+        let mut snapshot = remote_fixture(2);
+        snapshot.timeline.truncate(1); // drop the tool entries from the timeline
+        snapshot.messages.retain(|m| {
+            snapshot
+                .timeline
+                .iter()
+                .any(|item| matches!(item, workspace_model::TimelineItem::Message(id) if *id == m.id))
+        });
+        let pending_id = uuid::Uuid::from_u128(9999);
+        snapshot.tools.insert(
+            0,
+            workspace_model::ToolInvocation {
+                id: pending_id,
+                call_id: "pending-call".into(),
+                permission_input: Some(workspace_model::PermissionInputRequest::default()),
+                permission_decision: None,
+                ..snapshot.tools[0].clone()
+            },
+        );
+        let projected = project_remote_snapshot(snapshot);
+        assert!(
+            projected.tools.iter().any(|t| t.id == pending_id),
+            "pending-permission tool must survive the timeline trim"
+        );
+    }
+
+    #[test]
+    fn remote_patch_projection_zeroes_desktop_only_fields() {
+        let patch = workspace_model::UiSnapshotPatch {
+            revision: 9,
+            session: workspace_model::SessionSummary {
+                id: uuid::Uuid::nil(),
+                workspace_id: uuid::Uuid::nil(),
+                title: "t".into(),
+                model: "m".into(),
+                mode: None,
+                agent_cli: None,
+                status: workspace_model::SessionStatus::Streaming,
+            },
+            session_config: workspace_model::SessionConfigState {
+                hydrated: true,
+                controls: Vec::new(),
+            },
+            prompt_capabilities: workspace_model::PromptInputCapabilities::default(),
+            available_commands: Vec::new(),
+            agent_plan: Vec::new(),
+            messages: Vec::new(),
+            message_deltas: Vec::new(),
+            timeline_start: 0,
+            timeline: Vec::new(),
+            tools: Vec::new(),
+            repository: Some(workspace_model::RepositorySnapshot {
+                branch: "main".into(),
+                head: "abc".into(),
+                changed_files: Vec::new(),
+                ahead_count: 0,
+                behind_count: 0,
+            }),
+            inspector_tab: workspace_model::InspectorTab::Activity,
+            inspector_sections: Vec::new(),
+            session_changes: Vec::new(),
+            review_changes: Vec::new(),
+            turn_changes: Vec::new(),
+            thinking_status: None,
+            thinking_text: "lots of reasoning".into(),
+            usage: workspace_model::SessionUsageSnapshot::default(),
+            pending_steers: Vec::new(),
+        };
+        let projected = project_remote_patch(patch);
+        assert!(projected.thinking_text.is_empty(), "thinking text is phone-dead weight");
+        assert!(projected.repository.is_none());
+        assert!(projected.session_changes.is_empty());
+        assert!(projected.review_changes.is_empty());
+        assert!(projected.turn_changes.is_empty());
+        assert!(!projected.session_config.hydrated);
+        // Conversation delta fields are untouched.
+        assert_eq!(projected.revision, 9);
+        assert_eq!(projected.timeline_start, 0);
+    }
 }
 
 impl Application {
+    /// Remote GetState with an incremental-resume short-circuit.
+    ///
+    /// The phone sends the (session id, revision) it already holds on
+    /// reconnect. When both still match the PC's active session and revision,
+    /// resyncing would re-serialize the entire (trimmed) snapshot over the
+    /// relay for zero information — instead answer [`RemoteGetState::UpToDate`]
+    /// and let the phone keep its held state. Any mismatch falls back to a
+    /// full remote snapshot.
+    pub fn remote_get_state(
+        &mut self,
+        known: Option<(String, u64)>,
+    ) -> Result<crate::RemoteGetState, String> {
+        use crate::RemoteGetState;
+        self.poll_prompt_progress();
+        if let Some((known_session_id, known_revision)) = known {
+            if self.ui.session.id.to_string() == known_session_id
+                && self.ui.revision == known_revision
+            {
+                return Ok(RemoteGetState::UpToDate);
+            }
+        }
+        Ok(RemoteGetState::Snapshot(self.remote_ui_snapshot()))
+    }
+
     pub fn lightweight_ui_snapshot(&self) -> workspace_model::UiSnapshot {
         let mut created_change_paths =
             created_change_path_keys(&self.ui.session_changes, &self.ui.workspace.root);
@@ -360,44 +750,10 @@ impl Application {
     /// The relay path sends this over a mobile WebSocket. A full snapshot can
     /// be multiple megabytes (conversation bodies, tool outputs, repository
     /// diffs), which is enough to break the phone's WS connection before the
-    /// response can be processed. This trims the heaviest fields while
-    /// keeping the structure the mobile UI needs for its initial render.
+    /// response can be processed. The projection trims it to what the phone
+    /// actually renders (see [`project_remote_snapshot`]).
     pub fn remote_ui_snapshot(&self) -> workspace_model::UiSnapshot {
-        const REMOTE_MESSAGE_BODY_CHARS: usize = 2 * 1024;
-        const REMOTE_MESSAGE_WINDOW: usize = 200;
-        const REMOTE_THINKING_CHARS: usize = 4 * 1024;
-        const REMOTE_TOOL_TEXT_CHARS: usize = 2 * 1024;
-
-        let mut snapshot = self.lightweight_ui_snapshot();
-
-        // Keep a bounded window of recent messages and cap each body.
-        if snapshot.messages.len() > REMOTE_MESSAGE_WINDOW {
-            let start = snapshot.messages.len() - REMOTE_MESSAGE_WINDOW;
-            snapshot.messages.drain(0..start);
-        }
-        for message in &mut snapshot.messages {
-            cap_string_in_place(&mut message.body, REMOTE_MESSAGE_BODY_CHARS);
-        }
-
-        // Transient reasoning text can be very large during a long turn.
-        cap_string_in_place(&mut snapshot.thinking_text, REMOTE_THINKING_CHARS);
-
-        // Repository diffs are fetched on demand in the UI; the initial
-        // remote sync only needs branch/head and changed-file metadata.
-        for file in &mut snapshot.repository.changed_files {
-            file.hunks.clear();
-        }
-
-        // Tool fields are already capped by lightweight_ui_snapshot; cap the
-        // remaining free-text fields for the remote path too.
-        for tool in &mut snapshot.tools {
-            cap_string_in_place(&mut tool.summary, REMOTE_TOOL_TEXT_CHARS);
-            if let Some(err) = &mut tool.error {
-                cap_string_in_place(err, REMOTE_TOOL_TEXT_CHARS);
-            }
-        }
-
-        snapshot
+        project_remote_snapshot(self.lightweight_ui_snapshot())
     }
 
     pub fn lightweight_ui_update(
@@ -432,6 +788,10 @@ impl Application {
                     message_deltas.push(ChatMessageDelta {
                         id: message.id,
                         append: message.body[previous_body.len()..].to_string(),
+                        // UTF-16 code units: the frontend compares this against
+                        // the JS string `.length` of its local stream-store
+                        // body to detect a desynced append-only store.
+                        base_len: previous_body.encode_utf16().count() as u64,
                     });
                     cursor
                         .message_bodies

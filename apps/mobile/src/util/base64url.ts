@@ -6,6 +6,15 @@
 const ALPHABET =
   "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
 
+// Reverse lookup table: O(1) per character instead of an O(64) alphabet
+// scan. Ciphertext payloads make this the hot decode path (hundreds of KB
+// per full snapshot on the phone), where `indexOf` per char was measurably
+// slow on Hermes.
+const LOOKUP = new Int8Array(128).fill(-1);
+for (let i = 0; i < ALPHABET.length; i++) {
+  LOOKUP[ALPHABET.charCodeAt(i)] = i;
+}
+
 export function encodeBase64UrlNoPad(bytes: Uint8Array): string {
   let out = "";
   const len = bytes.length;
@@ -25,23 +34,24 @@ export function encodeBase64UrlNoPad(bytes: Uint8Array): string {
 export function decodeBase64UrlNoPad(input: string): Uint8Array {
   const cleaned = input.replace(/=+$/g, "");
   const len = cleaned.length;
-  const out: number[] = [];
+  const out = new Uint8Array(Math.floor((len * 6) / 8));
+  let written = 0;
   let buffer = 0;
   let bits = 0;
   for (let i = 0; i < len; i++) {
-    const ch = cleaned[i];
-    const value = ALPHABET.indexOf(ch);
+    const code = cleaned.charCodeAt(i);
+    const value = code < 128 ? LOOKUP[code] : -1;
     if (value === -1) {
-      throw new Error(`invalid base64url character: ${ch}`);
+      throw new Error(`invalid base64url character: ${cleaned[i]}`);
     }
     buffer = (buffer << 6) | value;
     bits += 6;
     if (bits >= 8) {
       bits -= 8;
-      out.push((buffer >> bits) & 0xff);
+      out[written++] = (buffer >> bits) & 0xff;
     }
   }
-  return new Uint8Array(out);
+  return written === out.length ? out : out.subarray(0, written);
 }
 
 export function bytesToHex(bytes: Uint8Array): string {

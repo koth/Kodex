@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { ToolInvocation, UiSnapshot, UiSnapshotPatch } from "../../types";
 import {
   appendStreamingMessageDelta,
+  getStreamingMessageBody,
   replaceStreamingMessageBody,
 } from "../conversation/streaming-message-store";
 import { applySnapshotPatch, materializeStreamingMessageBodies } from "./useWorkbenchSnapshot";
@@ -135,6 +136,51 @@ describe("materializeStreamingMessageBodies", () => {
 
     expect(next).toBe(snapshot);
     expect(next.messages[0].body).toBe("\n\n##xxxx\n\n#### yy");
+  });
+});
+
+describe("materializeStreamingMessageBodies – store reconcile", () => {
+  it("re-aligns a diverged stream store from an authoritative full snapshot", () => {
+    // The store appended deltas against a base the snapshot never had — the
+    // classic post-drop divergence. A full snapshot is authoritative: the
+    // store must be reset to it, or every later fold fails and the snapshot
+    // body freezes (truncated final reply) while revisions keep advancing.
+    replaceStreamingMessageBody("msg-reconcile-diverged", "stale + drifted + extra");
+    const snapshot = makeSnapshot({
+      messages: [{ id: "msg-reconcile-diverged", role: "Assistant", body: "authoritative body" }],
+      timeline: [{ Message: "msg-reconcile-diverged" }],
+    });
+
+    const next = materializeStreamingMessageBodies(snapshot, { reconcileStore: true });
+
+    expect(next).toBe(snapshot);
+    expect(next.messages[0].body).toBe("authoritative body");
+    expect(getStreamingMessageBody("msg-reconcile-diverged")).toBe("authoritative body");
+  });
+
+  it("extends a stale prefix store entry to the authoritative body", () => {
+    replaceStreamingMessageBody("msg-reconcile-prefix", "author");
+    const snapshot = makeSnapshot({
+      messages: [{ id: "msg-reconcile-prefix", role: "Assistant", body: "authoritative body" }],
+      timeline: [{ Message: "msg-reconcile-prefix" }],
+    });
+
+    materializeStreamingMessageBodies(snapshot, { reconcileStore: true });
+
+    expect(getStreamingMessageBody("msg-reconcile-prefix")).toBe("authoritative body");
+  });
+
+  it("leaves the stream store untouched when reconcileStore is not requested", () => {
+    replaceStreamingMessageBody("msg-reconcile-off", "stale + drifted + extra");
+    const snapshot = makeSnapshot({
+      messages: [{ id: "msg-reconcile-off", role: "Assistant", body: "authoritative body" }],
+      timeline: [{ Message: "msg-reconcile-off" }],
+    });
+
+    const next = materializeStreamingMessageBodies(snapshot);
+
+    expect(next).toBe(snapshot);
+    expect(getStreamingMessageBody("msg-reconcile-off")).toBe("stale + drifted + extra");
   });
 });
 

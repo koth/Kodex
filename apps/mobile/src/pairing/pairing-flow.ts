@@ -5,7 +5,7 @@ import type {
   PairingResume,
 } from "../types/relay-protocol";
 import { fromMessage } from "../relay/framing";
-import { PROTO_VERSION } from "../types/relay-protocol";
+import { PROTO_VERSION, CAPABILITY_CIPHERTEXT_B64 } from "../types/relay-protocol";
 import type { DeviceIdentity } from "../crypto/identity";
 import { deviceId, authSignature, devicePubkeyB64, publicKeyB64 } from "../crypto/identity";
 import { generatePrivateKey, getPublicKey, ecdhSharedSecret } from "../crypto/ecdh";
@@ -16,6 +16,11 @@ import type { BoundDevice } from "../account/binding";
 import { diagnostics } from "../util/diagnostics";
 
 const PAIRING_HANDSHAKE_TIMEOUT_MS = 30_000;
+
+/** Wire capabilities this phone advertises at pairing/resume time. The PC
+ * reads them from the relay-forwarded PairingConfirm to pick its outbound
+ * ciphertext encoding (compact base64 vs legacy number array). */
+export const WIRE_CAPABILITIES: string[] = [CAPABILITY_CIPHERTEXT_B64];
 
 async function recvEnvelopeWithTimeout(
   conn: RelayConnection,
@@ -61,6 +66,7 @@ export async function runPairingHandshake(
   pc_device_pubkey: qr.pc_device_pubkey,
   relay_endpoint: qr.relay_endpoint,
   phone_ephemeral_pubkey: encodeBase64UrlNoPad(ephemeralPublic),
+  capabilities: WIRE_CAPABILITIES,
   },
   });
   await conn.sendEnvelope(initiateEnv);
@@ -113,6 +119,7 @@ export async function runPairingResume(
   const resume: PairingResume = {
     pairing_token: bound.pairing_token,
     phone_ephemeral_pubkey: encodeBase64UrlNoPad(phoneEphPub),
+    capabilities: WIRE_CAPABILITIES,
   };
   const env = fromMessage(null, { type: "pairing_resume", payload: resume });
   await conn.sendEnvelope(env);

@@ -63,11 +63,22 @@ pub enum Message {
 /// Outer relay-routing shape that wraps a serialized [`Envelope`]. The
 /// relay routes by `to_device_id` only and never inspects `ciphertext`;
 /// encrypt/decrypt is owned by `relay-client`, not this crate.
+///
+/// The ciphertext is carried in exactly one of two encodings: the compact
+/// `ciphertext_b64` (base64url-no-pad, ~1.33 chars per byte) emitted to peers
+/// that advertised [`crate::pairing::CAPABILITY_CIPHERTEXT_B64`], or the
+/// legacy `ciphertext` number array (~4 chars per byte) for old peers.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct EncryptedEnvelope {
     pub to_device_id: String,
     pub nonce: Vec<u8>,
-    pub ciphertext: Vec<u8>,
+    /// Legacy encoding: ciphertext bytes as a JSON number array. Emitted only
+    /// by peers that predate `ciphertext_b64`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ciphertext: Option<Vec<u8>>,
+    /// Compact encoding: ciphertext bytes as base64url-no-pad.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ciphertext_b64: Option<String>,
     /// Present when this frame is one fragment of a larger encrypted payload.
     /// All fragments share the same `chunk_id`; receivers reassemble them by
     /// `chunk_index` before decrypting the concatenated ciphertext.
@@ -82,6 +93,68 @@ pub struct EncryptedEnvelope {
     /// from the original envelope so reassembly can restore it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub encoding: Option<String>,
+}
+
+impl EncryptedEnvelope {
+    /// Build from raw ciphertext bytes, choosing the compact base64 encoding
+    /// when the receiver advertised [`crate::pairing::CAPABILITY_CIPHERTEXT_B64`]
+    /// (`emit_b64`), else the legacy number array.
+    pub fn from_ciphertext(
+        to_device_id: String,
+        nonce: Vec<u8>,
+        ciphertext: Vec<u8>,
+        emit_b64: bool,
+        encoding: Option<String>,
+    ) -> Self {
+        if emit_b64 {
+            Self {
+                to_device_id,
+                nonce,
+                ciphertext: None,
+                ciphertext_b64: Some(ciphertext_b64_encode(&ciphertext)),
+                chunk_id: None,
+                chunk_index: None,
+                chunk_total: None,
+                encoding,
+            }
+        } else {
+            Self {
+                to_device_id,
+                nonce,
+                ciphertext: Some(ciphertext),
+                ciphertext_b64: None,
+                chunk_id: None,
+                chunk_index: None,
+                chunk_total: None,
+                encoding,
+            }
+        }
+    }
+
+    /// Resolve the raw ciphertext bytes from whichever encoding is present.
+    /// Prefers the compact `ciphertext_b64`; falls back to the legacy number
+    /// array. Errors only when neither (or both invalid) is carried.
+    pub fn ciphertext_bytes(&self) -> Result<Vec<u8>, String> {
+        if let Some(b64) = &self.ciphertext_b64 {
+            return decode_ciphertext_b64(b64);
+        }
+        if let Some(bytes) = &self.ciphertext {
+            return Ok(bytes.clone());
+        }
+        Err("encrypted envelope carries no ciphertext".to_string())
+    }
+}
+
+fn ciphertext_b64_encode(bytes: &[u8]) -> String {
+    use base64::Engine as _;
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
+}
+
+fn decode_ciphertext_b64(encoded: &str) -> Result<Vec<u8>, String> {
+    use base64::Engine as _;
+    base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(encoded)
+        .map_err(|e| format!("invalid ciphertext_b64: {e}"))
 }
 
 impl Envelope {
@@ -235,24 +308,65 @@ mod tests {
 
     #[test]
     fn encrypted_envelope_exposes_no_plaintext() {
-        let enc = EncryptedEnvelope {
-            to_device_id: "dev-1".to_string(),
-            nonce: vec![1, 2, 3],
-            ciphertext: vec![4, 5, 6],
-            chunk_id: None,
-            chunk_index: None,
-            chunk_total: None,
-            encoding: None,
-        };
+        let enc = EncryptedEnvelope::from_ciphertext(
+            "dev-1".to_string(),
+            vec![1, 2, 3],
+            vec![4, 5, 6],
+            false,
+            None,
+        );
         let json = serde_json::to_value(&enc).unwrap();
         let obj = json.as_object().unwrap();
         assert_eq!(obj.len(), 3);
         assert!(obj.contains_key("to_device_id"));
         assert!(obj.contains_key("nonce"));
         assert!(obj.contains_key("ciphertext"));
-        for key in ["payload", "type", "id", "message_type", "proto_version", "encoding"] {
+        for key in ["payload", "type", "id", "message_type", "proto_version", "encoding", "ciphertext_b64"] {
             assert!(!obj.contains_key(key), "unexpected key {key}");
         }
+    }
+
+    #[test]
+    fn encrypted_envelope_emits_and_resolves_base64_ciphertext() {
+        let bytes: Vec<u8> = (0..=255).cycle().take(512).collect();
+        let enc = EncryptedEnvelope::from_ciphertext(
+            "dev-1".to_string(),
+            vec![0; 12],
+            bytes.clone(),
+            true,
+            None,
+        );
+        assert!(enc.ciphertext.is_none());
+        assert!(enc.ciphertext_b64.is_some());
+        // The compact encoding must serialize smaller than the number array.
+        let b64_len = serde_json::to_string(&enc).unwrap().len();
+        let legacy = EncryptedEnvelope::from_ciphertext(
+            "dev-1".to_string(),
+            vec![0; 12],
+            bytes.clone(),
+            false,
+            None,
+        );
+        let legacy_len = serde_json::to_string(&legacy).unwrap().len();
+        assert!(
+            b64_len * 2 < legacy_len,
+            "base64 frame ({b64_len}) should be far smaller than number-array frame ({legacy_len})"
+        );
+        // Both encodings resolve to the same bytes; the legacy form also
+        // decodes when it arrives as a string (cross-version tolerance).
+        assert_eq!(enc.ciphertext_bytes().unwrap(), bytes);
+        assert_eq!(legacy.ciphertext_bytes().unwrap(), bytes);
+        let json = serde_json::to_string(&enc).unwrap();
+        let back: EncryptedEnvelope = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.ciphertext_bytes().unwrap(), bytes);
+    }
+
+    #[test]
+    fn encrypted_envelope_resolves_legacy_number_array() {
+        // Old-peer frame: `ciphertext` as a number array, no b64 field.
+        let json = r#"{"to_device_id":"dev-1","nonce":[1],"ciphertext":[9,8,7]}"#;
+        let enc: EncryptedEnvelope = serde_json::from_str(json).unwrap();
+        assert_eq!(enc.ciphertext_bytes().unwrap(), vec![9, 8, 7]);
     }
 
     #[test]

@@ -342,7 +342,7 @@ fn start_remote_control_driver(app: tauri::AppHandle) {
 
     let app_for_loop = app.clone();
     let pairing_notify = app.state::<AppState>().remote_control().pairing_notify();
-    let session_sink = Arc::new(std::sync::Mutex::new(None::<(SessionKey, String)>));
+    let session_sink = Arc::new(std::sync::Mutex::new(None::<(SessionKey, String, bool)>));
     tauri::async_runtime::spawn(async move {
         let mut backoff = Duration::from_secs(2);
         loop {
@@ -413,8 +413,8 @@ fn start_remote_control_driver(app: tauri::AppHandle) {
             // connection before running the router. This makes a transient
             // relay/network drop recover without requiring a new QR scan.
             if let Ok(guard) = session_sink.lock() {
-                if let Some((key, peer)) = guard.as_ref() {
-                    conn.install_session_key(key.clone(), peer.clone());
+                if let Some((key, peer, emit_b64)) = guard.as_ref() {
+                    conn.install_session_key(key.clone(), peer.clone(), *emit_b64);
                 }
             }
             // Register the current pairing code (if any) so the phone's
@@ -446,10 +446,20 @@ fn start_remote_control_driver(app: tauri::AppHandle) {
             // `pairing_notify` so a freshly minted pairing code interrupts the
             // run, drops this connection, and reconnects to re-register the
             // new code (the relay binds a pairing code to a connection).
-            let handler =
-                crate::remote_control_bridge::DesktopControlHandler::new(app_for_loop.clone());
-            let events =
-                crate::remote_control_bridge::AppUpdateEventSource::new(app_for_loop.clone());
+            // Handler and event source share the patch cursor: a phone-driven
+            // SwitchSession resets it so the next poll re-pushes a Full
+            // snapshot (phone entry sync) even when the PC's revision is
+            // unchanged.
+            let remote_cursor: crate::remote_control_bridge::SharedUiPatchCursor =
+                std::sync::Arc::new(std::sync::Mutex::new(UiPatchCursor::default()));
+            let handler = crate::remote_control_bridge::DesktopControlHandler::new(
+                app_for_loop.clone(),
+                remote_cursor.clone(),
+            );
+            let events = crate::remote_control_bridge::AppUpdateEventSource::new(
+                app_for_loop.clone(),
+                remote_cursor,
+            );
             let pairing =
                 crate::remote_control_bridge::DesktopPairingHandler::new(app_for_loop.clone());
             let driver = RelayDriver::new_with_session_sink(

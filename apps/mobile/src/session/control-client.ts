@@ -122,11 +122,29 @@ export class ControlClient {
     }>;
   }
 
-  getState(): Promise<{ op: "get_state"; request_id: string; snapshot: UiSnapshot }> {
-    return this.send({ op: "get_state", request_id: uuidV4() }) as Promise<{
+  /** Fetch the active session's state. `known` carries the held (session,
+   * revision); when the PC still matches, it answers up_to_date and skips the
+   * whole-snapshot transfer. */
+  getState(known?: { sessionId: string; revision: number }): Promise<{
+    op: "get_state";
+    request_id: string;
+    snapshot?: UiSnapshot;
+    up_to_date?: boolean;
+  }> {
+    return this.send({
+      op: "get_state",
+      request_id: uuidV4(),
+      ...(known
+        ? {
+            known_session_id: known.sessionId,
+            known_revision: known.revision,
+          }
+        : {}),
+    }) as Promise<{
       op: "get_state";
       request_id: string;
-      snapshot: UiSnapshot;
+      snapshot?: UiSnapshot;
+      up_to_date?: boolean;
     }>;
   }
 

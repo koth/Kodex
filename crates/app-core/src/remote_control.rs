@@ -19,6 +19,15 @@ use workspace_model::{
 
 use crate::application::AppUpdate;
 
+/// The answer to a remote GetState request. `UpToDate` is the incremental
+/// resume short-circuit: the caller already holds the exact (session,
+/// revision) state, so no snapshot needs to cross the relay.
+#[derive(Debug, Clone)]
+pub enum RemoteGetState {
+    Snapshot(UiSnapshot),
+    UpToDate,
+}
+
 /// Transport-agnostic control over a running kodex session.
 ///
 /// All methods are async so the same trait serves a synchronous local
@@ -51,8 +60,13 @@ pub trait RemoteControl: Send + Sync {
         prompt: Vec<UserPromptContent>,
     ) -> impl std::future::Future<Output = Result<(), String>> + Send;
 
-    /// Get the current full UI snapshot of the active session.
-    fn get_state(&self) -> impl std::future::Future<Output = Result<UiSnapshot, String>> + Send;
+    /// Get the current UI snapshot of the active session. `known` carries the
+    /// caller-held `(session_id, revision)`; when it still matches, the
+    /// response is [`RemoteGetState::UpToDate`] instead of a full snapshot.
+    fn get_state(
+        &self,
+        known: Option<(String, u64)>,
+    ) -> impl std::future::Future<Output = Result<RemoteGetState, String>> + Send;
 
     /// Resolve a pending permission request.
     fn resolve_permission(
@@ -188,11 +202,11 @@ where
         async move { result }
     }
 
-    fn get_state(&self) -> impl std::future::Future<Output = Result<UiSnapshot, String>> + Send {
-        let result = self.with_app(|app| {
-            app.poll_prompt_progress();
-            Ok(app.remote_ui_snapshot())
-        });
+    fn get_state(
+        &self,
+        known: Option<(String, u64)>,
+    ) -> impl std::future::Future<Output = Result<RemoteGetState, String>> + Send {
+        let result = self.with_app(|app| app.remote_get_state(known));
         async move { result }
     }
 

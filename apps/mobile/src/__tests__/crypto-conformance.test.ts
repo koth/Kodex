@@ -125,7 +125,7 @@ describe("AEAD envelope round-trips and rejects tampering", () => {
     const enc = encrypt(key, toDeviceId, envelope);
     expect(enc.to_device_id).toBe(toDeviceId);
     expect(enc.nonce).toHaveLength(12);
-    expect(enc.ciphertext.length).toBeGreaterThan(0);
+    expect(enc.ciphertext!.length).toBeGreaterThan(0);
     expect(decrypt(key, enc)).toEqual(envelope);
   });
 
@@ -143,7 +143,7 @@ describe("AEAD envelope round-trips and rejects tampering", () => {
 
   it("tampered_ciphertext_fails", () => {
     const enc = encrypt(key, toDeviceId, envelope);
-    const bytes = Uint8Array.from(enc.ciphertext);
+    const bytes = Uint8Array.from(enc.ciphertext!);
     bytes[0] ^= 0xff;
     const tampered = { ...enc, ciphertext: Array.from(bytes) };
     expect(() => decrypt(key, tampered)).toThrow();

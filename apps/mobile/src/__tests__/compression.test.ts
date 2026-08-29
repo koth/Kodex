@@ -1,6 +1,9 @@
 import { describe, it, expect } from "vitest";
 import { encrypt, decrypt, ENCODING_GZIP, NONCE_LEN } from "../crypto/aead";
-import type { Envelope } from "../types/relay-protocol";
+import { encodeBase64UrlNoPad } from "../util/base64url";
+import { RelayConnection, splitEncrypted } from "../relay/connection";
+import { linkedPair } from "./mock-relay";
+import type { EncryptedEnvelope, Envelope } from "../types/relay-protocol";
 
 // Payload-compression behavior of the AEAD framing: large envelopes are
 // gzip'd BEFORE encryption and flagged via EncryptedEnvelope.encoding so the
@@ -33,8 +36,47 @@ describe("aead payload compression", () => {
     const encrypted = encrypt(KEY, PEER, envelope);
     expect(encrypted.encoding).toBe(ENCODING_GZIP);
     // Sanity: this repetitive payload must actually shrink.
-    expect(encrypted.ciphertext.length).toBeLessThan(rawLen / 2);
+    expect(encrypted.ciphertext!.length).toBeLessThan(rawLen / 2);
     expect(decrypt(KEY, encrypted)).toEqual(envelope);
+  });
+
+  it("decodes the compact base64url ciphertext_b64 emitted by newer PCs", () => {
+    // Mirror of relay-client emitting ciphertext_b64 when the phone
+    // advertises CAPABILITY_CIPHERTEXT_B64: the same plaintext ciphertext
+    // arrives as base64url instead of a number array and must decrypt
+    // identically.
+    const envelope = bigEnvelope();
+    const legacy = encrypt(KEY, PEER, envelope);
+    const asB64: EncryptedEnvelope = {
+      to_device_id: legacy.to_device_id,
+      nonce: legacy.nonce,
+      ciphertext: undefined,
+      ciphertext_b64: encodeBase64UrlNoPad(Uint8Array.from(legacy.ciphertext!)),
+      encoding: legacy.encoding,
+    };
+    expect(decrypt(KEY, asB64)).toEqual(envelope);
+  });
+
+  it("ciphertext_b64 survives the chunk split/reassemble round trip", async () => {
+    // A PC-emitted b64 frame large enough to be chunked: the phone must
+    // decode each b64 fragment, concatenate, and decrypt. Raw frames are
+    // injected through the transport to emulate the PC's emit path.
+    const [phoneT, pcT] = linkedPair();
+    const phone = new RelayConnection(phoneT, 30_000);
+    phone.installSessionKey(KEY, "pc-device-id");
+
+    const legacy = encrypt(KEY, "phone-device-id", bigEnvelope());
+    const b64Frame: EncryptedEnvelope = {
+      to_device_id: legacy.to_device_id,
+      nonce: legacy.nonce,
+      ciphertext_b64: encodeBase64UrlNoPad(Uint8Array.from(legacy.ciphertext!)),
+      encoding: legacy.encoding,
+    };
+    for (const frame of splitEncrypted(b64Frame)) {
+      await pcT.sendText(frame);
+    }
+    const got = await phone.recvEnvelope();
+    expect((got?.payload as { kind?: string }).kind).toBe("snapshot_full");
   });
 
   it("small payloads stay raw (no encoding field)", () => {

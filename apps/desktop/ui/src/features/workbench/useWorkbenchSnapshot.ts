@@ -5,8 +5,10 @@ import { onUiSnapshot, onUiSnapshotPatch } from "../../lib/events";
 import {
   appendStreamingMessageDelta,
   clearStreamingMessageBodies,
+  ensureStreamingMessageBody,
   flushStreamingMessageBodies,
   getStreamingMessageBody,
+  replaceStreamingMessageBody,
 } from "../conversation/streaming-message-store";
 
 /** How often the workbench re-syncs its snapshot from the backend. Streaming
@@ -108,10 +110,41 @@ function mergeById<T extends { id: string }>(current: T[], updates: T[]): T[] {
   return appended.length === 0 ? next : [...next, ...appended];
 }
 
-function applyStreamingDeltas(patch: UiSnapshotPatch) {
+/** Apply a patch's streaming deltas to the append-only stream store. Returns
+ *  true when at least one delta was skipped as misaligned — the caller must
+ *  then schedule a full re-snapshot, because a desynced store can never
+ *  recover by appending (that is the "final part of the reply renders
+ *  truncated" failure mode).
+ *
+ *  Alignment rule: the backend stamps every delta with `base_len`, the UTF-16
+ *  length of the base body it extends. The local store body must have exactly
+ *  that length. A message whose streaming render has not mounted yet (no
+ *  store entry) may be seeded from the snapshot body when it matches
+ *  `base_len`; otherwise the delta is skipped. */
+function applyStreamingDeltas(
+  patch: UiSnapshotPatch,
+  messages: UiSnapshot["messages"],
+): boolean {
+  let misaligned = false;
   for (const delta of patch.message_deltas ?? []) {
+    if (!delta.append) continue;
+    const storeBody = getStreamingMessageBody(delta.id) ?? "";
+    let baseBody = storeBody;
+    if (!baseBody) {
+      const snapshotBody =
+        messages.find((message) => message.id === delta.id)?.body ?? "";
+      baseBody = snapshotBody;
+    }
+    if (typeof delta.base_len === "number" && baseBody.length !== delta.base_len) {
+      misaligned = true;
+      continue;
+    }
+    if (!storeBody && baseBody) {
+      ensureStreamingMessageBody(delta.id, baseBody);
+    }
     appendStreamingMessageDelta(delta.id, delta.append);
   }
+  return misaligned;
 }
 
 function isStreamingDeltaOnlyPatch(patch: UiSnapshotPatch) {
@@ -125,10 +158,14 @@ function isStreamingDeltaOnlyPatch(patch: UiSnapshotPatch) {
   );
 }
 
-export function materializeStreamingMessageBodies(snapshot: UiSnapshot): UiSnapshot {
+export function materializeStreamingMessageBodies(
+  snapshot: UiSnapshot,
+  options?: { reconcileStore?: boolean },
+): UiSnapshot {
   // Pending stream flushes are debounced; force them out before we decide whether
   // the snapshot body is stale relative to the live stream store.
   flushStreamingMessageBodies();
+  const reconcileStore = options?.reconcileStore ?? false;
   let changed = false;
   const messages = snapshot.messages.map((message) => {
     const streamingBody = getStreamingMessageBody(message.id);
@@ -137,6 +174,19 @@ export function materializeStreamingMessageBodies(snapshot: UiSnapshot): UiSnaps
       streamingBody === message.body ||
       streamingBody.length <= message.body.length
     ) {
+      if (
+        reconcileStore &&
+        streamingBody != null &&
+        streamingBody !== message.body
+      ) {
+        // A full snapshot is authoritative. The append-only stream store can
+        // never recover from a divergence by appending: without this repair
+        // every later fold fails, the snapshot body freezes at the divergence
+        // point while revisions keep advancing, and the final Idle render
+        // shows a truncated prefix of the reply. Re-align the store so the
+        // next delta appends to the correct base.
+        replaceStreamingMessageBody(message.id, message.body);
+      }
       return message;
     }
     // Prefer the longer stream body whenever it is a continuation OR the
@@ -150,6 +200,9 @@ export function materializeStreamingMessageBodies(snapshot: UiSnapshot): UiSnaps
       message.body.length > 0 &&
       streamingBody.includes(message.body);
     if (!streamIsContinuation && !snapshotLooksStalePrefix) {
+      if (reconcileStore) {
+        replaceStreamingMessageBody(message.id, message.body);
+      }
       return message;
     }
     changed = true;
@@ -199,16 +252,17 @@ export function useWorkbenchSnapshot() {
     };
   }, [currentSessionId]);
 
-  const pollState = useCallback(async () => {
+  const pollState = useCallback(async (force = false) => {
     try {
       const state = await sessionGetState();
       if (
+        force ||
         state.session.id !== prevSnapshotSessionId.current ||
         state.revision !== prevSnapshotRevision.current
       ) {
         prevSnapshotSessionId.current = state.session.id;
         prevSnapshotRevision.current = state.revision;
-        setSnapshot(materializeStreamingMessageBodies(state));
+        setSnapshot(materializeStreamingMessageBodies(state, { reconcileStore: true }));
       }
     } catch {
       // No workspace open; the welcome screen remains the source of truth.
@@ -219,7 +273,7 @@ export function useWorkbenchSnapshot() {
     prevSnapshotSessionId.current = nextSnapshot.session.id;
     prevSnapshotRevision.current = nextSnapshot.revision;
     setWorkspaceReady(true);
-    setSnapshot(materializeStreamingMessageBodies(nextSnapshot));
+    setSnapshot(materializeStreamingMessageBodies(nextSnapshot, { reconcileStore: true }));
   }, []);
 
   const clearSnapshot = useCallback(() => {
@@ -247,9 +301,17 @@ export function useWorkbenchSnapshot() {
       if (reconcileTimer !== 0) return;
       reconcileTimer = window.setTimeout(() => {
         reconcileTimer = 0;
-        void pollState();
+        // Forced: a reconcile is only scheduled when the local state is known
+        // to be suspect (gap/stale patch, misaligned delta, missing base).
+        // The revision may already match the backend even though the message
+        // bodies diverged — the revision-equality guard must not skip the
+        // authoritative re-fetch in that case.
+        void pollState(true);
       }, 120);
     };
+    // Guard against double-applying a patch's deltas when React StrictMode
+    // re-invokes the setSnapshot updater for the same patch object.
+    const appliedDeltaPatches = new WeakSet<UiSnapshotPatch>();
 
     onUiSnapshot((nextSnapshot) => {
       if (disposed) return;
@@ -268,7 +330,7 @@ export function useWorkbenchSnapshot() {
           `revision=${nextSnapshot.revision} messages=${nextSnapshot.messages.length} tools=${nextSnapshot.tools.length} timeline=${nextSnapshot.timeline.length}`,
         );
       }
-      setSnapshot(materializeStreamingMessageBodies(nextSnapshot));
+      setSnapshot(materializeStreamingMessageBodies(nextSnapshot, { reconcileStore: true }));
     })
       .then((cleanup) => {
         if (disposed) {
@@ -289,9 +351,6 @@ export function useWorkbenchSnapshot() {
       // still land in the stream store + snapshot bodies.
       if (isDuplicateRevision && !hasDeltas) return;
 
-      if (hasDeltas) {
-        applyStreamingDeltas(patch);
-      }
       setWorkspaceReady(true);
       setSnapshot((prev) => {
         if (!prev) {
@@ -319,6 +378,19 @@ export function useWorkbenchSnapshot() {
 
         prevSnapshotSessionId.current = patch.session.id;
         prevSnapshotRevision.current = Math.max(prev.revision, patch.revision);
+
+        // Streaming deltas mutate the append-only stream store, so they may
+        // only be applied once the patch is actually accepted — never for a
+        // stale/gap patch (those deltas are computed against a base the local
+        // store does not hold). Misaligned deltas (store length ≠ the
+        // backend's base_len) are skipped and repaired by a full re-snapshot:
+        // appending them would desync the store permanently.
+        if (hasDeltas && !appliedDeltaPatches.has(patch)) {
+          appliedDeltaPatches.add(patch);
+          if (applyStreamingDeltas(patch, prev.messages)) {
+            scheduleFullResync();
+          }
+        }
 
         // Delta-only patches intentionally omit `messages`. Fold the live
         // stream store back into snapshot bodies so Idle/final renders keep

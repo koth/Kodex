@@ -3,6 +3,7 @@ import { gzipSync, gunzipSync } from "fflate";
 import type { EncryptedEnvelope, Envelope } from "../types/relay-protocol";
 import { PROTO_VERSION } from "../types/relay-protocol";
 import { randomBytes } from "../util/random";
+import { decodeBase64UrlNoPad } from "../util/base64url";
 
 // ChaCha20-Poly1305 AEAD framing, byte-aligned with relay-client::crypto.
 // Rust: fresh 12-byte OsRng nonce, AAD = to_device_id UTF-8 bytes, ciphertext =
@@ -54,6 +55,20 @@ export function encrypt(
 }
 
 /**
+ * Resolve the ciphertext bytes from whichever wire encoding the frame
+ * carries. New PCs emit the compact base64url `ciphertext_b64` (~1.33
+ * chars/byte); legacy PCs emit the number-array `ciphertext` (~4
+ * chars/byte). The phone decodes both so mixed-version pairings keep
+ * working.
+ */
+export function resolveCiphertextBytes(encrypted: EncryptedEnvelope): Uint8Array {
+  if (typeof encrypted.ciphertext_b64 === "string") {
+    return decodeBase64UrlNoPad(encrypted.ciphertext_b64);
+  }
+  return new Uint8Array(encrypted.ciphertext ?? []);
+}
+
+/**
  * Decrypt an `EncryptedEnvelope` back into a typed `Envelope`. Verifies the
  * AEAD tag, inverts the optional gzip payload encoding, and checks
  * `proto_version` matches the current `PROTO_VERSION`.
@@ -68,7 +83,7 @@ export function decrypt(
   const nonce = new Uint8Array(encrypted.nonce);
   const aad = toUtf8(encrypted.to_device_id);
   const cipher = chacha20poly1305(key.bytes, nonce, aad);
-  const plaintextBytes = cipher.decrypt(new Uint8Array(encrypted.ciphertext));
+  const plaintextBytes = cipher.decrypt(resolveCiphertextBytes(encrypted));
   let plaintext: string;
   switch (encrypted.encoding) {
     case undefined:

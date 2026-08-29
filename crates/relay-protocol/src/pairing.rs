@@ -1,5 +1,12 @@
 use serde::{Deserialize, Serialize};
 
+/// Wire capability advertised at pairing time (PairingInitiate/PairingResume)
+/// and echoed back through PairingConfirm. A peer advertising
+/// [`CAPABILITY_CIPHERTEXT_B64`] decodes base64url-no-pad `ciphertext_b64`
+/// payloads, so the sender may emit the compact encoding instead of the
+/// legacy JSON number-array `ciphertext` (~4 chars/byte vs ~1.33).
+pub const CAPABILITY_CIPHERTEXT_B64: &str = "ciphertext_b64";
+
 /// Phone -> relay: initiate pairing from a scanned QR code.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PairingInitiate {
@@ -9,6 +16,9 @@ pub struct PairingInitiate {
     pub relay_endpoint: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub phone_ephemeral_pubkey: Option<String>,
+    /// Sender wire capabilities, forwarded to the peer via PairingConfirm.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub capabilities: Vec<String>,
 }
 
 /// Relay -> both devices: pairing confirmed. The relay forwards the phone's
@@ -26,6 +36,11 @@ pub struct PairingConfirm {
     pub session_key_material: String,
     pub pc_device_id: String,
     pub phone_device_id: String,
+    /// The initiating phone's wire capabilities (echoed so the PC can pick
+    /// its emit encoding). Empty when the peer predates capability
+    /// advertisement — always safe to decode both encodings regardless.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub capabilities: Vec<String>,
 }
 
 /// Already-paired device -> relay: resume a persisted (bound) pairing without
@@ -38,6 +53,9 @@ pub struct PairingResume {
     pub pairing_token: String,
     /// Phone's fresh ephemeral X25519 public key, base64url-no-pad.
     pub phone_ephemeral_pubkey: String,
+    /// Sender wire capabilities, forwarded to the peer via PairingConfirm.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub capabilities: Vec<String>,
 }
 
 /// Device -> relay: tell the paired peer that the sender could not decrypt

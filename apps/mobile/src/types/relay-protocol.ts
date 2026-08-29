@@ -17,6 +17,13 @@ import type {
 
 export const PROTO_VERSION = 1 as const;
 
+/** Wire capability advertised at pairing time and echoed via PairingConfirm.
+ * Mirrors relay_protocol::pairing::CAPABILITY_CIPHERTEXT_B64: a peer that
+ * advertises it may receive base64url-no-pad `ciphertext_b64` payloads
+ * (~1.33 chars/byte) instead of the legacy number-array `ciphertext`
+ * (~4 chars/byte). */
+export const CAPABILITY_CIPHERTEXT_B64 = "ciphertext_b64" as const;
+
 /** The raw wire frame exchanged between PC, relay, and phone. */
 export interface Envelope {
   proto_version: number;
@@ -29,7 +36,13 @@ export interface Envelope {
 export interface EncryptedEnvelope {
   to_device_id: string;
   nonce: number[];
-  ciphertext: number[];
+  /** Legacy payload encoding: the ciphertext bytes as a JSON number array
+   * (~4 chars/byte). Kept for old-peer compatibility on the emit path. */
+  ciphertext?: number[];
+  /** Preferred payload encoding: the ciphertext bytes as base64url-no-pad
+   * (~1.33 chars/byte). PCs emit this when the phone advertises the
+   * `ciphertext_b64` capability at pairing time. */
+  ciphertext_b64?: string;
   /** Present when this frame is one fragment of a larger encrypted payload. */
   chunk_id?: string;
   chunk_index?: number;
@@ -57,7 +70,15 @@ export type ControlRequest =
       workspace_root?: string | null;
     }
   | { op: "send_prompt"; request_id: string; prompt: UserPromptContent[] }
-  | { op: "get_state"; request_id: string }
+  | {
+      op: "get_state";
+      request_id: string;
+      /** Held (active session id, revision). When both still match the PC's
+       * active state the PC answers `up_to_date` instead of re-sending the
+       * full snapshot. Omit for a first sync (always Full). */
+      known_session_id?: string;
+      known_revision?: number;
+    }
   | {
       op: "resolve_permission";
       request_id: string;
@@ -74,7 +95,14 @@ export type ControlResponse =
   | { op: "create_session"; request_id: string; session_id: string }
   | { op: "switch_session"; request_id: string }
   | { op: "send_prompt"; request_id: string }
-  | { op: "get_state"; request_id: string; snapshot: UiSnapshot }
+  | {
+      op: "get_state";
+      request_id: string;
+      /** Absent when `up_to_date` is true — the held snapshot is still
+       * current and nothing needed to cross the relay. */
+      snapshot?: UiSnapshot;
+      up_to_date?: boolean;
+    }
   | { op: "resolve_permission"; request_id: string }
   | { op: "cancel"; request_id: string }
   | { op: "stop_tool"; request_id: string }
@@ -101,6 +129,8 @@ export interface PairingInitiate {
   pc_device_pubkey: string;
   relay_endpoint: string;
   phone_ephemeral_pubkey?: string | null;
+  /** Sender wire capabilities forwarded to the peer via PairingConfirm. */
+  capabilities?: string[];
 }
 export interface PairingConfirm {
   /** Present when the relay rejected the pairing/resume (e.g. invalid or
@@ -110,10 +140,15 @@ export interface PairingConfirm {
   session_key_material: string;
   pc_device_id: string;
   phone_device_id: string;
+  /** Wire capabilities the peers agreed on (echoed from the phone's
+   * PairingResume/PairingInitiate capabilities). */
+  capabilities?: string[];
 }
 export interface PairingResume {
   pairing_token: string;
   phone_ephemeral_pubkey: string;
+  /** Sender wire capabilities forwarded to the peer via PairingConfirm. */
+  capabilities?: string[];
 }
 export interface PairingRegister {
   pairing_code: string;

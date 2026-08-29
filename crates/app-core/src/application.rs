@@ -55,7 +55,9 @@ use prompt_content::{
 use titles::{
     extract_title_from_prompt, extract_title_from_response, is_placeholder_session_title,
 };
-pub use ui_snapshot::{UiPatchCursor, UiSnapshotUpdate};
+pub use ui_snapshot::{
+    project_remote_patch, project_remote_snapshot, UiPatchCursor, UiSnapshotUpdate,
+};
 pub use update_signal::AppUpdate;
 
 const AGENT_DEFAULT_MODEL_LABEL: &str = "Agent default";

@@ -34,6 +34,14 @@ pub enum ControlRequest {
     },
     GetState {
         request_id: Uuid,
+        /// The caller's held (active session id, revision). When both still
+        /// match the PC's active state, the PC answers `up_to_date` instead of
+        /// re-serializing the full snapshot — reconnect resyncs stop paying
+        /// the whole-snapshot cost. Absent on first sync (always Full).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        known_session_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        known_revision: Option<u64>,
     },
     ResolvePermission {
         request_id: Uuid,
@@ -76,7 +84,16 @@ pub enum ControlResponse {
     },
     GetState {
         request_id: Uuid,
-        snapshot: UiSnapshot,
+        /// `None` when `up_to_date` is true: the caller's held state is still
+        /// current, so no snapshot is transferred. Always `Some` otherwise.
+        /// Optional on the wire so peers that predate the short-circuit
+        /// (which always send a full snapshot) still decode.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        snapshot: Option<UiSnapshot>,
+        /// True when the request carried `known_session_id`/`known_revision`
+        /// matching the PC's active state — keep the held snapshot as-is.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        up_to_date: bool,
     },
     ResolvePermission {
         request_id: Uuid,
@@ -100,7 +117,10 @@ impl ControlRequest {
             | ControlRequest::CreateSession { request_id, .. }
             | ControlRequest::SwitchSession { request_id, .. }
             | ControlRequest::SendPrompt { request_id, .. }
-            | ControlRequest::GetState { request_id }
+            | ControlRequest::GetState {
+                request_id,
+                ..
+            }
             | ControlRequest::ResolvePermission { request_id, .. }
             | ControlRequest::Cancel { request_id }
             | ControlRequest::StopTool { request_id, .. } => *request_id,

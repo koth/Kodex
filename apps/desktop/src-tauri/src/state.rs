@@ -558,9 +558,14 @@ impl AppState {
         Ok(app.lightweight_ui_update(cursor))
     }
 
-    /// Same as [`Self::poll_active_and_get_update`] but trims Full snapshots
-    /// with [`app_core::Application::remote_ui_snapshot`] so event pushes to
-    /// the mobile relay stay small enough for a phone WebSocket frame.
+    /// Same as [`Self::poll_active_and_get_update`] but projects the result
+    /// for the mobile relay: Full snapshots are trimmed by
+    /// [`app_core::project_remote_snapshot`] (aligned conversation window,
+    /// desktop-only fields zeroed) and patches by
+    /// [`app_core::project_remote_patch`] (the phone ignores those fields, and
+    /// re-sending them — e.g. the full `thinking_text` on every streaming
+    /// patch — made updates anything but incremental). The cursor keeps
+    /// tracking the unprojected snapshot so delta chains stay intact.
     pub fn poll_active_and_get_remote_update(
         &self,
         cursor: &mut UiPatchCursor,
@@ -573,8 +578,12 @@ impl AppState {
             _ => return Err("No connected workspace open".into()),
         };
         Ok(app.lightweight_ui_update(cursor).map(|update| match update {
-            UiSnapshotUpdate::Full(_) => UiSnapshotUpdate::Full(app.remote_ui_snapshot()),
-            other => other,
+            UiSnapshotUpdate::Full(snapshot) => {
+                UiSnapshotUpdate::Full(app_core::project_remote_snapshot(snapshot))
+            }
+            UiSnapshotUpdate::Patch(patch) => {
+                UiSnapshotUpdate::Patch(app_core::project_remote_patch(patch))
+            }
         }))
     }
 

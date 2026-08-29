@@ -9,6 +9,7 @@ import {
 import {
   appendStreamingMessageDelta,
   clearAllStreamingMessages,
+  getStreamingMessageBody,
 } from "./streaming-message-store";
 
 type Listener = (snapshot: Snapshot | null) => void;
@@ -130,6 +131,19 @@ export class SessionStore {
           this.snapshot.messages.map((m) => [m.id, m.body] as const),
         );
         for (const delta of patch.message_deltas ?? []) {
+          // The streaming store is append-only and cannot recover from a
+          // desync by appending. The backend stamps each delta with the
+          // UTF-16 length of the base body it extends; a mismatch means a
+          // frame was dropped/duplicated upstream — request a full snapshot
+          // instead of appending a misaligned suffix.
+          if (typeof delta.base_len === "number") {
+            const local =
+              getStreamingMessageBody(delta.id) ?? messageBodies.get(delta.id) ?? "";
+            if (local.length !== delta.base_len) {
+              this.requestResync();
+              continue;
+            }
+          }
           appendStreamingMessageDelta(
             delta.id,
             delta.append,

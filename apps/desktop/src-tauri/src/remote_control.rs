@@ -6,9 +6,7 @@
 
 use app_core::{AppUpdate, RemoteControl};
 use tauri::{AppHandle, Manager};
-use workspace_model::{
-    AgentCliId, PermissionInputResponse, UiSnapshot, UserPromptContent, WorkspaceSessionList,
-};
+use workspace_model::{AgentCliId, PermissionInputResponse, UserPromptContent, WorkspaceSessionList};
 
 use crate::state::AppState;
 
@@ -72,14 +70,14 @@ impl RemoteControl for DesktopRemoteControl {
         async move { result }
     }
 
-    fn get_state(&self) -> impl std::future::Future<Output = Result<UiSnapshot, String>> + Send {
-        let result = self.app.state::<AppState>().with_app(|app| {
-            app.poll_prompt_progress();
-            // Remote initial sync must stay small enough for a mobile WS
-            // frame; full snapshots can be multiple MB and kill the phone
-            // connection before the response is processed.
-            Ok(app.remote_ui_snapshot())
-        });
+    fn get_state(
+        &self,
+        known: Option<(String, u64)>,
+    ) -> impl std::future::Future<Output = Result<app_core::RemoteGetState, String>> + Send {
+        let result = self
+            .app
+            .state::<AppState>()
+            .with_app(|app| app.remote_get_state(known));
         async move { result }
     }
 

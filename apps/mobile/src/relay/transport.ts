@@ -111,13 +111,16 @@ export class WsTransport implements RelayTransport {
   }
 }
 
-/** Heuristic: does this text frame look like an EncryptedEnvelope? */
+/** Heuristic: does this text frame look like an EncryptedEnvelope? Accepts
+ * both ciphertext encodings: the legacy number array and the compact
+ * base64url `ciphertext_b64` emitted by newer PCs. */
 export function looksLikeEncrypted(frame: string): boolean {
   try {
     const obj = JSON.parse(frame) as Partial<Envelope & EncryptedEnvelope>;
     return (
-      Array.isArray((obj as EncryptedEnvelope).ciphertext) &&
-      typeof (obj as EncryptedEnvelope).to_device_id === "string"
+      typeof (obj as EncryptedEnvelope).to_device_id === "string" &&
+      (Array.isArray((obj as EncryptedEnvelope).ciphertext) ||
+        typeof (obj as EncryptedEnvelope).ciphertext_b64 === "string")
     );
   } catch {
     return false;

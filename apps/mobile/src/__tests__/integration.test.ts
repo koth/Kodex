@@ -122,6 +122,12 @@ class FakePc {
   private stop = false;
   /** Handshake message types received from the phone, in order. */
   readonly handshakeTypes: string[] = [];
+  /** GetState requests answered with the up_to_date short-circuit. */
+  private getStateShortCircuits = 0;
+
+  get shortCircuitedGetStates(): number {
+    return this.getStateShortCircuits;
+  }
 
   constructor(
     conn: RelayConnection,
@@ -207,6 +213,16 @@ class FakePc {
   private async handle(request: ControlRequest): Promise<void> {
     const requestId = request.request_id;
     if (request.op === "get_state") {
+      // Mirror the real PC: when the phone reports the held (session,
+      // revision) as still current, skip the snapshot transfer entirely.
+      if (
+        request.known_session_id === this.snapshot.session.id &&
+        request.known_revision === this.snapshot.revision
+      ) {
+        this.getStateShortCircuits += 1;
+        await this.sendResponse({ op: "get_state", request_id: requestId, up_to_date: true });
+        return;
+      }
       await this.sendResponse({ op: "get_state", request_id: requestId, snapshot: this.snapshot });
       return;
     }
@@ -312,6 +328,24 @@ describe("integration: phone <-> fake PC over relay", () => {
     });
     expect(controller.snapshot?.session.status).toBe("Idle");
     expect(controller.snapshot?.tools.find((t) => t.call_id === "call-1")?.status).toBe("Succeeded");
+
+    pc.stopLoop();
+    await controller.disconnect();
+    await pcRun;
+  });
+
+  it("getState short-circuits when the held (session, revision) is still current", async () => {
+    const { controller, pc, pcRun } = await bootstrap();
+    await controller.createSession();
+    await waitFor(() => (controller.snapshot?.session.id === "s1" ? true : undefined));
+
+    // Reconnect path: the phone offers its held state; the PC agrees it is
+    // current and the snapshot transfer is skipped entirely.
+    const held = controller.snapshot;
+    await controller.getState();
+    expect(pc.shortCircuitedGetStates).toBe(1);
+    expect(controller.snapshot).toBe(held);
+    expect(controller.snapshot?.session.id).toBe("s1");
 
     pc.stopLoop();
     await controller.disconnect();

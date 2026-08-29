@@ -61,10 +61,14 @@ const NONCE_LEN: usize = 12;
 /// `to_device_id` is the routing target and is bound as AEAD AAD.
 /// Large payloads are gzip-compressed before encryption and the envelope's
 /// `encoding` field flags that, so the receiver can invert it after decrypt.
+/// `emit_b64` selects the compact base64url-no-pad ciphertext encoding for
+/// peers that advertised `CAPABILITY_CIPHERTEXT_B64` (vs the legacy JSON
+/// number-array encoding).
 pub fn encrypt(
     key: &SessionKey,
     to_device_id: &str,
     envelope: &Envelope,
+    emit_b64: bool,
 ) -> Result<EncryptedEnvelope> {
     let cipher = ChaCha20Poly1305::new(key.as_key());
     let mut nonce_bytes = [0u8; NONCE_LEN];
@@ -85,31 +89,33 @@ pub fn encrypt(
             },
         )
         .map_err(|e| anyhow!("encrypt failed: {e}"))?;
-    Ok(EncryptedEnvelope {
-        to_device_id: to_device_id.to_string(),
-        nonce: nonce_bytes.to_vec(),
+    Ok(EncryptedEnvelope::from_ciphertext(
+        to_device_id.to_string(),
+        nonce_bytes.to_vec(),
         ciphertext,
-        chunk_id: None,
-        chunk_index: None,
-        chunk_total: None,
+        emit_b64,
         encoding,
-    })
+    ))
 }
 
 /// Decrypt an `EncryptedEnvelope` back into a typed `Envelope`. Verifies the
-/// AEAD tag (rejecting tampering or wrong-key attempts) and checks
-/// `proto_version` matches.
+/// AEAD tag (rejecting tampering or wrong-key attempts), resolves the
+/// ciphertext from either wire encoding (compact `ciphertext_b64` or the
+/// legacy number array), and checks `proto_version` matches.
 pub fn decrypt(key: &SessionKey, encrypted: &EncryptedEnvelope) -> Result<Envelope> {
     let cipher = ChaCha20Poly1305::new(key.as_key());
     if encrypted.nonce.len() != NONCE_LEN {
         return Err(anyhow!("invalid nonce length"));
     }
     let nonce = Nonce::from_slice(&encrypted.nonce);
+    let ciphertext = encrypted
+        .ciphertext_bytes()
+        .map_err(|e| anyhow!("{e}"))?;
     let plaintext = cipher
         .decrypt(
             nonce,
             Payload {
-                msg: &encrypted.ciphertext,
+                msg: &ciphertext,
                 aad: encrypted.to_device_id.as_bytes(),
             },
         )
@@ -162,13 +168,32 @@ mod tests {
         let envelope =
             Envelope::from_message(Some(request_id), &Message::ControlRequest(ControlRequest::Cancel { request_id }))
                 .unwrap();
-        let encrypted = encrypt(&key, "dev-phone", &envelope).unwrap();
+        let encrypted = encrypt(&key, "dev-phone", &envelope, false).unwrap();
         assert_eq!(encrypted.to_device_id, "dev-phone");
         assert_eq!(encrypted.nonce.len(), NONCE_LEN);
-        assert!(!encrypted.ciphertext.is_empty());
+        assert!(!encrypted.ciphertext_bytes().unwrap().is_empty());
 
         let decrypted = decrypt(&key, &encrypted).unwrap();
         assert_eq!(decrypted, envelope);
+    }
+
+    #[test]
+    fn encrypt_decrypt_roundtrip_recovers_envelope_over_base64() {
+        // The compact encoding must be byte-identical after decrypt: same
+        // AEAD framing, different ciphertext transport only.
+        let key = SessionKey::derive(b"pairing-secret", b"kodex-relay-salt");
+        let request_id = Uuid::new_v4();
+        let envelope =
+            Envelope::from_message(Some(request_id), &Message::ControlRequest(ControlRequest::Cancel { request_id }))
+                .unwrap();
+        let encrypted = encrypt(&key, "dev-phone", &envelope, true).unwrap();
+        assert!(encrypted.ciphertext.is_none());
+        assert!(encrypted.ciphertext_b64.is_some());
+        // Both encodings decrypt identically (a b64 frame must also decrypt
+        // on a peer that only knows the legacy encoding, and vice versa).
+        let legacy = encrypt(&key, "dev-phone", &envelope, false).unwrap();
+        assert_eq!(decrypt(&key, &encrypted).unwrap(), envelope);
+        assert_eq!(decrypt(&key, &legacy).unwrap(), envelope);
     }
 
     #[test]
@@ -182,7 +207,7 @@ mod tests {
             }),
         )
         .unwrap();
-        let encrypted = encrypt(&key_a, "dev-phone", &envelope).unwrap();
+        let encrypted = encrypt(&key_a, "dev-phone", &envelope, false).unwrap();
         assert!(decrypt(&key_b, &encrypted).is_err());
     }
 
@@ -196,7 +221,7 @@ mod tests {
             }),
         )
         .unwrap();
-        let encrypted = encrypt(&key, "dev-phone", &envelope).unwrap();
+        let encrypted = encrypt(&key, "dev-phone", &envelope, false).unwrap();
         let mut tampered = encrypted.clone();
         tampered.to_device_id = "dev-other".to_string();
         assert!(decrypt(&key, &tampered).is_err());
@@ -212,9 +237,11 @@ mod tests {
             }),
         )
         .unwrap();
-        let mut encrypted = encrypt(&key, "dev-phone", &envelope).unwrap();
-        if let Some(byte) = encrypted.ciphertext.first_mut() {
-            *byte ^= 0xff;
+        let mut encrypted = encrypt(&key, "dev-phone", &envelope, false).unwrap();
+        if let Some(bytes) = encrypted.ciphertext.as_mut() {
+            if let Some(byte) = bytes.first_mut() {
+                *byte ^= 0xff;
+            }
         }
         assert!(decrypt(&key, &encrypted).is_err());
     }
@@ -229,7 +256,7 @@ mod tests {
             }),
         )
         .unwrap();
-        let encrypted = encrypt(&key, "dev-phone", &envelope).unwrap();
+        let encrypted = encrypt(&key, "dev-phone", &envelope, false).unwrap();
         assert_eq!(encrypted.encoding, None);
         assert_eq!(decrypt(&key, &encrypted).unwrap(), envelope);
     }
@@ -254,15 +281,33 @@ mod tests {
                 },
             }),
         };
-        let encrypted = encrypt(&key, "dev-phone", &envelope).unwrap();
+        let encrypted = encrypt(&key, "dev-phone", &envelope, false).unwrap();
         assert_eq!(encrypted.encoding.as_deref(), Some(ENCODING_GZIP));
         // Sanity: compression actually shrank this repetitive payload.
         let raw_len = serde_json::to_vec(&envelope).unwrap().len();
+        let ct_len = encrypted.ciphertext_bytes().unwrap().len();
         assert!(
-            encrypted.ciphertext.len() < raw_len / 2,
-            "expected gzip to halve {raw_len} bytes, got {}",
-            encrypted.ciphertext.len()
+            ct_len < raw_len / 2,
+            "expected gzip to halve {raw_len} bytes, got {ct_len}"
         );
+        assert_eq!(decrypt(&key, &encrypted).unwrap(), envelope);
+    }
+
+    #[test]
+    fn large_payload_is_gzipped_and_roundtrips_over_base64() {
+        let key = SessionKey::derive(b"secret", b"salt");
+        let envelope = Envelope {
+            proto_version: PROTO_VERSION,
+            id: None,
+            message_type: "event".to_string(),
+            payload: serde_json::json!({
+                "kind": "snapshot_full",
+                "snapshot": { "filler": "y".repeat(64 * 1024) },
+            }),
+        };
+        let encrypted = encrypt(&key, "dev-phone", &envelope, true).unwrap();
+        assert_eq!(encrypted.encoding.as_deref(), Some(ENCODING_GZIP));
+        assert!(encrypted.ciphertext_b64.is_some());
         assert_eq!(decrypt(&key, &encrypted).unwrap(), envelope);
     }
 }

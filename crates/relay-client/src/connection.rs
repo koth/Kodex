@@ -103,6 +103,10 @@ pub struct RelayConnection<T: RelayTransport> {
     heartbeat: Duration,
     session_key: Option<SessionKey>,
     peer_device_id: Option<String>,
+    /// Emit the compact `ciphertext_b64` encoding to the peer (it advertised
+    /// `CAPABILITY_CIPHERTEXT_B64` at pairing time) instead of the legacy
+    /// number-array `ciphertext`. Inbound frames decode either way.
+    emit_ciphertext_b64: bool,
     /// In-progress chunk reassembly keyed by `chunk_id`.
     chunks: HashMap<String, ChunkBuffer>,
     /// Last time we told the peer its traffic is undecryptable to us.
@@ -116,6 +120,7 @@ impl<T: RelayTransport> RelayConnection<T> {
             heartbeat,
             session_key: None,
             peer_device_id: None,
+            emit_ciphertext_b64: false,
             chunks: HashMap::new(),
             session_reset_sent_at: None,
         }
@@ -123,9 +128,18 @@ impl<T: RelayTransport> RelayConnection<T> {
 
     /// Install the E2E session key (post-pairing). Subsequent
     /// `send_envelope`/`recv_envelope` calls encrypt/decrypt with it.
-    pub fn install_session_key(&mut self, key: SessionKey, peer_device_id: String) {
+    /// `emit_ciphertext_b64` selects the compact outbound ciphertext encoding
+    /// for peers that advertised the capability; inbound frames decode from
+    /// either encoding regardless.
+    pub fn install_session_key(
+        &mut self,
+        key: SessionKey,
+        peer_device_id: String,
+        emit_ciphertext_b64: bool,
+    ) {
         self.session_key = Some(key);
         self.peer_device_id = Some(peer_device_id);
+        self.emit_ciphertext_b64 = emit_ciphertext_b64;
     }
 
     pub fn has_session_key(&self) -> bool {
@@ -163,7 +177,7 @@ impl<T: RelayTransport> RelayConnection<T> {
     pub async fn send_envelope(&mut self, envelope: &Envelope) -> Result<()> {
         match (&self.session_key, &self.peer_device_id) {
             (Some(key), Some(peer)) => {
-                let enc = encrypt(key, peer, envelope)?;
+                let enc = encrypt(key, peer, envelope, self.emit_ciphertext_b64)?;
                 let frames = split_encrypted_envelope(&enc)?;
                 if frames.len() > 1 {
                     tracing::debug!(
@@ -254,7 +268,7 @@ impl<T: RelayTransport> RelayConnection<T> {
                         error = %e,
                         to_device_id = %full.to_device_id,
                         nonce_len = full.nonce.len(),
-                        ct_len = full.ciphertext.len(),
+                        ct_len = full.ciphertext_bytes().map(|b| b.len()).unwrap_or(0),
                         "recv_envelope: decrypt failed; dropping stale session key"
                     );
                     let err = anyhow::anyhow!("decrypt failed: {e}");
@@ -270,14 +284,25 @@ impl<T: RelayTransport> RelayConnection<T> {
     /// Buffer a chunked `EncryptedEnvelope` fragment. Returns the fully
     /// reassembled envelope (chunk metadata stripped) once every fragment of
     /// the same `chunk_id` has arrived, or `None` while still incomplete.
+    /// Fragments may arrive in either ciphertext encoding (compact b64 from
+    /// new peers, legacy number arrays from old ones); each is decoded to
+    /// raw bytes before concatenation.
     fn reassemble_chunk(&mut self, enc: EncryptedEnvelope) -> Option<EncryptedEnvelope> {
-        let chunk_id = enc.chunk_id.as_deref()?.to_string();
+        let chunk_id = enc.chunk_id.clone()?;
         let index = enc.chunk_index? as usize;
         let total = enc.chunk_total? as usize;
         if total == 0 || index >= total {
             self.chunks.remove(&chunk_id);
             return None;
         }
+        let fragment = match enc.ciphertext_bytes() {
+            Ok(bytes) => bytes,
+            Err(_) => {
+                // Undecodable fragment: the set can never complete.
+                self.chunks.remove(&chunk_id);
+                return None;
+            }
+        };
 
         let entry = self
             .chunks
@@ -294,7 +319,7 @@ impl<T: RelayTransport> RelayConnection<T> {
             self.chunks.remove(&chunk_id);
             return None;
         }
-        entry.received[index] = Some(enc.ciphertext);
+        entry.received[index] = Some(fragment);
 
         if entry.received.iter().any(|part| part.is_none()) {
             return None;
@@ -305,15 +330,15 @@ impl<T: RelayTransport> RelayConnection<T> {
                 ciphertext.extend_from_slice(&part);
             }
         }
-        let full = EncryptedEnvelope {
-            to_device_id: entry.to_device_id.clone(),
-            nonce: entry.nonce.clone(),
+        let full = EncryptedEnvelope::from_ciphertext(
+            entry.to_device_id.clone(),
+            entry.nonce.clone(),
             ciphertext,
-            chunk_id: None,
-            chunk_index: None,
-            chunk_total: None,
-            encoding: entry.encoding.clone(),
-        };
+            // In-memory reassembled envelope: decode-only from here, so the
+            // raw-byte (legacy) field form is always fine.
+            false,
+            entry.encoding.clone(),
+        );
         self.chunks.remove(&chunk_id);
         Some(full)
     }
@@ -404,27 +429,34 @@ impl<T: RelayTransport> RelayConnection<T> {
 /// A single frame is returned when it is small enough; otherwise the
 /// ciphertext is divided into `CHUNK_PAYLOAD_BYTES` pieces and each piece is
 /// wrapped in an `EncryptedEnvelope` carrying the same `nonce` plus chunk
-/// metadata, so the receiver can concatenate and decrypt once.
+/// metadata, so the receiver can concatenate and decrypt once. Fragments
+/// keep the original envelope's ciphertext encoding (compact b64 or legacy
+/// array) and payload `encoding` flag.
 fn split_encrypted_envelope(enc: &EncryptedEnvelope) -> Result<Vec<String>> {
     let single = serde_json::to_string(enc)?;
     if single.len() <= CHUNK_SINGLE_FRAME_BYTES {
         return Ok(vec![single]);
     }
 
+    let ciphertext = enc
+        .ciphertext_bytes()
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    let emit_b64 = enc.ciphertext_b64.is_some();
     let chunk_id = Uuid::new_v4().to_string();
-    let total = enc.ciphertext.chunks(CHUNK_PAYLOAD_BYTES).count() as u32;
+    let total = ciphertext.chunks(CHUNK_PAYLOAD_BYTES).count() as u32;
     let mut frames = Vec::with_capacity(total as usize);
-    for (index, piece) in enc.ciphertext.chunks(CHUNK_PAYLOAD_BYTES).enumerate() {
-        let chunk = EncryptedEnvelope {
-            to_device_id: enc.to_device_id.clone(),
-            nonce: enc.nonce.clone(),
-            ciphertext: piece.to_vec(),
-            chunk_id: Some(chunk_id.clone()),
-            chunk_index: Some(index as u32),
-            chunk_total: Some(total),
+    for (index, piece) in ciphertext.chunks(CHUNK_PAYLOAD_BYTES).enumerate() {
+        let mut chunk = EncryptedEnvelope::from_ciphertext(
+            enc.to_device_id.clone(),
+            enc.nonce.clone(),
+            piece.to_vec(),
+            emit_b64,
             // Chunks inherit the original payload encoding flag.
-            encoding: enc.encoding.clone(),
-        };
+            enc.encoding.clone(),
+        );
+        chunk.chunk_id = Some(chunk_id.clone());
+        chunk.chunk_index = Some(index as u32);
+        chunk.chunk_total = Some(total);
         frames.push(serde_json::to_string(&chunk)?);
     }
     Ok(frames)
@@ -671,7 +703,7 @@ mod tests {
         let url = spawn_passthrough_relay().await.unwrap();
         let mut conn = dial_plain(&url, Duration::from_secs(30), false).await.unwrap();
         let key = SessionKey::derive(b"pairing-secret", b"kodex-relay-salt");
-        conn.install_session_key(key.clone(), "dev-phone".to_string());
+        conn.install_session_key(key.clone(), "dev-phone".to_string(), false);
 
         let request_id = Uuid::new_v4();
         let envelope = Envelope::from_message(
@@ -679,6 +711,36 @@ mod tests {
             &Message::ControlRequest(ControlRequest::Cancel { request_id }),
         )
         .unwrap();
+        conn.send_envelope(&envelope).await.unwrap();
+        let received = conn
+            .recv_envelope()
+            .await
+            .expect("recv ok")
+            .expect("envelope recovered");
+        assert_eq!(received, envelope);
+        conn.close().await;
+    }
+
+    #[tokio::test]
+    async fn e2e_envelope_roundtrips_over_base64_ciphertext() {
+        // Same as the legacy roundtrip but the sender emits the compact
+        // base64url encoding: proves serialize -> (mock relay passthrough) ->
+        // parse -> resolve-b64 -> decrypt recovers the envelope, including a
+        // payload large enough to require chunked fragments.
+        let url = spawn_passthrough_relay().await.unwrap();
+        let mut conn = dial_plain(&url, Duration::from_secs(30), false).await.unwrap();
+        let key = SessionKey::derive(b"pairing-secret", b"kodex-relay-salt");
+        conn.install_session_key(key.clone(), "dev-phone".to_string(), true);
+
+        let envelope = Envelope {
+            proto_version: relay_protocol::PROTO_VERSION,
+            id: None,
+            message_type: "event".to_string(),
+            payload: serde_json::json!({
+                "kind": "snapshot_full",
+                "snapshot": { "filler": "z".repeat(512 * 1024) },
+            }),
+        };
         conn.send_envelope(&envelope).await.unwrap();
         let received = conn
             .recv_envelope()
@@ -704,7 +766,7 @@ mod tests {
         // Now install a key: outbound frames would encrypt, but the echoed
         // plaintext heartbeat must still parse.
         let key = SessionKey::derive(b"old-secret", b"kodex-relay-salt");
-        conn.install_session_key(key, "dev-phone".to_string());
+        conn.install_session_key(key, "dev-phone".to_string(), false);
         let echoed = conn
             .recv_envelope()
             .await

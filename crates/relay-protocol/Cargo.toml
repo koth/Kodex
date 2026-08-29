@@ -9,6 +9,7 @@ description = "Transport-agnostic wire contract shared by the kodex PC control g
 serde.workspace = true
 serde_json.workspace = true
 uuid.workspace = true
+base64 = "0.22"
 workspace-model = { path = "../workspace-model" }
 
 [dev-dependencies]

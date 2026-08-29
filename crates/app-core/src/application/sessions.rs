@@ -580,6 +580,12 @@ impl Application {
     pub fn session_switch(&mut self, id: &str) -> Result<(), String> {
         if self.ui.session.id.to_string() == id {
             self.runtime_registry.clear_attention(id);
+            // The phone may be re-entering this session with empty local state
+            // (app restart, machine re-selection). Broadcast so the relay event
+            // source wakes; the bridge resets its patch cursor on SwitchSession
+            // requests, so this wake re-pushes a Full snapshot instead of
+            // letting the phone sit on its 1.5s GetState fallback.
+            self.broadcast_ui_updated();
             return Ok(());
         }
 

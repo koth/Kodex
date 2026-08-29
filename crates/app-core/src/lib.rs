@@ -22,11 +22,12 @@ mod workspace_files;
 
 pub use application::{
     AppUpdate, Application, HistoryPage, UiPatchCursor, UiSnapshotUpdate,
-    normalize_path_for_storage, normalize_tracked_path,
+    normalize_path_for_storage, normalize_tracked_path, project_remote_patch,
+    project_remote_snapshot,
 };
 pub use dsh_bringup::{dsh_bringup, init_dsh_bringup};
 pub use paths::AppPaths;
-pub use remote_control::{AppCoreRemoteControl, RemoteControl};
+pub use remote_control::{AppCoreRemoteControl, RemoteControl, RemoteGetState};
 
 pub fn list_remote_workspace_dir(
     config: &acp_core::RemoteSshSessionConfig,
@@ -229,7 +230,39 @@ mod tests {
         assert!(append_patch.messages.is_empty());
         assert_eq!(append_patch.message_deltas.len(), 1);
         assert_eq!(append_patch.message_deltas[0].append, " with appended text");
+        // base_len is the UTF-16 length of the base body the delta extends —
+        // the frontend compares it against the JS `.length` of its local
+        // stream-store body to detect a desynced append-only store.
+        assert_eq!(
+            append_patch.message_deltas[0].base_len,
+            "hello from patch cursor".encode_utf16().count() as u64
+        );
         assert!(append_patch.repository.is_none());
+
+        app.ui
+            .messages
+            .last_mut()
+            .expect("prompt should create a message")
+            .body
+            .push_str("🦀");
+        app.ui.revision += 1;
+
+        let emoji_update = app
+            .lightweight_ui_update(&mut cursor)
+            .expect("appended body should produce a delta patch");
+        let emoji_patch = match emoji_update {
+            UiSnapshotUpdate::Patch(patch) => patch,
+            UiSnapshotUpdate::Full(_) => panic!("append should stay incremental"),
+        };
+        assert_eq!(emoji_patch.message_deltas[0].append, "🦀");
+        // A non-BMP char is one Rust char but two UTF-16 code units: base_len
+        // must count UTF-16 units, not chars or bytes.
+        assert_eq!(
+            emoji_patch.message_deltas[0].base_len,
+            "hello from patch cursor with appended text"
+                .encode_utf16()
+                .count() as u64
+        );
 
         app.ui.repository.branch = "feature/snapshot-patch".into();
         app.ui.revision += 1;

@@ -114,6 +114,7 @@ pub async fn handle_pairing_initiate(
         session_key_material: pi.pc_device_pubkey.clone(),
         pc_device_id: pc_device_id.clone(),
         phone_device_id: phone_device_id.to_string(),
+        capabilities: pi.capabilities.clone(),
     });
     let pc_confirm = Message::PairingConfirm(PairingConfirm {
         error: None,
@@ -121,6 +122,9 @@ pub async fn handle_pairing_initiate(
         session_key_material: phone_ephemeral,
         pc_device_id: pc_device_id.clone(),
         phone_device_id: phone_device_id.to_string(),
+        // Forward the phone's wire capabilities so the PC can pick its
+        // outbound ciphertext encoding (e.g. compact ciphertext_b64).
+        capabilities: pi.capabilities,
     });
 
     // Send PC's confirm FIRST so it installs the session key before the
@@ -149,6 +153,7 @@ fn pairing_error(reason: &str) -> Message {
         session_key_material: String::new(),
         pc_device_id: String::new(),
         phone_device_id: String::new(),
+        capabilities: Vec::new(),
     })
 }
 
@@ -220,6 +225,7 @@ mod tests {
             PairingResume {
                 pairing_token: "token".into(),
                 phone_ephemeral_pubkey: "eph".into(),
+                capabilities: Vec::new(),
             },
             "phone",
             &phone_tx,
@@ -248,6 +254,44 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn resume_forwards_phone_capabilities_to_pc_confirm() {
+        // The PC picks its outbound ciphertext encoding from the phone's
+        // advertised capabilities, which ride PairingResume -> PairingConfirm.
+        let state = app_state();
+        seed_bound_pairing(&state, "pc", "phone", "token").await;
+
+        let (pc_tx, mut pc_rx) = mpsc::channel::<String>(8);
+        state.connections.insert("pc", 1, pc_tx.clone());
+        let (phone_tx, mut phone_rx) = mpsc::channel::<String>(8);
+        handle_pairing_resume(
+            &state,
+            PairingResume {
+                pairing_token: "token".into(),
+                phone_ephemeral_pubkey: "eph".into(),
+                capabilities: vec![relay_protocol::CAPABILITY_CIPHERTEXT_B64.into()],
+            },
+            "phone",
+            &phone_tx,
+        )
+        .await
+        .unwrap();
+
+        let pc_text = pc_rx.recv().await.unwrap();
+        let pc_env: Envelope = serde_json::from_str(&pc_text).unwrap();
+        match pc_env.into_message().unwrap() {
+            Message::PairingConfirm(confirm) => {
+                assert_eq!(
+                    confirm.capabilities,
+                    vec![relay_protocol::CAPABILITY_CIPHERTEXT_B64.to_string()],
+                    "PC confirm carries the phone's wire capabilities"
+                );
+            }
+            other => panic!("expected PairingConfirm to PC, got {other:?}"),
+        }
+        let _ = phone_rx.recv().await.unwrap();
+    }
+
+    #[tokio::test]
     async fn resume_works_without_active_subscription() {
         let state = app_state();
         seed_bound_pairing(&state, "pc", "phone", "token").await;
@@ -261,6 +305,7 @@ mod tests {
             PairingResume {
                 pairing_token: "token".into(),
                 phone_ephemeral_pubkey: "eph".into(),
+                capabilities: Vec::new(),
             },
             "phone",
             &phone_tx,
@@ -314,6 +359,7 @@ mod tests {
                 pc_device_pubkey: "pc-x25519".into(),
                 relay_endpoint: "ws://relay".into(),
                 phone_ephemeral_pubkey: None,
+                capabilities: Vec::new(),
             },
             "phone",
             &tx,
@@ -341,6 +387,7 @@ mod tests {
             PairingResume {
                 pairing_token: "token".into(),
                 phone_ephemeral_pubkey: "eph".into(),
+                capabilities: Vec::new(),
             },
             "phone",
             &tx,
@@ -371,6 +418,7 @@ mod tests {
             PairingResume {
                 pairing_token: "token".into(),
                 phone_ephemeral_pubkey: "eph".into(),
+                capabilities: Vec::new(),
             },
             "phone",
             &tx,
@@ -424,6 +472,7 @@ mod tests {
                 pc_device_pubkey: "pc-x".into(),
                 relay_endpoint: "ws://relay".into(),
                 phone_ephemeral_pubkey: Some("eph".into()),
+                capabilities: Vec::new(),
             },
             "phone-new",
             &phone_tx,
@@ -489,6 +538,9 @@ pub async fn handle_pairing_resume(
         session_key_material: req.phone_ephemeral_pubkey,
         pc_device_id: pc_device_id.clone(),
         phone_device_id: phone_device_id.to_string(),
+        // Forward the phone's wire capabilities so the PC can pick its
+        // outbound ciphertext encoding (e.g. compact ciphertext_b64).
+        capabilities: req.capabilities,
     });
 
     let Some(pc_tx) = state.connections.get(&pc_device_id) else {
@@ -514,6 +566,7 @@ pub async fn handle_pairing_resume(
         session_key_material: pc_x25519_pubkey,
         pc_device_id,
         phone_device_id: phone_device_id.to_string(),
+        capabilities: Vec::new(),
     });
     send_message(tx, None, &phone_confirm).await?;
     Ok(())

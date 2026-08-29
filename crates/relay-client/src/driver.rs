@@ -37,11 +37,14 @@ pub trait EventSource: Send {
 /// Derives the E2E session key from a `PairingConfirm` received over the
 /// relay. The shell implements this with the PC's static X25519 secret and
 /// the phone's ephemeral public key carried in `session_key_material`.
+/// Returns `(key, peer_device_id, emit_ciphertext_b64)`; the flag reflects
+/// whether the phone advertised the `ciphertext_b64` wire capability so the
+/// PC emits the compact ciphertext encoding to it.
 pub trait PairingHandler: Send {
     fn derive_session_key(
         &mut self,
         confirm: PairingConfirm,
-    ) -> impl std::future::Future<Output = Result<(SessionKey, String)>> + Send;
+    ) -> impl std::future::Future<Output = Result<(SessionKey, String, bool)>> + Send;
 }
 
 /// Drives a relay connection: routes inbound control requests to a
@@ -53,7 +56,7 @@ pub struct RelayDriver<T: RelayTransport, H: ControlHandler, E: EventSource, P: 
     handler: H,
     events: E,
     pairing: P,
-    session_sink: Arc<Mutex<Option<(SessionKey, String)>>>,
+    session_sink: Arc<Mutex<Option<(SessionKey, String, bool)>>>,
 }
 
 impl<T: RelayTransport, H: ControlHandler, E: EventSource, P: PairingHandler> RelayDriver<T, H, E, P> {
@@ -68,14 +71,15 @@ impl<T: RelayTransport, H: ControlHandler, E: EventSource, P: PairingHandler> Re
     }
 
     /// Same as [`RelayDriver::new`], but records the most recently installed
-    /// E2E session key so a caller-owned reconnect loop can reinstall it on
-    /// the next connection without a fresh pairing handshake.
+    /// E2E session key (and the peer's ciphertext-encoding capability) so a
+    /// caller-owned reconnect loop can reinstall it on the next connection
+    /// without a fresh pairing handshake.
     pub fn new_with_session_sink(
         conn: RelayConnection<T>,
         handler: H,
         events: E,
         pairing: P,
-        session_sink: Arc<Mutex<Option<(SessionKey, String)>>>,
+        session_sink: Arc<Mutex<Option<(SessionKey, String, bool)>>>,
     ) -> Self {
         Self {
             conn,
@@ -277,22 +281,25 @@ impl<T: RelayTransport, H: ControlHandler, E: EventSource, P: PairingHandler> Re
                     return Ok(());
                 }
                 // The relay forwards the phone's ephemeral public key in
-                // `session_key_material`. Derive the E2E session key and
-                // install it so subsequent control requests decrypt.
-                let (key, peer_device_id) = match self.pairing.derive_session_key(confirm).await {
-                    Ok(v) => v,
-                    Err(e) => {
-                        tracing::error!(target: "remote_control", error = %e, "pairing key derivation failed");
-                        return Err(e);
-                    }
-                };
-                tracing::info!(target: "remote_control", peer = %peer_device_id, "installed session key");
-                self.conn.install_session_key(key, peer_device_id);
+                // `session_key_material` (plus its wire capabilities).
+                // Derive the E2E session key and install it so subsequent
+                // control requests decrypt.
+                let (key, peer_device_id, emit_b64) =
+                    match self.pairing.derive_session_key(confirm).await {
+                        Ok(v) => v,
+                        Err(e) => {
+                            tracing::error!(target: "remote_control", error = %e, "pairing key derivation failed");
+                            return Err(e);
+                        }
+                    };
+                tracing::info!(target: "remote_control", peer = %peer_device_id, emit_b64, "installed session key");
+                self.conn.install_session_key(key, peer_device_id, emit_b64);
                 if let Ok(mut guard) = self.session_sink.lock() {
                     *guard = self
                         .conn
                         .session_key()
-                        .zip(self.conn.peer_device_id());
+                        .zip(self.conn.peer_device_id())
+                        .map(|(key, peer)| (key, peer, emit_b64));
                 }
                 Ok(())
             }
@@ -401,7 +408,7 @@ mod tests {
         async fn derive_session_key(
             &mut self,
             _confirm: PairingConfirm,
-        ) -> Result<(SessionKey, String)> {
+        ) -> Result<(SessionKey, String, bool)> {
             anyhow::bail!("no pairing expected in this test")
         }
     }
@@ -557,8 +564,8 @@ mod tests {
         // driver + connection E2E path end-to-end.
         let (mut pc_conn, mut phone) = linked_pair();
         let key = crate::SessionKey::derive(b"pairing-secret", b"kodex-relay-salt");
-        pc_conn.install_session_key(key.clone(), "phone".to_string());
-        phone.install_session_key(key, "pc".to_string());
+        pc_conn.install_session_key(key.clone(), "phone".to_string(), false);
+        phone.install_session_key(key, "pc".to_string(), false);
 
         let handler = EchoHandler {
             seen: Vec::new(),
@@ -592,7 +599,7 @@ mod tests {
         // reinstalls a stale key and every frame fails to decrypt.
         let (mut pc_conn, _phone) = linked_pair();
         let key = crate::SessionKey::derive(b"old-secret", b"kodex-relay-salt");
-        pc_conn.install_session_key(key, "phone".to_string());
+        pc_conn.install_session_key(key, "phone".to_string(), false);
         assert!(pc_conn.has_session_key());
         let handler = EchoHandler {
             seen: Vec::new(),
@@ -609,6 +616,7 @@ mod tests {
                 session_key_material: String::new(),
                 pc_device_id: String::new(),
                 phone_device_id: String::new(),
+                capabilities: Vec::new(),
             }),
         )
         .unwrap();
@@ -688,8 +696,8 @@ mod tests {
         // eventually reaping the PC connection on heartbeat_timeout.
         let (mut pc_conn, mut phone) = linked_pair();
         let key = crate::SessionKey::derive(b"pairing-secret", b"kodex-relay-salt");
-        pc_conn.install_session_key(key.clone(), "phone".to_string());
-        phone.install_session_key(key, "pc".to_string());
+        pc_conn.install_session_key(key.clone(), "phone".to_string(), false);
+        phone.install_session_key(key, "pc".to_string(), false);
 
         let handler = EchoHandler {
             seen: Vec::new(),
