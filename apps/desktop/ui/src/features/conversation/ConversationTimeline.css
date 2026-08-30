@@ -391,7 +391,9 @@
   border: 1px solid var(--border-subtle);
   border-radius: 12px;
   background: var(--surface-bg);
-  object-fit: contain;
+  /* 方形预览居中裁切：短边铺满、长边截取中间区间，不留 letterbox 空白；
+     完整原图走预览弹层（那里仍是 object-fit: contain）。 */
+  object-fit: cover;
 }
 
 .msg-user-image-button:hover .msg-user-image {
@@ -1039,14 +1041,15 @@
      element starts at zero height and jumps to its natural height when the
      decode finishes, shifting the layout under the cursor — WKWebView's
      scroll anchoring then yanks the view back up, making the transcript feel
-     stuck a turn or two above the end. object-fit: contain letterboxes any
-     non-square image inside the fixed box. */
+     stuck a turn or two above the end. The fixed square crops the image
+     center-out (object-fit: cover, 短边铺满、长边截中间), so no letterbox
+     whitespace is ever reserved. */
   aspect-ratio: 1;
   margin: 4px 0;
   border: 1px solid var(--border-subtle);
   border-radius: 16px;
   background: var(--surface-muted-bg);
-  object-fit: contain;
+  object-fit: cover;
 }
 
 .md-image-button {

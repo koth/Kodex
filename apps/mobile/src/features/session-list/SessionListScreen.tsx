@@ -8,18 +8,18 @@ import { styles, colors, spacing, radius, shadows } from "../theme";
 import { EmptyState } from "../ui/EmptyState";
 
 // Lists sessions from `ListSessions`. The project-less chats workspace
-// (marked `kind: "chats"`) renders as a pinned "聊天" section with its
-// sessions always visible — mirroring the desktop sidebar where chats are a
-// first-level group next to projects, not a project itself. Every project
-// renders as a collapsible row that starts collapsed (except the currently
-// active workspace), and expanding a project reveals its session list.
-// Pull-to-refresh re-issues `ListSessions`; the expand/collapse map is
-// hoisted here so background refreshes never reset it.
+// (marked `kind: "chats"`) is a first-class TAB next to 项目 — the header
+// segmented control switches between the two, mirroring the desktop sidebar
+// where chats sit beside projects instead of inside them. Projects render as
+// collapsible rows that start collapsed (except the currently active
+// workspace); expanding one reveals its session list. Pull-to-refresh
+// re-issues `ListSessions`; the expand/collapse map is hoisted here so
+// background refreshes never reset it.
 
 type Group = WorkspaceSessionList;
+type Tab = "chats" | "projects";
 
 type Row =
-  | { kind: "chats-header"; key: string }
   | { kind: "workspace"; key: string; group: Group }
   | {
       kind: "session";
@@ -48,15 +48,15 @@ function formatRelativeTime(value: string | undefined): string | null {
   if (!timestamp) return null;
   const diffMs = Date.now() - timestamp;
   const minutes = Math.max(0, Math.floor(diffMs / 60000));
-  if (minutes < 1) return "just now";
-  if (minutes < 60) return `${minutes}m ago`;
+  if (minutes < 1) return "刚刚";
+  if (minutes < 60) return `${minutes} 分钟前`;
   const hours = Math.floor(minutes / 60);
-  if (hours < 24) return `${hours}h ago`;
-  if (hours < 48) return "yesterday";
+  if (hours < 24) return `${hours} 小时前`;
+  if (hours < 48) return "昨天";
   const days = Math.floor(hours / 24);
-  if (days < 7) return `${days}d ago`;
-  return new Date(timestamp).toLocaleDateString(undefined, {
-    month: "short",
+  if (days < 7) return `${days} 天前`;
+  return new Date(timestamp).toLocaleDateString("zh-CN", {
+    month: "numeric",
     day: "numeric",
   });
 }
@@ -65,11 +65,11 @@ function statusLabel(status: string): string {
   switch (status) {
     case "Streaming":
     case "WaitingForTool":
-      return "running";
+      return "运行中";
     case "Interrupted":
-      return "interrupted";
+      return "已中断";
     default:
-      return "idle";
+      return "空闲";
   }
 }
 
@@ -102,6 +102,7 @@ export function SessionListScreen({
 }) {
   const controller = useAppController();
   const connState = useConnectionState();
+  const [tab, setTab] = useState<Tab>("projects");
   const [groups, setGroups] = useState<Group[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -151,7 +152,7 @@ export function SessionListScreen({
         const id = await controller.createSession({
           workspaceRoot: group.workspace.root,
         });
-        onOpenSession(id, "New session");
+        onOpenSession(id, "新会话");
       } catch (e) {
         setError(e instanceof Error ? e.message : String(e));
       } finally {
@@ -161,33 +162,37 @@ export function SessionListScreen({
     [connected, controller, onOpenSession],
   );
 
-  // Flatten groups into section rows. Chats render first as a pinned, always
-  // expanded section; collapsed projects contribute no session rows, so the
-  // list stays short like the desktop sidebar.
   const { chats: chatsGroups, projects: projectGroups } = splitSessionGroups(groups);
   const chatsGroup = chatsGroups[0];
+
+  // 新建 is contextual: on the 聊天 tab it starts a chat in the chats
+  // workspace; on the 项目 tab it creates a global (workspace-less) session
+  // as before.
+  const createFromHeader = useCallback(async () => {
+    if (!connected) return;
+    if (tab === "chats" && chatsGroup && chatsGroup.connected) {
+      await createInWorkspace(chatsGroup);
+      return;
+    }
+    setCreatingFor("global");
+    setError(null);
+    try {
+      const id = await controller.createSession();
+      onOpenSession(id, "新会话");
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setCreatingFor(null);
+    }
+  }, [connected, tab, chatsGroup, createInWorkspace, controller, onOpenSession]);
+
+  // Flatten the ACTIVE tab into section rows. Collapsed projects contribute
+  // no session rows, so the list stays short like the desktop sidebar.
   const rows: Row[] = [];
   let anySessionVisible = false;
-  if (chatsGroup) {
-    rows.push({ kind: "chats-header", key: "chats:header" });
-    const sortedChats = sortSessions(chatsGroup.sessions);
-    if (sortedChats.length === 0) {
-      rows.push({
-        kind: "session",
-        key: `chats-empty:${chatsGroup.workspace.root}`,
-        session: {
-          id: "",
-          title: chatsGroup.connected ? "No chats yet" : "Not loaded yet",
-          status: "Idle",
-          created_at: "",
-          updated_at: "",
-          message_count: 0,
-        },
-        isSessionActive: false,
-      });
-    } else {
-      for (const session of sortedChats) {
-        anySessionVisible = true;
+  if (tab === "chats") {
+    if (chatsGroup) {
+      for (const session of sortSessions(chatsGroup.sessions)) {
         rows.push({
           kind: "session",
           key: `${chatsGroup.workspace.root}:${session.id}`,
@@ -197,63 +202,30 @@ export function SessionListScreen({
         });
       }
     }
-  }
-  for (const group of projectGroups) {
-    rows.push({ kind: "workspace", key: `ws:${group.workspace.root}`, group });
-    const isOpen = expanded[group.workspace.root] ?? group.is_active;
-    if (!isOpen) continue;
-    const sorted = sortSessions(group.sessions);
-    if (sorted.length === 0) {
-      rows.push({
-        kind: "session",
-        key: `ws-empty:${group.workspace.root}`,
-        session: {
-          id: "",
-          title: group.connected ? "No sessions yet" : "Not loaded yet",
-          status: "Idle",
-          created_at: "",
-          updated_at: "",
-          message_count: 0,
-        },
-        isSessionActive: false,
-      });
-      continue;
-    }
-    for (const session of sorted) {
-      anySessionVisible = true;
-      rows.push({
-        kind: "session",
-        key: `${group.workspace.root}:${session.id}`,
-        session,
-        isSessionActive: group.is_active && session.id === group.active_session_id,
-      });
+  } else {
+    for (const group of projectGroups) {
+      rows.push({ kind: "workspace", key: `ws:${group.workspace.root}`, group });
+      const isOpen = expanded[group.workspace.root] ?? group.is_active;
+      if (!isOpen) continue;
+      const sorted = sortSessions(group.sessions);
+      for (const session of sorted) {
+        anySessionVisible = true;
+        rows.push({
+          kind: "session",
+          key: `${group.workspace.root}:${session.id}`,
+          session,
+          isSessionActive: group.is_active && session.id === group.active_session_id,
+        });
+      }
     }
   }
-
-  const createGlobal = useCallback(async () => {
-    if (!connected) return;
-    setCreatingFor("global");
-    setError(null);
-    try {
-      const id = await controller.createSession();
-      onOpenSession(id, "New session");
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setCreatingFor(null);
-    }
-  }, [connected, controller, onOpenSession]);
 
   return (
     <View style={styles.screen}>
       <View style={[styles.rowBetween, { paddingHorizontal: spacing.lg, paddingVertical: spacing.md }]}>
-        <View>
-          <Text style={[styles.title, { marginBottom: 0, fontSize: 26 }]}>Projects</Text>
-          <Text style={[styles.textFaint, { marginTop: 2 }]}>
-            {connected
-              ? `${projectGroups.length} workspace${projectGroups.length === 1 ? "" : "s"}`
-              : "offline"}
-          </Text>
+        <View style={styles.row}>
+          <TabPill label="项目" active={tab === "projects"} onPress={() => setTab("projects")} />
+          <TabPill label="聊天" active={tab === "chats"} onPress={() => setTab("chats")} />
         </View>
         <View style={styles.row}>
           <Pressable
@@ -261,20 +233,20 @@ export function SessionListScreen({
             onPress={onOpenSettings}
             hitSlop={8}
           >
-            <Text style={[styles.text, { fontSize: 14, fontWeight: "600" }]}>Settings</Text>
+            <Text style={[styles.text, { fontSize: 14, fontWeight: "600" }]}>设置</Text>
           </Pressable>
           <Pressable
             style={({ pressed }) => [
               localStyles.newButton,
               { opacity: pressed ? 0.9 : connected ? 1 : 0.45 },
             ]}
-            onPress={createGlobal}
+            onPress={() => void createFromHeader()}
             disabled={creatingFor !== null || !connected}
           >
-            {creatingFor === "global" || !connected ? (
+            {creatingFor !== null || !connected ? (
               <ActivityIndicator color="#fff" size="small" />
             ) : (
-              <Text style={styles.buttonText}>New</Text>
+              <Text style={styles.buttonText}>新建</Text>
             )}
           </Pressable>
         </View>
@@ -289,13 +261,7 @@ export function SessionListScreen({
         data={rows}
         keyExtractor={(item) => item.key}
         renderItem={({ item }) =>
-          item.kind === "chats-header" ? (
-            <ChatsHeader
-              creating={chatsGroup ? creatingFor === chatsGroup.workspace.root : false}
-              disabled={!chatsGroup || !chatsGroup.connected || !connected}
-              onCreate={() => chatsGroup && void createInWorkspace(chatsGroup)}
-            />
-          ) : item.kind === "workspace" ? (
+          item.kind === "workspace" ? (
             <WorkspaceRow
               group={item.group}
               expanded={expanded[item.group.workspace.root] ?? item.group.is_active}
@@ -307,7 +273,6 @@ export function SessionListScreen({
             <SessionRow
               session={item.session}
               active={item.isSessionActive}
-              placeholder={item.session.id === ""}
               onPress={
                 item.session.id === ""
                   ? undefined
@@ -319,13 +284,19 @@ export function SessionListScreen({
         ListEmptyComponent={
           loading ? (
             <View style={styles.center}><ActivityIndicator color={colors.accent} /></View>
+          ) : tab === "chats" ? (
+            <EmptyState
+              glyph={"\u{1F4AC}"}
+              title={error ? "聊天加载失败" : "还没有聊天"}
+              hint={error ? "下拉重试。" : "点右上角「新建」开始一个聊天。"}
+            />
           ) : (
-              <EmptyState
-                glyph={"\u2302"}
-                title={error ? "Could not load projects" : "No projects yet"}
-                hint={error ? "Pull down to retry." : "Open a workspace on desktop and it will appear here."}
-              />
-            )
+            <EmptyState
+              glyph={"\u2302"}
+              title={error ? "项目加载失败" : "还没有项目"}
+              hint={error ? "下拉重试。" : "在桌面端打开工作区后,它会显示在这里。"}
+            />
+          )
         }
         ListFooterComponent={
           rows.length > 0 && error ? (
@@ -335,46 +306,36 @@ export function SessionListScreen({
           ) : null
         }
       />
-      {!anySessionVisible && groups.length > 0 && !loading ? (
-        <Text style={localStyles.hint}>Tap a project to reveal its sessions</Text>
+      {tab === "projects" && !anySessionVisible && projectGroups.length > 0 && !loading ? (
+        <Text style={localStyles.hint}>点开项目查看其中的会话</Text>
       ) : null}
     </View>
   );
 }
 
-// Section header for the pinned chats group: a "聊天" label plus a shortcut
-// that starts a new chat in the project-less chats workspace. Kept visually
-// lighter than project cards, like the desktop sidebar's chats group.
-function ChatsHeader({
-  creating,
-  disabled,
-  onCreate,
+// Segmented-control pill for the 聊天/项目 tabs.
+function TabPill({
+  label,
+  active,
+  onPress,
 }: {
-  creating: boolean;
-  disabled: boolean;
-  onCreate: () => void;
+  label: string;
+  active: boolean;
+  onPress: () => void;
 }) {
   return (
-    <View style={localStyles.chatsHeader}>
-      <Text style={localStyles.chatsKicker}>{"聊天"}</Text>
-      <Pressable
-        style={({ pressed }) => [
-          localStyles.chatsNew,
-          { opacity: pressed ? 0.7 : disabled ? 0.4 : 1 },
-        ]}
-        onPress={onCreate}
-        disabled={disabled || creating}
-        accessibilityRole="button"
-        accessibilityLabel="新建聊天"
-        hitSlop={8}
-      >
-        {creating ? (
-          <ActivityIndicator color={colors.accent} size="small" />
-        ) : (
-          <Text style={localStyles.chatsNewText}>{"+ 新聊天"}</Text>
-        )}
-      </Pressable>
-    </View>
+    <Pressable
+      style={({ pressed }) => [
+        localStyles.tabPill,
+        active ? localStyles.tabPillActive : null,
+        { opacity: pressed ? 0.75 : 1 },
+      ]}
+      onPress={onPress}
+      accessibilityRole="tab"
+      accessibilityState={{ selected: active }}
+    >
+      <Text style={[localStyles.tabText, active ? localStyles.tabTextActive : null]}>{label}</Text>
+    </Pressable>
   );
 }
 
@@ -423,10 +384,10 @@ function WorkspaceRow({
           </View>
           <Text style={localStyles.projectMeta} numberOfLines={1}>
             {group.connected
-              ? `${group.sessions.length} session${group.sessions.length === 1 ? "" : "s"}`
+              ? `${group.sessions.length} 个会话`
               : remote
-                ? "remote \u00b7 offline"
-                : "offline"}
+                ? "远程 \u00b7 离线"
+                : "离线"}
           </Text>
         </View>
         <AnimatedChevron expanded={expanded} />
@@ -474,12 +435,10 @@ function AnimatedChevron({ expanded }: { expanded: boolean }) {
 function SessionRow({
   session,
   active,
-  placeholder,
   onPress,
 }: {
   session: SessionListItem;
   active: boolean;
-  placeholder: boolean;
   onPress?: () => void;
 }) {
   const time = formatRelativeTime(session.updated_at || session.created_at);
@@ -495,48 +454,37 @@ function SessionRow({
         <Text style={[styles.text, { fontWeight: "600", fontSize: 15 }]} numberOfLines={1}>
           {session.title}
         </Text>
-        {placeholder ? null : (
-          <View style={[styles.row, { marginTop: 4 }]}>
-            <View style={[styles.chip, { backgroundColor: tint.bg, borderColor: tint.border }]}>
-              <Text style={{ color: tint.color, fontSize: 11, fontWeight: "600" }}>{statusLabel(session.status)}</Text>
-            </View>
-            {time ? <Text style={[styles.textFaint, { marginLeft: spacing.sm }]}>{time}</Text> : null}
+        <View style={[styles.row, { marginTop: 4 }]}>
+          <View style={[styles.chip, { backgroundColor: tint.bg, borderColor: tint.border }]}>
+            <Text style={{ color: tint.color, fontSize: 11, fontWeight: "600" }}>{statusLabel(session.status)}</Text>
           </View>
-        )}
+          {time ? <Text style={[styles.textFaint, { marginLeft: spacing.sm }]}>{time}</Text> : null}
+        </View>
       </View>
     </Pressable>
   );
 }
 
 const localStyles = StyleSheet.create({
-  chatsHeader: {
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "space-between",
-    paddingHorizontal: spacing.lg,
-    paddingTop: spacing.sm,
-    paddingBottom: spacing.xs,
-  },
-  chatsKicker: {
-    fontSize: 13,
-    fontWeight: "700",
-    letterSpacing: 1,
-    color: colors.textFaint,
-  },
-  chatsNew: {
-    flexDirection: "row",
-    alignItems: "center",
-    paddingVertical: spacing.xs + 2,
-    paddingHorizontal: spacing.md,
+  tabPill: {
+    paddingVertical: spacing.xs + 1,
+    paddingHorizontal: spacing.md + 2,
     borderRadius: radius.pill,
     borderWidth: 1,
-    borderColor: colors.border,
-    backgroundColor: colors.surface,
+    borderColor: "transparent",
+    marginRight: spacing.sm,
   },
-  chatsNewText: {
-    fontSize: 13,
-    fontWeight: "600",
-    color: colors.text,
+  tabPillActive: {
+    backgroundColor: colors.accentTint,
+    borderColor: colors.accent,
+  },
+  tabText: {
+    fontSize: 16,
+    fontWeight: "700",
+    color: colors.textDim,
+  },
+  tabTextActive: {
+    color: colors.accent,
   },
   headButton: {
     paddingVertical: spacing.sm,

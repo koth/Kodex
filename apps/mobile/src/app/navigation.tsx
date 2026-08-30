@@ -10,7 +10,7 @@ import { SessionListScreen } from "../features/session-list/SessionListScreen";
 import { ConversationScreen } from "../features/conversation/ConversationScreen";
 import { SettingsScreen } from "../features/settings/SettingsScreen";
 import { DiagnosticsScreen } from "../features/settings/DiagnosticsScreen";
-import { AppServicesProvider, useConnectionState } from "./AppServicesContext";
+import { AppServicesProvider, useConnectionState, useSnapshot } from "./AppServicesContext";
 import { colors, spacing } from "../features/theme";
 
 export type RootStackParamList = {
@@ -21,6 +21,39 @@ export type RootStackParamList = {
 };
 
 const Stack = createNativeStackNavigator<RootStackParamList>();
+
+// Native header title for the conversation screen: the session title with a
+// small live/idle status line under it (iOS-subtitle style). Driven by the
+// session store so the status tracks the PC without any extra chrome — this
+// replaces the status chip the old in-screen header row used to duplicate.
+function ConversationHeaderTitle({ title }: { title: string }) {
+  const snapshot = useSnapshot();
+  const status = snapshot?.session.status ?? "Idle";
+  const live = status === "Streaming" || status === "WaitingForTool";
+  const tint = live
+    ? colors.success
+    : status === "Interrupted"
+      ? colors.danger
+      : colors.textDim;
+  return (
+    <View style={{ flex: 1, alignItems: "center", justifyContent: "center" }}>
+      <Text numberOfLines={1} style={{ color: colors.text, fontSize: 16, fontWeight: "700" }}>
+        {title}
+      </Text>
+      <Text
+        style={{
+          color: tint,
+          fontSize: 10,
+          fontWeight: "700",
+          letterSpacing: 0.5,
+          marginTop: 1,
+        }}
+      >
+        {live ? "运行中" : status === "Interrupted" ? "已中断" : "空闲"}
+      </Text>
+    </View>
+  );
+}
 
 function MainStack({ onRescan }: { onRescan: () => void }) {
   return (
@@ -49,7 +82,7 @@ function MainStack({ onRescan }: { onRescan: () => void }) {
                 opacity: pressed ? 0.85 : 1,
               })}
             >
-              <Text style={{ color: colors.accent, fontSize: 15, fontWeight: "600" }}>Settings</Text>
+              <Text style={{ color: colors.accent, fontSize: 15, fontWeight: "600" }}>设置</Text>
             </Pressable>
           ),
         })}
@@ -63,18 +96,18 @@ function MainStack({ onRescan }: { onRescan: () => void }) {
       </Stack.Screen>
       <Stack.Screen
         name="Conversation"
-        options={({ route }) => ({ title: route.params.title })}
+        options={({ route }) => ({
+          headerTitle: () => <ConversationHeaderTitle title={route.params.title} />,
+        })}
       >
-        {({ route, navigation }) => (
+        {({ route }) => (
           <ConversationScreen
             key={route.params.sessionId}
             sessionId={route.params.sessionId}
-            title={route.params.title}
-            onBack={() => navigation.navigate("Sessions")}
           />
         )}
       </Stack.Screen>
-      <Stack.Screen name="Settings" options={{ title: "Settings" }}>
+      <Stack.Screen name="Settings" options={{ title: "设置" }}>
         {({ navigation }) => (
           <SettingsScreen
             onRescan={onRescan}
@@ -82,7 +115,7 @@ function MainStack({ onRescan }: { onRescan: () => void }) {
           />
         )}
       </Stack.Screen>
-      <Stack.Screen name="Diagnostics" options={{ title: "Diagnostics" }}>
+      <Stack.Screen name="Diagnostics" options={{ title: "诊断" }}>
         {() => <DiagnosticsScreen />}
       </Stack.Screen>
     </Stack.Navigator>
@@ -105,7 +138,13 @@ function Root() {
   }, [connState]);
 
   return (
-    <SafeAreaView style={{ flex: 1, backgroundColor: colors.bg }}>
+    // No top edge here: the native stack header insets the status bar itself,
+    // so an outer top pad double-insets and leaves a dead strip above the
+    // header. Headerless screens (machines/pairing) apply their own top inset.
+    <SafeAreaView
+      style={{ flex: 1, backgroundColor: colors.bg }}
+      edges={["left", "right", "bottom"]}
+    >
       {everConnected ? (
         <MainStack onRescan={() => setEverConnected(false)} />
       ) : (
@@ -113,7 +152,9 @@ function Root() {
       )}
       {showDiagnostics ? (
         <View style={{ position: "absolute", top: 0, left: 0, right: 0, bottom: 0, backgroundColor: colors.scrim }}>
-          <DiagnosticsScreen onClose={() => setShowDiagnostics(false)} />
+          <SafeAreaView style={{ flex: 1 }} edges={["top"]}>
+            <DiagnosticsScreen onClose={() => setShowDiagnostics(false)} />
+          </SafeAreaView>
         </View>
       ) : null}
     </SafeAreaView>

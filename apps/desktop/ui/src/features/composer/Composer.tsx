@@ -1368,9 +1368,15 @@ function createImageThumbnail(dataUrl: string): Promise<{ data: string; mimeType
         reject(new Error("Could not create image thumbnail"));
         return;
       }
-      const scale = Math.min(size / image.width, size / image.height);
-      const width = Math.max(1, Math.round(image.width * scale));
-      const height = Math.max(1, Math.round(image.height * scale));
+      // Center-crop (cover): scale so BOTH axes fill the canvas and draw
+      // centered — the canvas clips to the middle square of the source. The
+      // previous min-scale fit letterboxed the image inside the 64x64 canvas,
+      // baking blank bars into the thumbnail bitmap; every consumer down the
+      // line (strip thumbs, object-fit: cover) then showed those baked bars
+      // no matter how it cropped.
+      const scale = Math.max(size / image.width, size / image.height);
+      const width = Math.max(size, Math.round(image.width * scale));
+      const height = Math.max(size, Math.round(image.height * scale));
       context.clearRect(0, 0, size, size);
       context.drawImage(image, Math.round((size - width) / 2), Math.round((size - height) / 2), width, height);
       const thumbnailUrl = canvas.toDataURL("image/png");

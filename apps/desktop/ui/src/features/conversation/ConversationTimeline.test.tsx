@@ -924,6 +924,39 @@ describe("ThinkingIndicator", () => {
     expect(finalRow?.querySelector(".msg-assistant-actions")).not.toBeNull();
   });
 
+  it("shows no action row anywhere while the turn is still running", () => {
+    // 轮次进行中（工具执行、状态 WaitingForTool）：中间文本段哪怕已经写完，
+    // 也不长出复制/分叉按钮 —— 操作行只属于已完成轮次的收尾回复。
+    const runningTool = makePermissionTool({
+      id: "tool-1",
+      call_id: "call-1",
+      status: "Running",
+      permission_input: null,
+    });
+    const snapshot = makeSnapshot({
+      session: { ...makeSnapshot().session, status: "WaitingForTool" },
+      timeline: [{ Message: "u-1" }, { Message: "a-1" }, { Tool: runningTool.id }],
+      messages: [
+        { id: "u-1", role: "User", body: "问题" },
+        { id: "a-1", role: "Assistant", body: "工具前的中间回复" },
+      ],
+      tools: [runningTool],
+    });
+
+    const { container } = render(
+      <ConversationTimeline
+        snapshot={snapshot}
+        onPermissionSelect={() => {}}
+        onForkConversation={() => {}}
+      />,
+    );
+
+    expect(
+      within(container).queryAllByRole("button", { name: "复制回复文本" }),
+    ).toHaveLength(0);
+    expect(within(container).queryAllByRole("button", { name: "分叉对话" })).toHaveLength(0);
+  });
+
   it("opens the fork point picker listing every turn of the session", async () => {
     const snapshot = makeSnapshot({
       session: { ...makeSnapshot().session, status: "Idle" },

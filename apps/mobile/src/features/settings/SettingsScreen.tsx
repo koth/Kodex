@@ -17,12 +17,12 @@ export function SettingsScreen({
 
   const unbind = () => {
     Alert.alert(
-      "Unbind all machines?",
+      "解绑所有设备？",
       "This clears every bound machine from this phone. You will need to re-scan a QR code to pair again.",
       [
-        { text: "Cancel", style: "cancel" },
+        { text: "取消", style: "cancel" },
         {
-          text: "Unbind all",
+          text: "全部解绑",
           style: "destructive",
           onPress: async () => {
             await controller.unbindAndClear();

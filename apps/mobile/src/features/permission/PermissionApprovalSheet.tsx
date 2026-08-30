@@ -52,7 +52,7 @@ export function PermissionApprovalSheet() {
           <View style={{ alignSelf: "center", width: 40, height: 5, borderRadius: 3, backgroundColor: colors.borderStrong, marginTop: spacing.sm }} />
           <ScrollView contentContainerStyle={{ padding: spacing.lg, paddingTop: spacing.md }}>
             <View style={styles.rowBetween}>
-              <Text style={[styles.text, { fontWeight: "800", fontSize: 17 }]}>Permission requested</Text>
+              <Text style={[styles.text, { fontWeight: "800", fontSize: 17 }]}>请求授权</Text>
               {destructive ? (
                 <View style={[styles.chip, { backgroundColor: colors.dangerTint, borderColor: colors.danger }]}>
                   <Text style={{ color: colors.danger, fontSize: 10, fontWeight: "700", textTransform: "uppercase", letterSpacing: 0.5 }}>Destructive</Text>
@@ -93,20 +93,20 @@ export function PermissionApprovalSheet() {
             {requireConfirm ? (
               <View style={{ marginTop: spacing.lg }}>
                 <View style={[styles.chip, { backgroundColor: colors.dangerTint, borderColor: colors.danger, alignSelf: "flex-start" }]}>
-                  <Text style={{ color: colors.danger, fontSize: 12 }}>This can modify your workspace. Confirm to allow.</Text>
+                  <Text style={{ color: colors.danger, fontSize: 12 }}>此操作可能修改你的工作区,确认后放行。</Text>
                 </View>
                 <View style={[styles.row, { marginTop: spacing.md }]}>
                   <Pressable
                     style={({ pressed }) => [styles.buttonDanger, { flex: 1, marginRight: spacing.sm, opacity: pressed ? 0.9 : 1 }]}
                     onPress={() => resolve(allowOption?.id ?? null)}
                   >
-                    <Text style={styles.buttonText}>Confirm allow</Text>
+                    <Text style={styles.buttonText}>确认放行</Text>
                   </Pressable>
                   <Pressable
                     style={({ pressed }) => [styles.buttonGhost, { flex: 1, opacity: pressed ? 0.7 : 1 }]}
                     onPress={() => controller.denyPermission(approval.permissionRequestId)}
                   >
-                    <Text style={[styles.text, { fontWeight: "600" }]}>Deny</Text>
+                    <Text style={[styles.text, { fontWeight: "600" }]}>拒绝</Text>
                   </Pressable>
                 </View>
               </View>
@@ -132,7 +132,7 @@ export function PermissionApprovalSheet() {
                   style={({ pressed }) => [styles.buttonGhost, { paddingVertical: spacing.sm + 1, opacity: pressed ? 0.7 : 1 }]}
                   onPress={() => controller.denyPermission(approval.permissionRequestId)}
                 >
-                  <Text style={[styles.text, { color: colors.danger, fontWeight: "600" }]}>Deny</Text>
+                  <Text style={[styles.text, { color: colors.danger, fontWeight: "600" }]}>拒绝</Text>
                 </Pressable>
               </View>
             )}

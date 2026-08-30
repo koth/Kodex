@@ -126,8 +126,10 @@ interface MessageRowProps {
   onRetry?: (messageId: string, text: string) => Promise<void> | void;
   onFilePathClick?: (filePath: string, lineNumber?: number) => void;
   candidatePaths?: string[];
-  /** Copy/fork actions live only under the latest assistant reply — earlier
-   *  replies render bare (the trailing icon rows were just noise). */
+  /** Copy/fork actions live only under the final reply of a COMPLETED turn —
+   *  earlier replies render bare (the trailing icon rows were just noise), and
+   *  the active turn's intermediate segments never grow a row: the anchor
+   *  would jump segment to segment mid-turn. */
   showActions?: boolean;
   /** Open the fork point picker anchored on this message's turn. */
   onForkOpen?: (messageId: string) => void;
@@ -1709,10 +1711,14 @@ export function ConversationTimeline({
                   : undefined
               }
               showActions={
-                msg.role === "Assistant" && turnFinalAssistantMessageIds.has(msg.id)
+                msg.role === "Assistant" &&
+                turnFinalAssistantMessageIds.has(msg.id) &&
+                // 轮次进行中整行隐藏（copy/fork 都不出现在中间阶段）：锚点会
+                // 随着中间文本段推进不断跳动，工具运行间隙还会在上一段文本
+                // 下冒出来 —— 操作行只属于已完成轮次的收尾回复。
+                !(turnIsActive && isCurrentTurnMessage)
               }
-              // 分叉只对已完成轮次开放：轮次进行中隐藏（copy 仍可用），
-              // 由后端再兜底校验一次。点击打开分叉点选择器。
+              // 分叉只对已完成轮次开放，由后端再兜底校验一次。点击打开分叉点选择器。
               onForkOpen={
                 onForkConversation && !(turnIsActive && msg.role === "Assistant" && isCurrentTurnMessage)
                   ? (messageId) => setForkPickerMessageId(messageId)

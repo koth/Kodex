@@ -5,7 +5,7 @@ import { colors, spacing } from "../theme";
 // Three breathing dots for the "agent is thinking" state. Each dot fades and
 // lifts on a staggered loop so the waiting state feels alive instead of a
 // bare spinner.
-export function ThinkingIndicator({ text = "thinking\u2026" }: { text?: string }) {
+export function ThinkingIndicator({ text = "思考中\u2026" }: { text?: string }) {
   const dots = useMemo(
     () => [new Animated.Value(0), new Animated.Value(0), new Animated.Value(0)],
     [],

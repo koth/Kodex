@@ -4,6 +4,7 @@ import { CameraView, useCameraPermissions, scanFromURLAsync } from "expo-camera"
 import type { BarcodeScanningResult } from "expo-camera";
 import * as ImagePicker from "expo-image-picker";
 import { useAppController, useConnectionState } from "../../app/AppServicesContext";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { WsTransport } from "../../relay/transport";
 import { parsePairingQr } from "../../pairing/qr-parse";
 import { styles, colors, spacing, radius, shadows } from "../theme";
@@ -26,6 +27,7 @@ export function PairingScreen({
 }) {
   const controller = useAppController();
   const connState = useConnectionState();
+  const insets = useSafeAreaInsets();
   const [permission, requestPermission] = useCameraPermissions();
   const [manual, setManual] = useState("");
   const [phase, setPhase] = useState<Phase>("idle");
@@ -87,7 +89,12 @@ export function PairingScreen({
   const busy = phase === "dialing" || phase === "authenticating" || phase === "pairing" || connState === "connecting" || connState === "authenticating" || connState === "paired/e2e";
 
   return (
-    <ScrollView style={styles.screen} contentContainerStyle={{ padding: spacing.lg, paddingBottom: spacing.xxl }}>
+    // Rendered from the headerless machines screen: pad the status bar inset
+    // here since the root SafeAreaView no longer applies a top edge.
+    <ScrollView
+      style={styles.screen}
+      contentContainerStyle={{ padding: spacing.lg, paddingTop: insets.top + spacing.lg, paddingBottom: spacing.xxl }}
+    >
       {onCancel ? (
         <Pressable
           onPress={onCancel}
@@ -137,7 +144,7 @@ export function PairingScreen({
             style={({ pressed }) => [styles.button, { opacity: pressed ? 0.9 : 1, minWidth: 180 }]}
             onPress={() => requestPermission()}
           >
-            <Text style={styles.buttonText}>Grant camera</Text>
+            <Text style={styles.buttonText}>授权相机</Text>
           </Pressable>
         </View>
       ) : (
@@ -164,16 +171,16 @@ export function PairingScreen({
         </View>
       )}
 
-      <Text style={styles.sectionHeader}>Or upload a QR image</Text>
+      <Text style={styles.sectionHeader}>或上传二维码图片</Text>
       <Pressable
         style={({ pressed }) => [styles.buttonGhost, { marginTop: spacing.sm, opacity: pressed ? 0.85 : 1, borderColor: colors.borderStrong }, busy && { opacity: 0.5 }]}
         disabled={busy}
         onPress={pickQrImage}
       >
-        <Text style={[styles.text, { fontWeight: "600" }]}>Pick QR from photos</Text>
+        <Text style={[styles.text, { fontWeight: "600" }]}>从相册选取二维码</Text>
       </Pressable>
 
-      <Text style={styles.sectionHeader}>Or paste the payload</Text>
+      <Text style={styles.sectionHeader}>或粘贴配对内容</Text>
       <TextInput
         style={[styles.input, { minHeight: 84, fontFamily: "monospace", fontSize: 13 }]}
         placeholder='{"relay_endpoint":"wss://…","pairing_code":"…","pc_device_pubkey":"…"}'
@@ -189,7 +196,7 @@ export function PairingScreen({
         disabled={busy || manual.trim().length === 0}
         onPress={() => pairFromJson(manual.trim())}
       >
-        <Text style={styles.buttonText}>Pair device</Text>
+        <Text style={styles.buttonText}>开始配对</Text>
       </Pressable>
 
       <View style={{ marginTop: spacing.xl, alignItems: "center" }}>
@@ -215,7 +222,7 @@ export function PairingScreen({
             style={({ pressed }) => ({ marginTop: spacing.md, padding: spacing.sm, opacity: pressed ? 0.7 : 1 })}
             onPress={onOpenDiagnostics}
           >
-            <Text style={[styles.text, { color: colors.textDim, fontSize: 13 }]}>View diagnostics log</Text>
+            <Text style={[styles.text, { color: colors.textDim, fontSize: 13 }]}>查看诊断日志</Text>
           </Pressable>
         ) : null}
       </View>

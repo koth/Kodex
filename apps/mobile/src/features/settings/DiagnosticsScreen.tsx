@@ -33,15 +33,15 @@ export function DiagnosticsScreen({ onClose }: { onClose?: () => void }) {
       <View style={{ padding: spacing.md }}>
         <View style={[styles.rowBetween, { marginBottom: spacing.md }]}>
           <View>
-            <Text style={{ color: colors.text, fontSize: 17, fontWeight: "800" }}>Diagnostics</Text>
-            <Text style={styles.textFaint}>Persisted relay & pairing log</Text>
+            <Text style={{ color: colors.text, fontSize: 17, fontWeight: "800" }}>诊断</Text>
+            <Text style={styles.textFaint}>中继与配对日志</Text>
           </View>
           {onClose ? (
             <Pressable
               style={({ pressed }) => [styles.buttonGhost, { opacity: pressed ? 0.7 : 1, paddingVertical: spacing.sm, paddingHorizontal: spacing.lg }]}
               onPress={onClose}
             >
-              <Text style={[styles.text, { fontWeight: "600" }]}>Close</Text>
+              <Text style={[styles.text, { fontWeight: "600" }]}>关闭</Text>
             </Pressable>
           ) : null}
         </View>
@@ -50,19 +50,19 @@ export function DiagnosticsScreen({ onClose }: { onClose?: () => void }) {
             style={({ pressed }) => [local.btn, { opacity: pressed ? 0.7 : 1 }]}
             onPress={() => void refresh()}
           >
-            <Text style={[styles.text, { fontSize: 13, fontWeight: "600" }]}>Refresh</Text>
+            <Text style={[styles.text, { fontSize: 13, fontWeight: "600" }]}>刷新</Text>
           </Pressable>
           <Pressable
             style={({ pressed }) => [local.btn, { opacity: pressed ? 0.7 : 1 }]}
             onPress={() => void share()}
           >
-            <Text style={[styles.text, { fontSize: 13, fontWeight: "600" }]}>Share</Text>
+            <Text style={[styles.text, { fontSize: 13, fontWeight: "600" }]}>分享</Text>
           </Pressable>
           <Pressable
             style={({ pressed }) => [local.btn, { borderColor: colors.danger, opacity: pressed ? 0.7 : 1 }]}
             onPress={() => void clear()}
           >
-            <Text style={[styles.text, { fontSize: 13, fontWeight: "600", color: colors.danger }]}>Clear</Text>
+            <Text style={[styles.text, { fontSize: 13, fontWeight: "600", color: colors.danger }]}>清空</Text>
           </Pressable>
         </View>
       </View>

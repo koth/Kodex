@@ -1,3 +1,4 @@
+import { memo } from "react";
 import Markdown from "react-native-markdown-display";
 import { colors, spacing, radius } from "../theme";
 
@@ -50,7 +51,10 @@ const markdownStyles: Record<string, object> = {
   },
 };
 
-export function MarkdownBody({ body }: { body: string }) {
+// Memoized on `body`: markdown re-parsing is the most expensive part of a
+// timeline row on phones, and it ran for every mounted row on every snapshot
+// emit. With memo, only rows whose body actually changed re-parse.
+export const MarkdownBody = memo(function MarkdownBody({ body }: { body: string }) {
   return <Markdown style={markdownStyles}>{body}</Markdown>;
-}
+});
 // end of file

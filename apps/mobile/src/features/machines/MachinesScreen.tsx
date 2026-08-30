@@ -9,6 +9,7 @@ import {
   StyleSheet,
 } from "react-native";
 import { useAppController, useConnectionState } from "../../app/AppServicesContext";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
 import type { BoundDevice } from "../../account/binding";
 import { PairingScreen } from "../pairing/PairingScreen";
 import { EmptyState } from "../ui/EmptyState";
@@ -60,6 +61,7 @@ export function MachinesScreen({
 }) {
   const controller = useAppController();
   const connState = useConnectionState();
+  const insets = useSafeAreaInsets();
   const [devices, setDevices] = useState<BoundDevice[]>([]);
   const [loading, setLoading] = useState(true);
   const [adding, setAdding] = useState(false);
@@ -105,12 +107,12 @@ export function MachinesScreen({
   const confirmUnbind = useCallback(
     (device: BoundDevice) => {
       Alert.alert(
-        "Unbind machine?",
+        "解除绑定该设备？",
         `${machineLabel(device)} will be removed from this phone. You can pair it again anytime by scanning its QR code.`,
         [
           { text: "Cancel", style: "cancel" },
           {
-            text: "Unbind",
+            text: "解绑",
             style: "destructive",
             onPress: () => {
               void (async () => {
@@ -138,11 +140,13 @@ export function MachinesScreen({
   }
 
   return (
-    <View style={styles.screen}>
+    // Headerless landing screen: the root SafeAreaView no longer pads the top
+    // (the native stack does that itself), so take the inset here.
+    <View style={[styles.screen, { paddingTop: insets.top }]}>
       <View style={{ paddingHorizontal: spacing.lg, paddingTop: spacing.xl, paddingBottom: spacing.md }}>
-        <Text style={[styles.title, { marginBottom: spacing.xs }]}>Machines</Text>
+        <Text style={[styles.title, { marginBottom: spacing.xs }]}>设备</Text>
         <Text style={[styles.subtitle, { marginBottom: 0 }]}>
-          Your paired computers. Tap one to connect and browse its sessions.
+          已配对的电脑。点按连接并浏览其中的会话。
         </Text>
       </View>
       <View style={styles.hairline} />
@@ -169,8 +173,8 @@ export function MachinesScreen({
           ) : (
             <EmptyState
               glyph={"\u2302"}
-              title="No machines yet"
-              hint="Show the pairing QR on your PC, then tap below to scan it. You can bind several PCs and switch between them."
+              title="还没有设备"
+              hint="在电脑端展示配对二维码,再点下方按钮扫码。可绑定多台电脑并随时切换。"
             />
           )
         }
@@ -193,14 +197,14 @@ export function MachinesScreen({
           disabled={busy}
           onPress={() => setAdding(true)}
         >
-          <Text style={styles.buttonText}>+ Pair a new PC</Text>
+          <Text style={styles.buttonText}>+ 配对新电脑</Text>
         </Pressable>
         {onOpenDiagnostics ? (
           <Pressable
             style={({ pressed }) => ({ alignSelf: "center", marginTop: spacing.md, padding: spacing.sm, opacity: pressed ? 0.7 : 1 })}
             onPress={onOpenDiagnostics}
           >
-            <Text style={[styles.text, { color: colors.textDim, fontSize: 13 }]}>View diagnostics log</Text>
+            <Text style={[styles.text, { color: colors.textDim, fontSize: 13 }]}>查看诊断日志</Text>
           </Pressable>
         ) : null}
       </View>
@@ -253,7 +257,7 @@ function MachineRow({
       {connecting ? (
         <View style={localStyles.connectingWrap}>
           <ActivityIndicator color={colors.accent} size="small" />
-          <Text style={localStyles.connectingText}>Connecting…</Text>
+          <Text style={localStyles.connectingText}>连接中…</Text>
         </View>
       ) : (
         <Pressable
@@ -267,7 +271,7 @@ function MachineRow({
           accessibilityRole="button"
           accessibilityLabel={`Unbind ${label}`}
         >
-          <Text style={localStyles.unbindText}>Unbind</Text>
+          <Text style={localStyles.unbindText}>解绑</Text>
         </Pressable>
       )}
     </Pressable>

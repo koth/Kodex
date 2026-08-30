@@ -3,6 +3,7 @@ import { View, Text, Pressable, StyleSheet, Animated, Easing, Vibration } from "
 import type { ToolInvocation } from "../../types";
 import { styles, colors, spacing, radius } from "../theme";
 import { deriveToolPresentation, type ToolTone } from "./tool-presentation";
+import { compactPreviewHunks } from "./compact-diff";
 
 interface Props {
   tool: ToolInvocation;
@@ -58,6 +59,10 @@ function ToolCallCardImpl({ tool, onStop }: Props) {
     (sum, preview) => sum + preview.hunks.reduce((acc, hunk) => acc + hunk.lines.filter((line) => line.kind === "Removed").length, 0),
     0,
   );
+  // Editing cards with a real diff expand to the patch only — same rule as
+  // the desktop (`showEditingDiffOnly`). The request/result JSON under a
+  // rendered diff is pure noise (and duplicates the whole edit payload).
+  const showDiffOnly = tool.diff_previews.length > 0 && (added > 0 || removed > 0);
 
   const toggle = () => {
     if (!presentation.hasDetail) return;
@@ -114,16 +119,16 @@ function ToolCallCardImpl({ tool, onStop }: Props) {
               stop();
             }}
             accessibilityRole="button"
-            accessibilityLabel="Stop tool"
+            accessibilityLabel="停止工具"
           >
-            <Text style={cardStyles.stopText}>{stopRequested ? "stopping\u2026" : "Stop"}</Text>
+            <Text style={cardStyles.stopText}>{stopRequested ? "停止中\u2026" : "停止"}</Text>
           </Pressable>
         ) : null}
       </Pressable>
 
       {expanded ? (
         <View style={cardStyles.detail}>
-          {presentation.outputLines.length > 0 ? (
+          {!showDiffOnly && presentation.outputLines.length > 0 ? (
             <View style={cardStyles.outputBlock}>
               {presentation.outputLines.map((line, index) => (
                 <Text key={index} style={cardStyles.outputLine} numberOfLines={0}>
@@ -134,56 +139,70 @@ function ToolCallCardImpl({ tool, onStop }: Props) {
             </View>
           ) : null}
 
-          {tool.diff_previews.map((preview) => (
-            <View key={preview.path} style={cardStyles.diffFile}>
-              <Text style={[styles.mono, { color: colors.textDim, fontSize: 12, marginBottom: 2 }]} numberOfLines={1}>
-                {preview.path}
-              </Text>
-              {preview.hunks.map((hunk, hi) => (
-                <View key={`${preview.path}:${hi}`}>
-                  {hunk.heading ? (
-                    <Text style={[styles.mono, { color: colors.textFaint, fontSize: 11, marginTop: 2 }]}>{hunk.heading}</Text>
-                  ) : null}
-                  {hunk.lines.map((line, li) => (
-                    <View
-                      key={`${preview.path}:${hi}:${li}`}
-                      style={[
-                        cardStyles.diffLine,
-                        line.kind === "Added" ? cardStyles.diffAdded : line.kind === "Removed" ? cardStyles.diffRemoved : null,
-                      ]}
-                    >
-                      <Text
-                        style={[
-                          styles.mono,
-                          {
-                            color: line.kind === "Added" ? colors.success : line.kind === "Removed" ? colors.danger : colors.textDim,
-                            fontSize: 12,
-                            lineHeight: 18,
-                            flex: 1,
-                          },
-                        ]}
-                      >
-                        {line.kind === "Added" ? "+" : line.kind === "Removed" ? "\u2212" : " "}
-                        {` ${line.content}`}
+          {tool.diff_previews.map((preview) => {
+            // Compact like the desktop: changed lines ± 3 context lines, long
+            // unchanged runs collapse into explicit gap markers. Without this
+            // a full-file hunk renders the whole file inside the card.
+            const hunks = compactPreviewHunks(preview.hunks);
+            return (
+              <View key={preview.path} style={cardStyles.diffFile}>
+                <Text style={[styles.mono, { color: colors.textDim, fontSize: 12, marginBottom: 2 }]} numberOfLines={1}>
+                  {preview.path}
+                </Text>
+                {hunks.map((hunk, hi) => (
+                  <View key={`${preview.path}:${hi}`}>
+                    {hunk.heading ? (
+                      <Text style={[styles.mono, { color: colors.textFaint, fontSize: 11, marginTop: 2 }]} numberOfLines={1}>
+                        {hunk.heading}
                       </Text>
-                    </View>
-                  ))}
-                </View>
-              ))}
-            </View>
-          ))}
+                    ) : null}
+                    {hunk.rows.map((row, ri) =>
+                      row.kind === "gap" ? (
+                        <Text key={`gap:${ri}`} style={cardStyles.diffGap} numberOfLines={1}>
+                          {`\u22EF ${row.count} \u884C\u672A\u66F4\u6539 \u22EF`}
+                        </Text>
+                      ) : (
+                        <View
+                          key={`line:${ri}`}
+                          style={[
+                            cardStyles.diffLine,
+                            row.lineKind === "Added" ? cardStyles.diffAdded : row.lineKind === "Removed" ? cardStyles.diffRemoved : null,
+                          ]}
+                        >
+                          <Text
+                            style={[
+                              styles.mono,
+                              {
+                                color: row.lineKind === "Added" ? colors.success : row.lineKind === "Removed" ? colors.danger : colors.textDim,
+                                fontSize: 12,
+                                lineHeight: 18,
+                                flex: 1,
+                              },
+                            ]}
+                          >
+                            {row.lineKind === "Added" ? "+" : row.lineKind === "Removed" ? "\u2212" : " "}
+                            {` ${row.content}`}
+                          </Text>
+                        </View>
+                      ),
+                    )}
+                  </View>
+                ))}
+              </View>
+            );
+          })}
 
           {tool.error ? (
             <Text style={[styles.mono, { color: colors.danger, fontSize: 12, lineHeight: 18, marginTop: spacing.xs }]}>{tool.error}</Text>
           ) : null}
 
-          {tool.raw_input ? (
+          {!showDiffOnly && tool.raw_input ? (
             <View style={{ marginTop: spacing.xs }}>
               <Text style={cardStyles.rawLabel}>Request</Text>
               <Text style={cardStyles.rawBody}>{tool.raw_input}</Text>
             </View>
           ) : null}
-          {tool.raw_output ? (
+          {!showDiffOnly && tool.raw_output ? (
             <View style={{ marginTop: spacing.xs }}>
               <Text style={cardStyles.rawLabel}>Result</Text>
               <Text style={cardStyles.rawBody}>{tool.raw_output}</Text>
@@ -278,6 +297,13 @@ const cardStyles = StyleSheet.create({
     borderRadius: 3,
     paddingHorizontal: spacing.xs,
     marginVertical: 1,
+  },
+  diffGap: {
+    color: colors.textFaint,
+    fontSize: 11,
+    lineHeight: 18,
+    textAlign: "center",
+    marginVertical: 2,
   },
   diffAdded: {
     backgroundColor: "rgba(52,211,153,0.10)",

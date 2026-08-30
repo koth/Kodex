@@ -277,6 +277,14 @@ fn snapshot_path_key(path: &str, workspace_root: &Path) -> String {
 const REMOTE_TIMELINE_WINDOW: usize = 200;
 /// Per-message body cap for remote payloads (matches the previous behavior).
 const REMOTE_MESSAGE_BODY_CHARS: usize = 2 * 1024;
+/// Bodies carrying an inline image data URL embed the attachment THUMBNAIL
+/// (a 64x64 canvas PNG, ~2-8KB of base64) and must reach the phone intact:
+/// truncating mid-base64 leaves an unterminated markdown image the phone can
+/// neither parse nor render — it shows raw base64 text instead. The original
+/// file never enters the payload (it stays a `file://` title for the desktop
+/// preview), so this allowance is bounded in practice; the cap only guards
+/// against pathological bodies.
+const REMOTE_IMAGE_BODY_CHARS: usize = 16 * 1024;
 /// Per-tool free-text cap for remote payloads.
 const REMOTE_TOOL_TEXT_CHARS: usize = 2 * 1024;
 
@@ -325,7 +333,12 @@ pub fn project_remote_snapshot(
     });
 
     for message in &mut snapshot.messages {
-        cap_string_in_place(&mut message.body, REMOTE_MESSAGE_BODY_CHARS);
+        let cap = if message.body.contains("data:image/") {
+            REMOTE_IMAGE_BODY_CHARS
+        } else {
+            REMOTE_MESSAGE_BODY_CHARS
+        };
+        cap_string_in_place(&mut message.body, cap);
     }
     for tool in &mut snapshot.tools {
         cap_string_in_place(&mut tool.summary, REMOTE_TOOL_TEXT_CHARS);
@@ -579,6 +592,35 @@ mod tests {
         assert!(projected.thinking_status.is_some());
         assert_eq!(projected.revision, 7);
         assert_eq!(projected.history_total, 3);
+    }
+
+    #[test]
+    fn remote_projection_keeps_image_bodies_intact_for_thumbnails() {
+        // A user image prompt embeds the attachment thumbnail (a 64x64 canvas
+        // PNG, ~2-8KB of base64). Capping the body at 2K truncated it
+        // mid-base64, leaving an unterminated markdown image the phone
+        // rendered as raw base64 text.
+        let image_body = format!(
+            "看看这个\n\n![Image: shot.jpg](data:image/png;base64,{} \"file:///tmp/shot.jpg\")",
+            "iVBOR".repeat(1600) // 8000 chars of base64
+        );
+        let mut snapshot = remote_fixture(1);
+        snapshot.messages[0].body = image_body.clone();
+        let projected = project_remote_snapshot(snapshot);
+        assert_eq!(projected.messages.len(), 1);
+        assert_eq!(projected.messages[0].body, image_body);
+    }
+
+    #[test]
+    fn remote_projection_still_caps_pathological_image_bodies() {
+        let image_body = format!(
+            "![Image: huge.jpg](data:image/png;base64,{})",
+            "A".repeat(REMOTE_IMAGE_BODY_CHARS * 2)
+        );
+        let mut snapshot = remote_fixture(1);
+        snapshot.messages[0].body = image_body;
+        let projected = project_remote_snapshot(snapshot);
+        assert!(projected.messages[0].body.len() <= REMOTE_IMAGE_BODY_CHARS + "\n...".len());
     }
 
     #[test]
