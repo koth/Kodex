@@ -6,6 +6,7 @@
 import type {
   PermissionInputRequest,
   PermissionInputResponse,
+  SessionFileChange,
   SessionStatus,
   ToolInvocation,
   UiSnapshot,
@@ -88,7 +89,8 @@ export type ControlRequest =
       input_response?: PermissionInputResponse | null;
     }
   | { op: "cancel"; request_id: string }
-  | { op: "stop_tool"; request_id: string; tool_call_id: string };
+  | { op: "stop_tool"; request_id: string; tool_call_id: string }
+  | { op: "get_file_diff"; request_id: string; message_id: string; path: string };
 
 export type ControlResponse =
   | { op: "list_sessions"; request_id: string; sessions: WorkspaceSessionList[] }
@@ -106,6 +108,7 @@ export type ControlResponse =
   | { op: "resolve_permission"; request_id: string }
   | { op: "cancel"; request_id: string }
   | { op: "stop_tool"; request_id: string }
+  | { op: "file_diff"; request_id: string; change?: SessionFileChange | null }
   | { op: "error"; request_id: string; message: string };
 
 // --- Event frames (internally tagged by `kind`, snake_case; no request_id) ---

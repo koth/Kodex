@@ -2899,3 +2899,65 @@ fn load_session_usage_snapshot_rebuilds_context_from_persisted_events() {
     assert_eq!(snapshot.context.window_tokens, Some(500_000));
     assert!(!snapshot.by_model.is_empty(), "by_model must carry the model summary");
 }
+
+#[test]
+fn load_recent_turn_file_changes_keeps_newest_and_orders_chronologically() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = SessionStore::open(dir.path(), dir.path()).unwrap();
+    let ids: Vec<Uuid> = (0..3).map(|_| Uuid::new_v4()).collect();
+
+    store.create_session("s1", "gpt-4").unwrap();
+    for (seq, message_id) in ids.iter().enumerate() {
+        store
+            .insert_message("s1", &message_id.to_string(), "Assistant", "body", (seq + 1) as i64)
+            .unwrap();
+        store
+            .replace_turn_file_changes(
+                "s1",
+                message_id,
+                &[SessionFileChange {
+                    path: format!("src/file{}.ts", seq),
+                    change_type: FileChangeType::Modified,
+                    old_text: Some("old".into()),
+                    new_text: format!("new {}", seq),
+                    added_lines: 1,
+                    removed_lines: 0,
+                    timestamp: format!("{}", seq),
+                }],
+            )
+            .unwrap();
+    }
+
+    // Limit 2 keeps the two NEWEST turns (seq 2 and 3) and returns them in
+    // chronological (oldest-first) order.
+    let loaded = store.load_recent_turn_file_changes("s1", 2).unwrap();
+    assert_eq!(loaded.len(), 2);
+    assert_eq!(loaded[0].message_id, ids[1]);
+    assert_eq!(loaded[1].message_id, ids[2]);
+    assert!(loaded[0].changes[0].old_text.is_some(), "texts must be restored for GetFileDiff");
+
+    // A limit larger than the turn count returns everything, oldest first.
+    let loaded = store.load_recent_turn_file_changes("s1", 10).unwrap();
+    assert_eq!(loaded.len(), 3);
+    assert_eq!(loaded[0].message_id, ids[0]);
+}
+
+#[test]
+fn list_sessions_emits_iso8601_timestamps_for_phone_date_parse() {
+    // The phone formats relative times with `Date.parse`, which is
+    // engine-specific for bare epoch strings (Hermes mis-parsed them and
+    // every session showed "刚刚"). The wire format must be ISO-8601 UTC.
+    let dir = tempfile::tempdir().unwrap();
+    let store = SessionStore::open(dir.path(), dir.path()).unwrap();
+    store.create_session("s1", "gpt-4").unwrap();
+
+    let sessions = store.list_sessions().unwrap();
+    assert_eq!(sessions.len(), 1);
+    let item = &sessions[0];
+    // ISO-8601 UTC: `YYYY-MM-DDTHH:MM:SSZ` — unambiguous for every JS engine.
+    assert!(item.updated_at.ends_with('Z'), "updated_at must end with Z: {}", item.updated_at);
+    assert_eq!(item.updated_at.len(), 20, "YYYY-MM-DDTHH:MM:SSZ is 20 chars: {}", item.updated_at);
+    assert!(item.created_at.ends_with('Z'));
+    assert_eq!(&item.updated_at[10..11], "T");
+    assert!(item.updated_at.starts_with("20"), "sane year: {}", item.updated_at);
+}

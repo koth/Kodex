@@ -1,7 +1,8 @@
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 use workspace_model::{
-    AgentCliId, PermissionInputResponse, UiSnapshot, UserPromptContent, WorkspaceSessionList,
+    AgentCliId, PermissionInputResponse, SessionFileChange, UiSnapshot, UserPromptContent,
+    WorkspaceSessionList,
 };
 
 /// A control operation sent from the phone (or relay) to the PC gateway.
@@ -62,6 +63,17 @@ pub enum ControlRequest {
         request_id: Uuid,
         tool_call_id: String,
     },
+    /// Fetch the full file change (old/new text) for one file of one turn.
+    /// The snapshot projection only carries turn-change METADATA (path +
+    /// line counts) — the phone requests the diff on demand when the user
+    /// taps a file in the turn-changes bar.
+    GetFileDiff {
+        request_id: Uuid,
+        /// The turn that produced the change (TurnFileChanges.message_id).
+        message_id: Uuid,
+        /// File path exactly as listed in the turn-change metadata.
+        path: String,
+    },
 }
 
 /// The gateway's answer to a [`ControlRequest`], echoing `request_id`.
@@ -104,6 +116,14 @@ pub enum ControlResponse {
     StopTool {
         request_id: Uuid,
     },
+    /// The full file change for a GetFileDiff request. `change` is `None`
+    /// when the turn/file is no longer resolvable on the desktop (e.g. the
+    /// turn predates the desktop process and its live turn window).
+    FileDiff {
+        request_id: Uuid,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        change: Option<SessionFileChange>,
+    },
     Error {
         request_id: Uuid,
         message: String,
@@ -123,7 +143,8 @@ impl ControlRequest {
             }
             | ControlRequest::ResolvePermission { request_id, .. }
             | ControlRequest::Cancel { request_id }
-            | ControlRequest::StopTool { request_id, .. } => *request_id,
+            | ControlRequest::StopTool { request_id, .. }
+            | ControlRequest::GetFileDiff { request_id, .. } => *request_id,
         }
     }
 }

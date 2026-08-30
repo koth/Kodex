@@ -8,6 +8,7 @@ import type {
   AgentCliId,
   WorkspaceSessionList,
   UiSnapshot,
+  SessionFileChange,
 } from "../types";
 
 interface Pending {
@@ -177,6 +178,21 @@ export class ControlClient {
       request_id: uuidV4(),
       tool_call_id: toolCallId,
     }) as Promise<{ op: "stop_tool"; request_id: string }>;
+  }
+
+  /** Fetch the full file change (old/new text) for one file of one turn.
+   * `change` is undefined when the desktop can no longer resolve the turn
+   * (e.g. the turn predates the desktop process). */
+  getFileDiff(
+    messageId: string,
+    path: string,
+  ): Promise<{ op: "file_diff"; request_id: string; change?: SessionFileChange | null }> {
+    return this.send({
+      op: "get_file_diff",
+      request_id: uuidV4(),
+      message_id: messageId,
+      path,
+    }) as Promise<{ op: "file_diff"; request_id: string; change?: SessionFileChange | null }>;
   }
 }
 // end of file

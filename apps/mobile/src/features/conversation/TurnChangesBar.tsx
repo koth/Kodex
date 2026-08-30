@@ -1,14 +1,16 @@
 import { memo, useState } from "react";
 import { View, Text, Pressable, ScrollView, StyleSheet } from "react-native";
 import type { TurnFileChanges, UiSnapshot } from "../../types";
+import { useAppController } from "../../app/AppServicesContext";
+import { FileDiffSheet, type FileDiffTurn } from "./FileDiffSheet";
 import { colors, spacing } from "../theme";
 
 // Pinned above the composer: the files changed by the most recent turn that
 // modified any file — the mobile counterpart of the desktop per-turn
 // ChangesBar. Collapsed shows one summary line (label + file count + line
-// totals); expanding lists every file with its +/- counts. Per-file diffs
-// live in the turn's tool cards, so this bar is the turn-level index, not a
-// second diff surface.
+// totals); expanding lists every file with its +/- counts. Tapping a file
+// opens a full-screen modal with the file's real diff (fetched on demand via
+// the GetFileDiff control op), aligned with the desktop review panel.
 
 function latestTurnWithChanges(turns: TurnFileChanges[]): TurnFileChanges | null {
   for (let i = turns.length - 1; i >= 0; i--) {
@@ -26,7 +28,9 @@ function lastTimelineMessageId(snapshot: UiSnapshot): string | null {
 }
 
 export const TurnChangesBar = memo(function TurnChangesBar({ snapshot }: { snapshot: UiSnapshot }) {
+  const controller = useAppController();
   const [expanded, setExpanded] = useState(false);
+  const [target, setTarget] = useState<FileDiffTurn | null>(null);
   const turn = latestTurnWithChanges(snapshot.turn_changes ?? []);
   if (!turn) return null;
 
@@ -56,7 +60,24 @@ export const TurnChangesBar = memo(function TurnChangesBar({ snapshot }: { snaps
       {expanded ? (
         <ScrollView style={barStyles.list} nestedScrollEnabled>
           {files.map((file, index) => (
-            <View key={`${file.path}:${index}`} style={barStyles.fileRow}>
+            <Pressable
+              key={`${file.path}:${index}`}
+              style={({ pressed }) => [barStyles.fileRow, pressed ? barStyles.fileRowPressed : null]}
+              onPress={() =>
+                setTarget({
+                  messageId: turn.message_id,
+                  initialPath: file.path,
+                  sections: files.map((entry) => ({
+                    path: entry.path,
+                    changeType: entry.change_type,
+                    addedLines: entry.added_lines,
+                    removedLines: entry.removed_lines,
+                  })),
+                })
+              }
+              accessibilityRole="button"
+              accessibilityLabel={`查看 ${file.path} 的 diff`}
+            >
               <Text
                 style={[barStyles.path, file.change_type === "Deleted" ? barStyles.pathDeleted : null]}
                 numberOfLines={1}
@@ -65,10 +86,11 @@ export const TurnChangesBar = memo(function TurnChangesBar({ snapshot }: { snaps
               </Text>
               <Text style={[barStyles.count, { color: colors.success }]}>{`+${file.added_lines}`}</Text>
               <Text style={[barStyles.count, { color: colors.danger }]}>{`\u2212${file.removed_lines}`}</Text>
-            </View>
+            </Pressable>
           ))}
         </ScrollView>
       ) : null}
+      <FileDiffSheet turn={target} controller={controller} onClose={() => setTarget(null)} />
     </View>
   );
 });
@@ -125,7 +147,13 @@ const barStyles = StyleSheet.create({
     flexDirection: "row",
     alignItems: "center",
     paddingVertical: spacing.xs - 1,
+    paddingHorizontal: spacing.xs,
+    marginHorizontal: -spacing.xs,
+    borderRadius: 6,
     gap: spacing.sm,
+  },
+  fileRowPressed: {
+    backgroundColor: colors.surface,
   },
   path: {
     color: colors.textDim,

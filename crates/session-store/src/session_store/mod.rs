@@ -729,12 +729,18 @@ impl SessionStore {
         )?;
 
         let rows = stmt.query_map(params![&self.workspace_root], |row| {
+            // Timestamps are STORED as epoch-seconds but must cross the wire
+            // as ISO-8601 UTC: the phone's `Date.parse` is engine-specific
+            // (Hermes mis-parses bare digit strings), which made every
+            // session render as "刚刚".
+            let created_epoch: String = row.get(3)?;
+            let updated_epoch: String = row.get(4)?;
             Ok(SessionListItem {
                 id: row.get(0)?,
                 title: row.get(1)?,
                 status: row.get(2)?,
-                created_at: row.get(3)?,
-                updated_at: row.get(4)?,
+                created_at: epoch_secs_to_iso_utc(created_epoch.parse::<u64>().unwrap_or(0)),
+                updated_at: epoch_secs_to_iso_utc(updated_epoch.parse::<u64>().unwrap_or(0)),
                 message_count: row.get(5)?,
                 acp_session_id: row.get(6)?,
                 agent_cli: row.get(7)?,
@@ -759,12 +765,15 @@ impl SessionStore {
         )?;
 
         let rows = stmt.query_map(params![&self.workspace_root], |row| {
+            // ISO-8601 on the wire (see `list_sessions`): stored as epoch secs.
+            let created_epoch: String = row.get(3)?;
+            let updated_epoch: String = row.get(4)?;
             Ok(SessionListItem {
                 id: row.get(0)?,
                 title: row.get(1)?,
                 status: row.get(2)?,
-                created_at: row.get(3)?,
-                updated_at: row.get(4)?,
+                created_at: epoch_secs_to_iso_utc(created_epoch.parse::<u64>().unwrap_or(0)),
+                updated_at: epoch_secs_to_iso_utc(updated_epoch.parse::<u64>().unwrap_or(0)),
                 message_count: 0,
                 acp_session_id: row.get(5)?,
                 agent_cli: row.get(6)?,
@@ -2156,6 +2165,40 @@ impl SessionStore {
         }
 
         Ok(items)
+    }
+
+    /// Load at most `limit` most recent turns' file changes, oldest first.
+    /// Used by session restore: the phone's turn bar and its on-demand
+    /// GetFileDiff read `ui.turn_changes`, which used to start empty after a
+    /// desktop restart — capping keeps very long sessions bounded.
+    pub fn load_recent_turn_file_changes(
+        &self,
+        session_id: &str,
+        limit: i64,
+    ) -> Result<Vec<TurnFileChanges>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT c.message_id
+             FROM session_turn_file_changes c
+             LEFT JOIN messages m ON m.id = c.message_id AND m.session_id = c.session_id
+             WHERE c.session_id = ?1
+             GROUP BY c.message_id
+             ORDER BY COALESCE(m.seq, -1) DESC
+             LIMIT ?2",
+        )?;
+        let ids: Vec<String> = stmt
+            .query_map(params![session_id, limit], |row| row.get(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        let all = self.load_turn_file_changes(session_id)?;
+        let recent_ids: std::collections::HashSet<Uuid> = ids
+            .iter()
+            .filter_map(|id| Uuid::parse_str(id).ok())
+            .collect();
+        // `all` is oldest-first; keep only the selected (most recent) turns,
+        // preserving chronological order.
+        Ok(all
+            .into_iter()
+            .filter(|turn| recent_ids.contains(&turn.message_id))
+            .collect())
     }
 
     fn insert_turn_file_change(

@@ -14,7 +14,8 @@
 //! provided by the shell, not here.
 
 use workspace_model::{
-    AgentCliId, PermissionInputResponse, UiSnapshot, UserPromptContent, WorkspaceSessionList,
+    AgentCliId, PermissionInputResponse, SessionFileChange, UiSnapshot, UserPromptContent,
+    WorkspaceSessionList,
 };
 
 use crate::application::AppUpdate;
@@ -85,6 +86,16 @@ pub trait RemoteControl: Send + Sync {
         &self,
         tool_call_id: String,
     ) -> impl std::future::Future<Output = Result<(), String>> + Send;
+
+    /// Fetch the full file change (old/new text) for one file of one turn.
+    /// The snapshot projection carries only turn-change metadata (path + line
+    /// counts); the phone requests the diff on demand when the user taps a
+    /// file in the turn-changes bar.
+    fn get_file_diff(
+        &self,
+        message_id: String,
+        path: String,
+    ) -> impl std::future::Future<Output = Result<SessionFileChange, String>> + Send;
 
     /// Subscribe to UI/permission update signals (see `AppUpdate`).
     fn subscribe_updates(&self) -> tokio::sync::broadcast::Receiver<AppUpdate>;
@@ -233,6 +244,15 @@ where
         tool_call_id: String,
     ) -> impl std::future::Future<Output = Result<(), String>> + Send {
         let result = self.with_app(|app| app.stop_tool(&tool_call_id));
+        async move { result }
+    }
+
+    fn get_file_diff(
+        &self,
+        message_id: String,
+        path: String,
+    ) -> impl std::future::Future<Output = Result<SessionFileChange, String>> + Send {
+        let result = self.with_app(|app| app.session_turn_file_diff(&message_id, &path));
         async move { result }
     }
 

@@ -3,6 +3,11 @@ use crate::remote_ssh::{RemoteSshCommand, RemoteSshCommandRunner, SystemRemoteSs
 use acp_core::RemoteSshReverseForward;
 use std::collections::{BTreeMap, BTreeSet};
 
+/// How many recent turns' file changes to restore into `ui.turn_changes`.
+/// Bounds memory for very long sessions while keeping the phone's turn bar
+/// and its GetFileDiff fully functional across desktop restarts.
+const RESTORE_TURN_CHANGE_LIMIT: i64 = 30;
+
 impl Application {
     pub fn bootstrap(
         workspace_root: impl AsRef<Path>,
@@ -223,10 +228,16 @@ impl Application {
                     ui.timeline = timeline;
                     // Historical diffs are now loaded through scoped change-set APIs.
                     // Keep legacy arrays empty on session restore so they cannot act as
-                    // the primary source for review or timeline diff hydration.
+                    // the primary source for review or timeline diff hydration —
+                    // EXCEPT turn changes: the phone's turn bar and its on-demand
+                    // GetFileDiff both read `ui.turn_changes`, so restore them from
+                    // the persisted per-turn table (full texts stay local; the
+                    // remote projection still sends metadata only).
                     ui.session_changes.clear();
                     ui.review_changes.clear();
-                    ui.turn_changes.clear();
+                    ui.turn_changes = store
+                        .load_recent_turn_file_changes(session_id, RESTORE_TURN_CHANGE_LIMIT)
+                        .unwrap_or_default();
                     ui.usage = store
                         .load_session_usage_snapshot(session_id)
                         .unwrap_or_default();
@@ -551,7 +562,12 @@ impl Application {
                     ui.timeline = timeline;
                     ui.session_changes.clear();
                     ui.review_changes.clear();
-                    ui.turn_changes.clear();
+                    // Turn changes restore from the persisted per-turn table —
+                    // the phone's turn bar and GetFileDiff read `ui.turn_changes`
+                    // (the remote projection still sends metadata only).
+                    ui.turn_changes = store
+                        .load_recent_turn_file_changes(session_id, RESTORE_TURN_CHANGE_LIMIT)
+                        .unwrap_or_default();
                     ui.usage = store
                         .load_session_usage_snapshot(session_id)
                         .unwrap_or_default();

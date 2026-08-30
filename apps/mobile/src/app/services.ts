@@ -738,6 +738,12 @@ export class AppController {
     return this.controlClient().stopTool(toolCallId);
   }
 
+  /** Fetch the full file change for a turn-change row (on-demand diff). */
+  async getFileDiff(messageId: string, path: string) {
+    const response = await this.controlClient().getFileDiff(messageId, path);
+    return response.change ?? null;
+  }
+
   /** Approve a pending permission by its (call_id) id and chosen option id. */
  async approvePermission(
    permissionRequestId: string,

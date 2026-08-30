@@ -6,7 +6,9 @@
 
 use app_core::{AppUpdate, RemoteControl};
 use tauri::{AppHandle, Manager};
-use workspace_model::{AgentCliId, PermissionInputResponse, UserPromptContent, WorkspaceSessionList};
+use workspace_model::{
+    AgentCliId, PermissionInputResponse, SessionFileChange, UserPromptContent, WorkspaceSessionList,
+};
 
 use crate::state::AppState;
 
@@ -110,6 +112,18 @@ impl RemoteControl for DesktopRemoteControl {
             .app
             .state::<AppState>()
             .with_app(|app| app.stop_tool(&tool_call_id));
+        async move { result }
+    }
+
+    fn get_file_diff(
+        &self,
+        message_id: String,
+        path: String,
+    ) -> impl std::future::Future<Output = Result<SessionFileChange, String>> + Send {
+        let result = self
+            .app
+            .state::<AppState>()
+            .with_app(|app| app.session_turn_file_diff(&message_id, &path));
         async move { result }
     }
 

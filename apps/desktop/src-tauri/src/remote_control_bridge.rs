@@ -195,6 +195,14 @@ impl ControlHandler for DesktopControlHandler {
                 .stop_tool(tool_call_id)
                 .await
                 .map(|_| ControlResponse::StopTool { request_id }),
+            ControlRequest::GetFileDiff { message_id, path, .. } => self
+                .control
+                .get_file_diff(message_id.to_string(), path)
+                .await
+                .map(|change| ControlResponse::FileDiff {
+                    request_id,
+                    change: Some(change),
+                }),
         };
         // A phone-initiated session switch/create must always be followed by a
         // Full snapshot push, even when the target session was already active
