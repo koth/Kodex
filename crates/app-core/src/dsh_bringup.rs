@@ -107,6 +107,11 @@ impl DshBringup {
         write_settings(&paths.dsh_settings_path(), &config)
             .map_err(|e| format!("failed to write dsh settings.yaml: {e}"))?;
 
+        // 1.5 Seed ~/.kodex/dsh/AGENTS.md (the dsh user-global instruction
+        //     file) when missing, so file edits go through the dedicated file
+        //     tools and stay observable as structured diffs.
+        ensure_dsh_agents_md(paths)?;
+
         // 2. Spawn `dsh web --port 0` and wait for the readiness line.
         let provider_keys = dsh_provider_keys(paths);
         let spawn_config = SpawnDshWebConfig {
@@ -152,6 +157,76 @@ impl DshBringup {
     }
 }
 
+/// Seed `~/.kodex/dsh/AGENTS.md` (the dsh `agent-instructions` plugin's
+/// user-global instruction file) when it does not exist yet. dsh folds this
+/// file into every session's context at startup as a durable
+/// `<system-reminder>`, which is the supported way to steer the agent without
+/// patching the shipped system prompt (this dsh build hardcodes the preset
+/// root to its npm package, so deployment-side persona overrides are not
+/// possible). Created ONLY when missing: afterwards the file belongs to the
+/// user and Kodex never overwrites their edits.
+fn ensure_dsh_agents_md(paths: &AppPaths) -> Result<(), String> {
+    let path = paths.dsh_dir().join("AGENTS.md");
+    if path.exists() {
+        return Ok(());
+    }
+    std::fs::create_dir_all(paths.dsh_dir())
+        .map_err(|e| format!("failed to create dsh home: {e}"))?;
+    std::fs::write(&path, KODEX_DSH_AGENTS_MD)
+        .map_err(|e| format!("failed to write {}: {e}", path.display()))?;
+    Ok(())
+}
+
+/// The seeded user-global instruction block. The point: file modifications
+/// must go through the dedicated `edit`/`write` tools so Kodex's diff
+/// pipeline observes them — shell-based edits (sed/python/tee/redirection)
+/// produce no structured diff and are invisible to the review UI.
+const KODEX_DSH_AGENTS_MD: &str = r#"<!-- Managed by Kodex: this file is created once when the app starts and
+     is never overwritten afterwards. Edit it freely — it is applied to every
+     dsh session on this machine. -->
+
+# File editing policy
+
+- Apply ALL file modifications with the dedicated file tools: `edit` for
+  partial changes, `write` only for new files or full rewrites.
+- NEVER modify files through shell commands — no `sed`, `awk`, `perl`,
+  `python`, `node -e`, `tee`, output redirection (`>` / `>>`), heredocs, or
+  `patch`. Shell-based edits bypass the structured diff pipeline and are
+  invisible to code review. If a file tool call fails, fix the arguments and
+  retry the tool instead of falling back to shell.
+- Shell is for running programs, tests, and read-only inspection (`cat`,
+  `grep`, `ls`, `git status` / `git diff` / `git log`). Mutating anything in
+  the working tree belongs to the file tools.
+- When a change touches several spots in one file, make consecutive `edit`
+  calls to that file rather than scripting the edits in one shell command.
+"#;
+
 // Silence unused import when DshChild is only used via attach_child in host.rs.
 #[allow(unused_imports)]
 use dsh_bridge::DshChild as _DshChildRef;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn seeds_agents_md_when_missing_and_never_overwrites() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::from_root(tmp.path());
+
+        // First bring-up seeds the file with the file-editing policy.
+        ensure_dsh_agents_md(&paths).expect("seed");
+        let path = paths.dsh_dir().join("AGENTS.md");
+        let seeded = std::fs::read_to_string(&path).expect("read seeded file");
+        assert!(seeded.contains("File editing policy"));
+        assert!(seeded.contains("NEVER modify files through shell"));
+
+        // A later bring-up must treat the file as user-owned: edits survive.
+        std::fs::write(&path, "# my own rules\n").expect("simulate user edit");
+        ensure_dsh_agents_md(&paths).expect("second run");
+        assert_eq!(
+            std::fs::read_to_string(&path).expect("read after second run"),
+            "# my own rules\n"
+        );
+    }
+}

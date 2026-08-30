@@ -2,6 +2,8 @@ import { useCallback, useEffect, useState } from "react";
 import { View, Text, ActivityIndicator, KeyboardAvoidingView, Platform } from "react-native";
 import { useAppController, useSnapshot } from "../../app/AppServicesContext";
 import { ConversationTimeline } from "./ConversationTimeline";
+import { TurnChangesBar } from "./TurnChangesBar";
+import { SessionInfoSheet } from "./SessionInfoSheet";
 import { Composer } from "../composer/Composer";
 import { PermissionApprovalSheet } from "../permission/PermissionApprovalSheet";
 import { styles, colors, spacing } from "../theme";
@@ -100,6 +102,8 @@ export function ConversationScreen({ sessionId }: Props) {
           </View>
         )}
 
+        {snapshot ? <TurnChangesBar snapshot={snapshot} /> : null}
+
         <Composer
           onSend={handleSend}
           disabled={!snapshot}
@@ -108,6 +112,7 @@ export function ConversationScreen({ sessionId }: Props) {
           onCancel={handleCancel}
         />
 
+        <SessionInfoSheet />
         <PermissionApprovalSheet />
       </View>
     </KeyboardAvoidingView>

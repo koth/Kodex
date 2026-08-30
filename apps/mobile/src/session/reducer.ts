@@ -43,8 +43,10 @@ export function applySnapshotPatch(snapshot: UiSnapshot, patch: UiSnapshotPatch)
   // The backend always sends the full replacement list of pending steers
   // (empty once they have been moved into the timeline).
   pending_steers: patch.pending_steers ?? snapshot.pending_steers ?? [],
-  // `usage` is preserved from the prior snapshot, matching the desktop
-  // reducer (it is not overridden by the patch in applySnapshotPatch).
+  // Usage is a full-replacement snapshot (context occupancy + token totals)
+  // carried on every patch — the phone's only channel for it, unlike the
+  // desktop which reads the persisted usage stream. Apply it verbatim.
+  usage: patch.usage ?? snapshot.usage,
   };
 }
 

@@ -2865,3 +2865,37 @@ fn load_tool_detail_returns_uncapped_stored_fields() {
     assert_eq!(detail.raw_output.as_deref(), Some("output-call-1"));
     assert!(store.load_tool_detail("s1", &Uuid::new_v4().to_string()).is_err());
 }
+
+#[test]
+fn load_session_usage_snapshot_rebuilds_context_from_persisted_events() {
+    // Regression guard for the phone's session-info sheet: the usage
+    // projection reaches the phone through the session snapshot, so the
+    // persisted-events -> snapshot reconstruction must keep context
+    // occupancy (used/window) intact.
+    use workspace_model::{UsageContextSnapshot, UsageEvent, UsageEventScope, UsageTokenBreakdown};
+    let dir = tempfile::tempdir().unwrap();
+    let store = SessionStore::open(dir.path(), dir.path()).unwrap();
+    let session_id = "11111111-1111-4111-8111-111111111111";
+    store.create_session(session_id, "test-model").unwrap();
+
+    let event = UsageEvent {
+        scope: UsageEventScope::ContextSnapshot,
+        model: Some("cline-pass/glm-5.3-flash".into()),
+        provider: None,
+        agent_cli: Some("DeepSeek Harness".into()),
+        tokens: UsageTokenBreakdown::default(),
+        context: UsageContextSnapshot {
+            used_tokens: Some(334_459),
+            window_tokens: Some(500_000),
+            updated_at: Some("2026-08-29T12:00:00Z".into()),
+        },
+        timestamp: None,
+        raw_json: None,
+    };
+    store.append_usage_event(session_id, &event, None, None).unwrap();
+
+    let snapshot = store.load_session_usage_snapshot(session_id).unwrap();
+    assert_eq!(snapshot.context.used_tokens, Some(334_459));
+    assert_eq!(snapshot.context.window_tokens, Some(500_000));
+    assert!(!snapshot.by_model.is_empty(), "by_model must carry the model summary");
+}

@@ -129,6 +129,40 @@ describe("applySnapshotPatch", () => {
   expect(out.timeline).toEqual([{ Message: "m1" }, { Tool: "t1" }]);
   });
 
+  it("applies patch usage so the session-info sheet sees context/token updates", () => {
+  const snap = makeSnapshot();
+  const out = applySnapshotPatch(
+  snap,
+  patchFor(snap, {
+  usage: {
+  context: { used_tokens: 1200, window_tokens: 950000, updated_at: null },
+  current_turn: { total_tokens: 300 },
+  session_total: { total_tokens: 4500 },
+  by_model: [],
+  },
+  }),
+  );
+  expect(out.usage?.context?.used_tokens).toBe(1200);
+  expect(out.usage?.context?.window_tokens).toBe(950000);
+  expect(out.usage?.session_total?.total_tokens).toBe(4500);
+  });
+
+  it("patch without usage preserves the prior usage", () => {
+  const seeded = applySnapshotPatch(
+  makeSnapshot(),
+  patchFor(makeSnapshot(), {
+  usage: {
+  context: { used_tokens: 1200, window_tokens: 950000, updated_at: null },
+  current_turn: {},
+  session_total: {},
+  by_model: [],
+  },
+  }),
+  );
+  const out = applySnapshotPatch(seeded, patchFor(seeded));
+  expect(out.usage?.context?.used_tokens).toBe(1200);
+  });
+
   it("absent optional fields coalesce with prior", () => {
   const snap = makeSnapshot();
   const out = applySnapshotPatch(snap, patchFor(snap, { repository: null }));

@@ -11,6 +11,7 @@ import {
   clearAllStreamingMessages,
   getStreamingMessageBody,
 } from "./streaming-message-store";
+import { diagnostics } from "../util/diagnostics";
 
 type Listener = (snapshot: Snapshot | null) => void;
 type PermissionHandler = (request: PermissionInputRequest) => void;
@@ -29,6 +30,7 @@ type ResyncHandler = () => void;
 //   regresses the held state (it would wedge subsequent patches).
 export class SessionStore {
   private snapshot: Snapshot | null = null;
+  private lastLoggedUsageTokens: number | null = null;
   private activeSessionId: string | null = null;
   private listeners = new Set<Listener>();
   private permissionHandler: PermissionHandler | null = null;
@@ -104,6 +106,11 @@ export class SessionStore {
         }
         this.activeSessionId = incoming.session.id;
         this.snapshot = materializeStreamingMessageBodies(incoming);
+        const fullUsed = incoming.usage?.context?.used_tokens;
+        diagnostics.log(
+          "usage",
+          `snapshot_full: session=${incoming.session.id.slice(0, 8)} used=${fullUsed ?? "null"} window=${incoming.usage?.context?.window_tokens ?? "null"} byModel=${incoming.usage?.by_model?.length ?? 0}`,
+        );
       }
       break;
       case "snapshot_patch": {
@@ -119,6 +126,16 @@ export class SessionStore {
         if (patch.revision > this.snapshot.revision + 1) {
           this.requestResync();
           break;
+        }
+        // Diagnostics: log usage only when the context occupancy CHANGES, so
+        // streaming patch bursts don't spam the ring buffer.
+        const patchUsed = patch.usage?.context?.used_tokens;
+        if (patchUsed != null && patchUsed !== this.lastLoggedUsageTokens) {
+          this.lastLoggedUsageTokens = patchUsed;
+          diagnostics.log(
+            "usage",
+            `snapshot_patch: used=${patchUsed} window=${patch.usage?.context?.window_tokens ?? "null"} byModel=${patch.usage?.by_model?.length ?? 0}`,
+          );
         }
         // Delta-only patches (empty `messages`) carry the growing assistant
         // text as `message_deltas`: land them in the streaming store (the

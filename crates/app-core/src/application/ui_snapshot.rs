@@ -371,9 +371,13 @@ pub fn project_remote_patch(mut patch: workspace_model::UiSnapshotPatch) -> work
     patch.inspector_sections = Vec::new();
     patch.session_changes = Vec::new();
     patch.review_changes = Vec::new();
-    patch.turn_changes = Vec::new();
+    // Turn changes reach the phone as metadata only (path + line counts) for
+    // the mobile "本轮改动" bar — the same projection the Full snapshot path
+    // applies. The texts were already stripped at patch build time.
+    patch.turn_changes = metadata_only_turn_changes(&patch.turn_changes);
     patch.thinking_text = String::new();
-    patch.usage = workspace_model::SessionUsageSnapshot::default();
+    // Usage is a handful of numbers and feeds the phone's session-info sheet;
+    // it is not zeroed.
     patch
 }
 
@@ -387,11 +391,15 @@ fn zero_remote_only_fields(snapshot: &mut workspace_model::UiSnapshot) {
     snapshot.inspector_sections = Vec::new();
     snapshot.session_changes = Vec::new();
     snapshot.review_changes = Vec::new();
-    snapshot.turn_changes = Vec::new();
+    // Turn changes reach the phone as metadata only (path + line counts) —
+    // exactly what the patches already carry. The mobile "本轮改动" bar
+    // renders this summary; the full old/new texts are desktop-only and
+    // would dominate the payload.
+    snapshot.turn_changes = metadata_only_turn_changes(&snapshot.turn_changes);
     // The phone never renders the thinking body — only the status indicator.
     snapshot.thinking_text = String::new();
-    snapshot.usage = workspace_model::SessionUsageSnapshot::default();
-    // Repository state (branch/changes/diffs) is desktop-only today.
+    // Usage is small (a context snapshot plus per-model summaries) and feeds
+    // the phone's session-info sheet; it is not zeroed.
     snapshot.repository = workspace_model::RepositorySnapshot {
         branch: String::new(),
         head: String::new(),
@@ -624,6 +632,33 @@ mod tests {
     }
 
     #[test]
+    fn remote_projection_keeps_turn_change_metadata_only() {
+        // The mobile "本轮改动" bar renders per-file line counts; the full
+        // old/new texts stay desktop-only.
+        let mut snapshot = remote_fixture(1);
+        snapshot.turn_changes = vec![workspace_model::TurnFileChanges {
+            message_id: uuid::Uuid::from_u128(1000),
+            changes: vec![workspace_model::SessionFileChange {
+                path: "src/lib.rs".into(),
+                change_type: workspace_model::FileChangeType::Modified,
+                old_text: Some("old".repeat(1000)),
+                new_text: "new".repeat(1000),
+                added_lines: 12,
+                removed_lines: 4,
+                timestamp: "2026-01-01T00:00:00Z".into(),
+            }],
+        }];
+        let projected = project_remote_snapshot(snapshot);
+        assert_eq!(projected.turn_changes.len(), 1);
+        let change = &projected.turn_changes[0].changes[0];
+        assert_eq!(change.path, "src/lib.rs");
+        assert_eq!(change.added_lines, 12);
+        assert_eq!(change.removed_lines, 4);
+        assert_eq!(change.old_text, None);
+        assert_eq!(change.new_text, "");
+    }
+
+    #[test]
     fn remote_projection_keeps_pending_permission_tools() {
         let mut snapshot = remote_fixture(2);
         snapshot.timeline.truncate(1); // drop the tool entries from the timeline
@@ -687,10 +722,28 @@ mod tests {
             inspector_sections: Vec::new(),
             session_changes: Vec::new(),
             review_changes: Vec::new(),
-            turn_changes: Vec::new(),
+            turn_changes: vec![workspace_model::TurnFileChanges {
+                message_id: uuid::Uuid::from_u128(42),
+                changes: vec![workspace_model::SessionFileChange {
+                    path: "src/main.rs".into(),
+                    change_type: workspace_model::FileChangeType::Modified,
+                    old_text: Some("old".repeat(500)),
+                    new_text: "new".repeat(500),
+                    added_lines: 7,
+                    removed_lines: 2,
+                    timestamp: "2026-01-01T00:00:00Z".into(),
+                }],
+            }],
             thinking_status: None,
             thinking_text: "lots of reasoning".into(),
-            usage: workspace_model::SessionUsageSnapshot::default(),
+            usage: workspace_model::SessionUsageSnapshot {
+                context: workspace_model::UsageContextSnapshot {
+                    used_tokens: Some(1234),
+                    window_tokens: Some(500_000),
+                    updated_at: None,
+                },
+                ..workspace_model::SessionUsageSnapshot::default()
+            },
             pending_steers: Vec::new(),
         };
         let projected = project_remote_patch(patch);
@@ -698,7 +751,16 @@ mod tests {
         assert!(projected.repository.is_none());
         assert!(projected.session_changes.is_empty());
         assert!(projected.review_changes.is_empty());
-        assert!(projected.turn_changes.is_empty());
+        // Turn changes survive as metadata: counts kept, texts stripped.
+        assert_eq!(projected.turn_changes.len(), 1);
+        let change = &projected.turn_changes[0].changes[0];
+        assert_eq!(change.path, "src/main.rs");
+        assert_eq!(change.added_lines, 7);
+        assert_eq!(change.removed_lines, 2);
+        assert_eq!(change.old_text, None);
+        assert_eq!(change.new_text, "");
+        // Usage feeds the phone's session-info sheet and is not zeroed.
+        assert_eq!(projected.usage.context.used_tokens, Some(1234));
         assert!(!projected.session_config.hydrated);
         // Conversation delta fields are untouched.
         assert_eq!(projected.revision, 9);

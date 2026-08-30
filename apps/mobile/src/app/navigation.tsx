@@ -8,6 +8,7 @@ import { PairingScreen } from "../features/pairing/PairingScreen";
 import { MachinesScreen } from "../features/machines/MachinesScreen";
 import { SessionListScreen } from "../features/session-list/SessionListScreen";
 import { ConversationScreen } from "../features/conversation/ConversationScreen";
+import { SessionInfoButton } from "../features/conversation/SessionInfoSheet";
 import { SettingsScreen } from "../features/settings/SettingsScreen";
 import { DiagnosticsScreen } from "../features/settings/DiagnosticsScreen";
 import { AppServicesProvider, useConnectionState, useSnapshot } from "./AppServicesContext";
@@ -98,6 +99,7 @@ function MainStack({ onRescan }: { onRescan: () => void }) {
         name="Conversation"
         options={({ route }) => ({
           headerTitle: () => <ConversationHeaderTitle title={route.params.title} />,
+          headerRight: () => <SessionInfoButton />,
         })}
       >
         {({ route }) => (
