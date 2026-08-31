@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { View, Text, TextInput, Pressable, Modal, ScrollView } from "react-native";
+import { View, Text, TextInput, Pressable, Modal, ScrollView, StyleSheet } from "react-native";
 import { useAppController, useSnapshot, usePendingApprovals } from "../../app/AppServicesContext";
 import { isDestructive } from "../../session/permission";
 import type { PermissionInputResponse } from "../../types";
@@ -9,11 +9,32 @@ import { styles, colors, spacing, radius, shadows } from "../theme";
 // destructive remote operations: no "allow" is preselected, and destructive
 // ops require an explicit second confirmation before ResolvePermission is
 // sent. Non-destructive (read-only) ops can be approved in one step.
+//
+// Harness `user_question` requests render in FULL: every question shows its
+// options (radio for single-select, checkboxes for multi_select, each with
+// its description) and `is_other`/free questions get a text input. Answers go
+// out as `answers[question.id] = [...selectedLabels, customText?]` — the
+// backend partitions label values into `selected` and the rest into `custom`.
+// Harness option labels are English ("Submit"/"Cancel"); the action row
+// displays them in Chinese.
+
+const OPTION_LABEL_ZH: Record<string, string> = {
+  submit: "提交",
+  cancel: "取消",
+  allow: "允许",
+  deny: "拒绝",
+};
+
+function optionDisplayLabel(label: string): string {
+  return OPTION_LABEL_ZH[label.trim().toLowerCase()] ?? label;
+}
+
 export function PermissionApprovalSheet() {
   const controller = useAppController();
   const snapshot = useSnapshot();
   const pending = usePendingApprovals();
   const [confirming, setConfirming] = useState<string | null>(null);
+  const [selected, setSelected] = useState<Record<string, string[]>>({});
   const [textInputs, setTextInputs] = useState<Record<string, string>>({});
 
   const toolById = new Map((snapshot?.tools ?? []).map((tool) => [tool.call_id, tool]));
@@ -23,13 +44,29 @@ export function PermissionApprovalSheet() {
   const tool = approval.toolCallId ? toolById.get(approval.toolCallId) : undefined;
   const destructive = tool ? isDestructive(tool) : true;
   const options = tool?.permission_options ?? [];
-  const inputQuestions = (approval.request?.questions ?? []).filter((q) => q.is_secret || q.is_other);
+  const questions = approval.request?.questions ?? [];
+
+  const toggleOption = (questionId: string, label: string, multiSelect: boolean) => {
+    setSelected((prev) => {
+      const current = prev[questionId] ?? [];
+      if (!multiSelect) {
+        // Single-select: re-tapping the active option clears it.
+        return { ...prev, [questionId]: current.includes(label) ? [] : [label] };
+      }
+      const next = current.includes(label)
+        ? current.filter((value) => value !== label)
+        : [...current, label];
+      return { ...prev, [questionId]: next };
+    });
+  };
 
   const resolve = async (optionId: string | null) => {
     const answers: Record<string, string[]> = {};
-    for (const question of inputQuestions) {
-      const value = textInputs[question.id]?.trim();
-      if (value) answers[question.id] = [value];
+    for (const question of questions) {
+      const values = [...(selected[question.id] ?? [])];
+      const custom = textInputs[question.id]?.trim();
+      if (custom) values.push(custom);
+      if (values.length > 0) answers[question.id] = values;
     }
     const inputResponse: PermissionInputResponse | null =
       Object.keys(answers).length > 0 ? { answers } : null;
@@ -39,11 +76,12 @@ export function PermissionApprovalSheet() {
       await controller.approvePermission(approval.permissionRequestId, optionId);
     }
     setConfirming(null);
+    setSelected({});
     setTextInputs({});
   };
 
   const requireConfirm = destructive && confirming !== approval.permissionRequestId;
-  const allowOption = options.find((option) => /allow|yes|approve|once/i.test(option.label));
+  const allowOption = options.find((option) => /allow|yes|approve|once|submit/i.test(option.id + option.label));
 
   return (
     <Modal visible transparent animationType="slide" onRequestClose={() => controller.denyPermission(approval.permissionRequestId)}>
@@ -72,23 +110,66 @@ export function PermissionApprovalSheet() {
               <Text style={[styles.textDim, { marginTop: spacing.sm }]}>{approval.toolName}</Text>
             )}
 
-            {inputQuestions.length > 0 ? (
-              <View style={{ marginTop: spacing.md }}>
-                {inputQuestions.map((question) => (
-                  <View key={question.id} style={{ marginTop: spacing.sm }}>
-                    <Text style={[styles.text, { fontSize: 13, fontWeight: "600" }]}>{question.question}</Text>
+            {questions.map((question) => {
+              const chosen = selected[question.id] ?? [];
+              return (
+                <View key={question.id} style={{ marginTop: spacing.md }}>
+                  <Text style={[styles.text, { fontSize: 13, fontWeight: "600", lineHeight: 19 }]}>
+                    {question.question}
+                  </Text>
+                  {question.options.length > 0 ? (
+                    <View style={{ marginTop: spacing.xs }}>
+                      {question.options.map((option) => {
+                        const checked = chosen.includes(option.label);
+                        return (
+                          <Pressable
+                            key={option.label}
+                            onPress={() => toggleOption(question.id, option.label, question.multi_select)}
+                            style={({ pressed }) => [
+                              sheetStyles.optionRow,
+                              pressed ? sheetStyles.optionRowPressed : null,
+                              checked ? sheetStyles.optionRowChecked : null,
+                            ]}
+                            accessibilityRole={question.multi_select ? "checkbox" : "radio"}
+                            accessibilityState={{ checked }}
+                          >
+                            <View
+                              style={[
+                                sheetStyles.check,
+                                checked ? (question.multi_select ? sheetStyles.checkMulti : sheetStyles.checkRadio) : null,
+                              ]}
+                            >
+                              {checked ? <View style={sheetStyles.checkDot} /> : null}
+                            </View>
+                            <View style={{ flex: 1, minWidth: 0 }}>
+                              <Text style={[styles.text, { fontSize: 13, fontWeight: "600" }]}>{option.label}</Text>
+                              {option.description ? (
+                                <Text style={[styles.textDim, { fontSize: 11, lineHeight: 16, marginTop: 2 }]}>
+                                  {option.description}
+                                </Text>
+                              ) : null}
+                            </View>
+                          </Pressable>
+                        );
+                      })}
+                    </View>
+                  ) : null}
+                  {question.is_other || question.options.length === 0 ? (
                     <TextInput
-                      style={[styles.input, { marginTop: spacing.xs }]}
-                      placeholder={question.is_secret ? "secret input" : "free text"}
+                      style={[styles.input, question.options.length > 0 ? { marginTop: spacing.xs } : { marginTop: spacing.xs + 2 }]}
+                      placeholder={question.is_secret ? "输入密钥…" : "或输入自定义回答…"}
                       placeholderTextColor={colors.textFaint}
                       secureTextEntry={question.is_secret}
                       value={textInputs[question.id] ?? ""}
                       onChangeText={(value) => setTextInputs((prev) => ({ ...prev, [question.id]: value }))}
                     />
-                  </View>
-                ))}
-              </View>
-            ) : null}
+                  ) : null}
+                  {question.multi_select && question.options.length > 0 ? (
+                    <Text style={[styles.textFaint, { fontSize: 10, marginTop: 4 }]}>可多选</Text>
+                  ) : null}
+                </View>
+              );
+            })}
 
             {requireConfirm ? (
               <View style={{ marginTop: spacing.lg }}>
@@ -113,18 +194,20 @@ export function PermissionApprovalSheet() {
             ) : (
               <View style={[styles.row, { flexWrap: "wrap", marginTop: spacing.lg }]}>
                 {options.map((option) => {
-                  const isAllow = /allow|yes|approve|once/i.test(option.label);
-                  const isDeny = /deny|no|cancel|block/i.test(option.label);
+                  const isDeny = /deny|no|cancel|block|reject/i.test(option.id + option.label);
+                  const isPrimary = option.id === allowOption?.id;
                   return (
                     <Pressable
                       key={option.id}
                       style={({ pressed }) => [
-                        isDeny ? styles.buttonDanger : styles.buttonGhost,
+                        isPrimary ? styles.buttonDanger : styles.buttonGhost,
                         { marginRight: spacing.xs, marginBottom: spacing.xs, paddingVertical: spacing.sm + 1, opacity: pressed ? 0.85 : 1 },
                       ]}
-                      onPress={() => (destructive && isAllow ? setConfirming(approval.permissionRequestId) : resolve(option.id))}
+                      onPress={() => (destructive && isPrimary ? setConfirming(approval.permissionRequestId) : resolve(option.id))}
                     >
-                      <Text style={[styles.text, { fontWeight: "600" }, isDeny && { color: "#fff" }]}>{option.label}</Text>
+                      <Text style={[styles.text, { fontWeight: "600" }, isPrimary && { color: "#fff" }]}>
+                        {optionDisplayLabel(option.label)}
+                      </Text>
                     </Pressable>
                   );
                 })}
@@ -142,4 +225,47 @@ export function PermissionApprovalSheet() {
     </Modal>
   );
 }
+
+const sheetStyles = StyleSheet.create({
+  optionRow: {
+    flexDirection: "row",
+    alignItems: "flex-start",
+    gap: spacing.sm,
+    paddingVertical: spacing.xs + 1,
+    paddingHorizontal: spacing.sm,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: colors.border,
+    marginTop: spacing.xs,
+  },
+  optionRowPressed: {
+    backgroundColor: colors.surfaceAlt,
+  },
+  optionRowChecked: {
+    borderColor: colors.accent,
+    backgroundColor: colors.surfaceAlt,
+  },
+  check: {
+    width: 16,
+    height: 16,
+    borderRadius: 8,
+    borderWidth: 1.5,
+    borderColor: colors.borderStrong,
+    marginTop: 2,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  checkMulti: {
+    borderRadius: 4,
+  },
+  checkRadio: {
+    borderRadius: 8,
+  },
+  checkDot: {
+    width: 8,
+    height: 8,
+    borderRadius: 4,
+    backgroundColor: colors.accent,
+  },
+});
 // end of file
