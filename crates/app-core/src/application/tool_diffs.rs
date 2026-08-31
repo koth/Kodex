@@ -395,15 +395,25 @@ impl Application {
                 continue;
             }
             // dsh write/create shape: the arguments carry the full file
-            // content (`content`/`file_text`) with no old text, and the
-            // result text states whether the file was created. When the
+            // content (`content`/`file_text`) with no old text. When the
             // write landed before the app processed the tool-start event
             // (coalesced poll batch), the tracker baseline already reflects
             // the post-write file and the creation would be silently
             // dropped — recover it from the tool payload + disk check.
+            // The payload alone cannot tell "created" from "rewrote the same
+            // bytes in place", so independent confirmation is required:
+            // either the result text reports the creation, or the tool card
+            // carries a pure-addition diff for a file git HEAD does not know
+            // (the dsh bridge only synthesizes whole-file-added previews for
+            // create-shaped writes).
             if let Some(new_text) =
                 write_tool_payload_created_content(&tool, &normalized_path, &self.ui.workspace.root)
-                && tool_result_reports_created_file(&tool)
+                && self.completed_write_claims_creation(
+                    call_id,
+                    &tool,
+                    &normalized_path,
+                    &new_text,
+                )
             {
                 let disk_matches = std::fs::read_to_string(
                     self.ui.workspace.root.join(&normalized_path),
@@ -1288,6 +1298,78 @@ fn tool_result_reports_created_file(tool: &ToolInvocation) -> bool {
     };
     let lower = raw_output.to_ascii_lowercase();
     lower.contains("created file") || lower.contains("new file created successfully")
+}
+
+/// Whether the tool card's diff preview for the path only adds lines (no
+/// removals). The dsh bridge emits such a preview only for create-shaped
+/// writes — a `content`/`file_text` payload with no old text produces a
+/// whole-file-added synthetic diff, and a result diff card with a null old
+/// text means the same — so a pure-addition preview is the tool itself
+/// claiming "this call created the file".
+fn tool_preview_only_adds_lines(
+    tool: &ToolInvocation,
+    normalized_path: &str,
+    workspace_root: &Path,
+) -> bool {
+    tool.diff_previews.iter().any(|preview| {
+        normalize_path_for_storage(&preview.path.display().to_string(), workspace_root)
+            == normalized_path
+            && !preview.hunks.is_empty()
+            && preview.hunks.iter().all(|hunk| {
+                hunk.lines
+                    .iter()
+                    .all(|line| !matches!(line.kind, DiffLineKind::Removed))
+            })
+            && preview
+                .hunks
+                .iter()
+                .flat_map(|hunk| &hunk.lines)
+                .any(|line| matches!(line.kind, DiffLineKind::Added))
+    })
+}
+
+impl Application {
+    /// Independent confirmation that a completed write-shaped tool created the
+    /// target file. The write-shaped payload (`content`/`file_path`, no old
+    /// text) alone is not proof — the agent may have rewritten a pre-existing
+    /// file — so creation is trusted only when the result text reports it, or
+    /// when the tracker cannot produce a believable before/after for this
+    /// call AND the tool card only adds lines AND the file is not tracked in
+    /// git HEAD. The "baseline equals the payload" case is exactly what a
+    /// coalesced poll batch looks like: ToolStarted was processed after the
+    /// write had already landed, so the captured baseline equals the payload.
+    /// With a real distinct pre-write baseline the normal completion path
+    /// records the authentic change — never claim a whole-file creation there.
+    fn completed_write_claims_creation(
+        &self,
+        call_id: &str,
+        tool: &ToolInvocation,
+        normalized_path: &str,
+        payload_text: &str,
+    ) -> bool {
+        if tool_result_reports_created_file(tool) {
+            return true;
+        }
+        if !tool_preview_only_adds_lines(tool, normalized_path, &self.ui.workspace.root) {
+            return false;
+        }
+        let tracker_cannot_verify = match self
+            .file_tracker
+            .get_baseline_text(call_id, normalized_path)
+        {
+            Some(baseline) => {
+                normalize_diff_text_for_session_change(baseline) == payload_text
+            }
+            None => self
+                .file_tracker
+                .was_missing_at_start(call_id, normalized_path)
+                .unwrap_or(false),
+        };
+        tracker_cannot_verify
+            && self
+                .git_head_text_for_path(normalized_path)
+                .is_none()
+    }
 }
 
 fn completed_tool_edit_candidate_paths(

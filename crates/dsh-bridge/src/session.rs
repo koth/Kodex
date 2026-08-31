@@ -498,15 +498,48 @@ pub fn run_harness_session(
             }
             RuntimeCommand::ForkSession {
                 at_user_turn,
+                user_message_text,
+                user_message_occurrence,
                 reply_tx,
             } => {
                 // Conversation fork (`session.fork`): a fast control-plane
                 // call — resolve the completed-turn boundary from the session
                 // history, then POST the fork. Blocking reply: app-core needs
                 // the child session id to create the local branch session.
-                let result = host
-                    .runtime()
-                    .block_on(fork_session_at_turn(&client, &session_id, at_user_turn));
+                // Prefer the prompt-content anchor: the harness turn counter
+                // diverges from kodex's turn-opening count (injected turns,
+                // splice-joined prompts, repeated sends), so a pure ordinal
+                // can cut several turns short of what the user picked.
+                let result = match user_message_text.as_deref() {
+                    Some(text) => match host.runtime().block_on(find_prompt_turn_end_seq(
+                        &client,
+                        &session_id,
+                        text,
+                        user_message_occurrence.max(1),
+                        at_user_turn,
+                    )) {
+                        Ok(target_seq) => host
+                            .runtime()
+                            .block_on(fork_at_seq(&client, &session_id, target_seq)),
+                        Err(bridge_error) => {
+                            tracing::warn!(
+                                target: "dsh-bridge::session",
+                                session_id = %session_id,
+                                at_user_turn,
+                                error = %bridge_error,
+                                "prompt-anchored fork failed; falling back to ordinal",
+                            );
+                            host.runtime().block_on(fork_session_at_turn(
+                                &client,
+                                &session_id,
+                                at_user_turn,
+                            ))
+                        }
+                    },
+                    None => host
+                        .runtime()
+                        .block_on(fork_session_at_turn(&client, &session_id, at_user_turn)),
+                };
                 match &result {
                     Ok(child) => tracing::info!(
                         target: "dsh-bridge::session",
@@ -713,6 +746,15 @@ async fn fork_session_at_turn(
     at_user_turn: u64,
 ) -> anyhow::Result<String> {
     let target_seq = find_completed_turn_end_seq(client, session_id, at_user_turn).await?;
+    fork_at_seq(client, session_id, target_seq).await
+}
+
+/// POST the harness `session.fork` with an already-resolved anchor seq.
+async fn fork_at_seq(
+    client: &crate::transport::HttpClient,
+    session_id: &SessionId,
+    target_seq: u64,
+) -> anyhow::Result<String> {
     let payload = crate::rpc_types::SessionForkPayload {
         session_id: session_id.clone(),
         at_seq: Some(target_seq),
@@ -722,6 +764,129 @@ async fn fork_session_at_turn(
         .await
         .map_err(|error| anyhow::anyhow!("分叉会话失败：{error}"))?;
     Ok(value.session_id)
+}
+
+/// Anchor the fork cut on the target prompt's content: find the
+/// `occurrence`-th `user/message` event (1-based, by seq) whose `source.kind`
+/// is `"user"` (`None`/absent source kind counts as a user prompt for older
+/// harnesses) and whose first text block equals `prompt_text` (trimmed), then
+/// return the harness `session.fork` anchor `at_seq` carrying that seq — the
+/// host cuts at the first `turn/end` at or after it, i.e. the end of the turn
+/// this prompt opened. This beats the ordinal walk because the harness turn
+/// counter also numbers injected turns (subagent reports, skill-catalog and
+/// runtime-context splices), which kodex's turn-opening count never sees; the
+/// reverse direction (splice-joined prompts that never open a turn) is
+/// handled the same way, since a matched prompt still owns its turn.
+///
+/// `fallback_at_user_turn` is the legacy ordinal — used when the text cannot
+/// be found (e.g. transformed prompts) so behavior never regresses below the
+/// pre-anchor semantics.
+async fn find_prompt_turn_end_seq(
+    client: &crate::transport::HttpClient,
+    session_id: &SessionId,
+    prompt_text: &str,
+    occurrence: u64,
+    fallback_at_user_turn: u64,
+) -> anyhow::Result<u64> {
+    const HISTORY_PAGE_MESSAGES: u32 = 200;
+    const MAX_HISTORY_PAGES: usize = 250;
+
+    let normalize = |text: &str| -> String {
+        text.replace("\r\n", "\n")
+            .replace('\r', "\n")
+            .trim()
+            .to_string()
+    };
+    let wanted = normalize(prompt_text);
+    if wanted.is_empty() {
+        anyhow::bail!("分叉锚点无效：目标提示文本为空");
+    }
+
+    // (seq, is_kind_user, first_text)
+    let mut prompts: Vec<(u64, bool, String)> = Vec::new();
+    let mut turn_ends: Vec<u64> = Vec::new();
+    let mut before_seq: Option<u64> = None;
+    for _ in 0..MAX_HISTORY_PAGES {
+        let payload = crate::rpc_types::SessionHistoryPayload {
+            session_id: session_id.clone(),
+            before_seq,
+            max_messages: Some(HISTORY_PAGE_MESSAGES),
+        };
+        let value = client
+            .session_history(Uuid::new_v4().to_string(), &payload)
+            .await
+            .map_err(|error| anyhow::anyhow!("分叉会话失败：读取会话历史失败：{error}"))?;
+        let mut oldest_seq: Option<u64> = None;
+        for entry in &value.events {
+            let Ok(event) = serde_json::from_value::<crate::frame::SessionEvent>(entry.event.clone())
+            else {
+                continue;
+            };
+            oldest_seq = Some(oldest_seq.map_or(event.seq, |min| min.min(event.seq)));
+            match event.type_tag.as_str() {
+                "user/message" => {
+                    let source_kind = event
+                        .data
+                        .get("source")
+                        .and_then(|source| source.get("kind"))
+                        .and_then(serde_json::Value::as_str);
+                    let kind_is_user = match source_kind {
+                        Some(kind) => kind == "user",
+                        // Older harness events without a source envelope are
+                        // user prompts — they are the only user/message origin
+                        // those versions emit.
+                        None => true,
+                    };
+                    let first_text = event
+                        .data
+                        .get("content")
+                        .and_then(serde_json::Value::as_array)
+                        .and_then(|blocks| blocks.first())
+                        .and_then(|block| block.get("text"))
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or_default()
+                        .to_string();
+                    prompts.push((event.seq, kind_is_user, first_text));
+                }
+                "turn/end" => turn_ends.push(event.seq),
+                _ => {}
+            }
+        }
+        if !value.has_more {
+            break;
+        }
+        let Some(seq) = oldest_seq else {
+            break;
+        };
+        before_seq = Some(seq);
+    }
+
+    let mut matching_prompts: Vec<u64> = prompts
+        .into_iter()
+        .filter(|(_, kind_is_user, first_text)| {
+            *kind_is_user && normalize(first_text) == wanted
+        })
+        .map(|(seq, _, _)| seq)
+        .collect();
+    matching_prompts.sort_unstable();
+    let anchored_prompt_seq = matching_prompts
+        .get((occurrence.max(1) - 1) as usize)
+        .copied()
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "分叉锚点未匹配：历史中找不到目标提示文本（第 {occurrence} 次出现）"
+            )
+        })?;
+    turn_ends.sort_unstable();
+    turn_ends
+        .iter()
+        .find(|seq| **seq >= anchored_prompt_seq)
+        .copied()
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "无法分叉：目标提示所在轮次尚未完成（回退序号 {fallback_at_user_turn}）"
+            )
+        })
 }
 
 /// Walk the session history and return the seq of the `at_user_turn`-th

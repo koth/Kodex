@@ -667,6 +667,12 @@ impl Application {
         self.ensure_local_workspace_for("fork conversations")?;
 
         let at_user_turn = self.fork_turn_ordinal_for_message(message_id)?;
+        // Content anchor: the ordinal alone can mis-cut on agent backends whose
+        // turn counter diverges from kodex's turn-opening count (the dsh
+        // harness counts injected turns like subagent notifications and
+        // splice-joined prompts). The prompt text pins the exact turn.
+        let (user_message_text, user_message_occurrence) =
+            self.fork_prompt_anchor(message_id);
         // Backend fork → child agent-side session id (harness session id for
         // dsh, ACP session id for codex). Blocking reply: the fork is a fast
         // control-plane call, and the local row needs the id before it can be
@@ -674,7 +680,7 @@ impl Application {
         // first — same trade as `session_switch`'s resume handshake.
         let child_agent_session_id = self
             .session
-            .fork_session(at_user_turn)
+            .fork_session(at_user_turn, user_message_text, user_message_occurrence)
             .map_err(|error| error.to_string())?;
 
         // Local branch row in this workspace's store. The transcript itself is
@@ -806,6 +812,47 @@ impl Application {
             Some(_) => Err("无法分叉：该消息之前还没有已完成的对话轮次".into()),
             None => Err("无法分叉：未找到该消息".into()),
         }
+    }
+
+    /// Content anchor for the fork target: the target turn's opening prompt
+    /// text plus how many times that exact text appeared among the session's
+    /// turn-opening prompts up to (and including) the target. The dsh bridge
+    /// matches the harness `user/message` event carrying this text to cut at
+    /// the correct turn even when the harness turn counter diverges from
+    /// kodex's count (injected turns, splice-joined prompts). Returns
+    /// `(None, 0)` when no anchor can be built — the caller then falls back
+    /// to the legacy ordinal anchoring.
+    pub(super) fn fork_prompt_anchor(&self, message_id: &str) -> (Option<String>, u64) {
+        let Ok(messages) = self
+            .store
+            .load_session_messages(&self.ui.session.id.to_string())
+        else {
+            return (None, 0);
+        };
+        fn is_turn_opening(message: &workspace_model::ChatMessage) -> bool {
+            message.role == workspace_model::MessageRole::User
+                && !message.is_steer
+                && !message.body.trim().eq_ignore_ascii_case("/compact")
+        }
+        let Some(target_index) = messages
+            .iter()
+            .position(|message| message.id.to_string() == message_id)
+        else {
+            return (None, 0);
+        };
+        // A steer/compact/system selection belongs to the turn that owns it.
+        let Some(target) = messages[..=target_index]
+            .iter()
+            .rev()
+            .find(|message| is_turn_opening(message))
+        else {
+            return (None, 0);
+        };
+        let occurrence = messages[..=target_index]
+            .iter()
+            .filter(|message| is_turn_opening(message) && message.body == target.body)
+            .count() as u64;
+        (Some(target.body.clone()), occurrence.max(1))
     }
 
     /// Branch points for the fork picker: every completed turn of the session,
@@ -1168,6 +1215,10 @@ impl Application {
         ui.session_changes.clear();
         ui.review_changes.clear();
         ui.turn_changes.clear();
+        // Repair change sets whose turn finalize never ran (app closed before
+        // the turn finished): the review panel cannot select a Pending set
+        // without a message id, so it would otherwise stay invisible forever.
+        let _ = self.store.repair_pending_agent_turn_change_sets();
         // Transient per-turn state must NOT be inherited from the currently
         // visible session: `thinking_status`/`thinking_text` are live-run-only
         // fields (never persisted, never reconstructed on resume), and

@@ -376,6 +376,8 @@ async fn fork_session_command_cuts_at_nth_completed_turn() {
     command_tx
         .send(RuntimeCommand::ForkSession {
             at_user_turn: 2,
+            user_message_text: None,
+            user_message_occurrence: 0,
             reply_tx: fork_reply_tx,
         })
         .unwrap();
@@ -440,6 +442,8 @@ async fn fork_session_command_rejects_uncompleted_turn() {
     command_tx
         .send(RuntimeCommand::ForkSession {
             at_user_turn: 3,
+            user_message_text: None,
+            user_message_occurrence: 0,
             reply_tx: fork_reply_tx,
         })
         .unwrap();
@@ -454,6 +458,153 @@ async fn fork_session_command_rejects_uncompleted_turn() {
     assert!(
         mock.forks().is_empty(),
         "a failed boundary lookup must not call session.fork"
+    );
+
+    let _ = command_tx.send(RuntimeCommand::Shutdown);
+    let _ = worker.join();
+}
+
+/// History replicating the real-world dsh divergence: between two user turns
+/// the harness splices an injected turn (a subagent settlement carrying a
+/// `subagent-report` user/message). The harness turn counter numbers injected
+/// turns too, so kodex's 2nd turn-opening prompt is the harness's 3rd turn —
+/// a pure ordinal cut would anchor one turn short.
+fn fork_history_with_injected_turn() -> Vec<serde_json::Value> {
+    use common::history_event;
+    let prompt_data = |text: &str| -> serde_json::Value {
+        serde_json::json!({
+            "content": [{ "type": "text", "text": text }],
+            "source": { "kind": "user" },
+            "role": "user",
+        })
+    };
+    let injected_data = serde_json::json!({
+        "content": [{ "type": "text", "text": "Background subagent abc was stopped." }],
+        "source": { "kind": "subagent-settled" },
+        "role": "user",
+    });
+    vec![
+        history_event(1, "turn/start", serde_json::json!({ "turn": 1 })),
+        history_event(5, "user/message", prompt_data("turn one question")),
+        history_event(10, "turn/end", serde_json::json!({ "turn": 1, "reason": { "kind": "completed" } })),
+        history_event(11, "turn/start", serde_json::json!({ "turn": 2 })),
+        history_event(15, "user/message", injected_data),
+        history_event(20, "turn/end", serde_json::json!({ "turn": 2, "reason": { "kind": "completed" } })),
+        history_event(21, "turn/start", serde_json::json!({ "turn": 3 })),
+        history_event(25, "user/message", prompt_data("turn two question")),
+        history_event(30, "turn/end", serde_json::json!({ "turn": 3, "reason": { "kind": "completed" } })),
+    ]
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn fork_session_command_anchors_on_prompt_text_past_injected_turns() {
+    // The ordinal (at_user_turn = 2) would count the injected subagent turn
+    // and anchor on seq 20 — one turn short. The prompt-text anchor must cut
+    // at the end of the turn the matched prompt opened (seq 30).
+    let mut config_mock = default_config();
+    config_mock.history_events = fork_history_with_injected_turn();
+    let mock = MockHarness::start(config_mock).await;
+    let registry = Arc::new(HarnessHostRegistry::new());
+
+    let (tx, _rx) = mpsc::channel::<ClientEvent>();
+    let (command_tx, command_rx) = mpsc::channel();
+    let config = config_for(mock.endpoint());
+
+    let worker_registry = registry.clone();
+    let worker = thread::spawn(move || {
+        dsh_bridge::run_harness_session(
+            worker_registry,
+            config,
+            tx,
+            command_rx,
+            PermissionBroker::default(),
+            ShutdownSignal::default(),
+        )
+    });
+
+    let start = std::time::Instant::now();
+    while start.elapsed() < Duration::from_secs(5) && mock.creates().is_empty() {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+
+    let (fork_reply_tx, fork_reply_rx) = mpsc::channel();
+    command_tx
+        .send(RuntimeCommand::ForkSession {
+            at_user_turn: 2,
+            user_message_text: Some("turn two question".into()),
+            user_message_occurrence: 1,
+            reply_tx: fork_reply_tx,
+        })
+        .unwrap();
+    let child = fork_reply_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("ForkSession reply timed out")
+        .expect("text-anchored fork must succeed");
+    assert_eq!(child, "s-fork", "mock answers the fork child session id");
+
+    let forks = mock.forks();
+    assert_eq!(forks.len(), 1, "exactly one session.fork call: {forks:?}");
+    assert_eq!(
+        forks[0].get("atSeq").and_then(|v| v.as_u64()),
+        Some(30),
+        "atSeq must anchor on the first turn/end after the matched prompt (seq 30, skipping the injected turn's end at seq 20): {forks:?}"
+    );
+
+    let _ = command_tx.send(RuntimeCommand::Shutdown);
+    let _ = worker.join();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn fork_session_command_text_anchor_falls_back_to_ordinal_on_miss() {
+    // When the prompt text cannot be found in the harness history (e.g. a
+    // transformed prompt), the legacy ordinal walk must still anchor the cut.
+    let mut config_mock = default_config();
+    config_mock.history_events = fork_history_with_injected_turn();
+    let mock = MockHarness::start(config_mock).await;
+    let registry = Arc::new(HarnessHostRegistry::new());
+
+    let (tx, _rx) = mpsc::channel::<ClientEvent>();
+    let (command_tx, command_rx) = mpsc::channel();
+    let config = config_for(mock.endpoint());
+
+    let worker_registry = registry.clone();
+    let worker = thread::spawn(move || {
+        dsh_bridge::run_harness_session(
+            worker_registry,
+            config,
+            tx,
+            command_rx,
+            PermissionBroker::default(),
+            ShutdownSignal::default(),
+        )
+    });
+
+    let start = std::time::Instant::now();
+    while start.elapsed() < Duration::from_secs(5) && mock.creates().is_empty() {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+
+    let (fork_reply_tx, fork_reply_rx) = mpsc::channel();
+    command_tx
+        .send(RuntimeCommand::ForkSession {
+            at_user_turn: 3,
+            user_message_text: Some("a prompt that never happened".into()),
+            user_message_occurrence: 1,
+            reply_tx: fork_reply_tx,
+        })
+        .unwrap();
+    let child = fork_reply_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("ForkSession reply timed out")
+        .expect("fallback must keep the ordinal anchor working");
+
+    assert_eq!(child, "s-fork", "mock answers the fork child session id");
+    let forks = mock.forks();
+    assert_eq!(forks.len(), 1, "exactly one session.fork call: {forks:?}");
+    assert_eq!(
+        forks[0].get("atSeq").and_then(|v| v.as_u64()),
+        Some(30),
+        "ordinal fallback must anchor on the 3rd turn/end: {forks:?}"
     );
 
     let _ = command_tx.send(RuntimeCommand::Shutdown);

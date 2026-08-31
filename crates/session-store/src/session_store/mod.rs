@@ -2305,6 +2305,190 @@ impl SessionStore {
         Ok(())
     }
 
+    fn change_set_session_id(&self, change_set_id: &str) -> Result<Option<String>> {
+        let value = self
+            .conn
+            .query_row(
+                "SELECT session_id FROM change_sets WHERE id = ?1",
+                params![change_set_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok(value.flatten())
+    }
+
+    /// Full-text file records behind a change set (metadata + texts).
+    fn change_set_file_records(
+        &self,
+        change_set_id: &str,
+    ) -> Result<Vec<FileChangeRecord>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT change_set_id, path, change_type, base_text, target_text, added_lines, removed_lines, quality, updated_at
+             FROM change_set_files
+             WHERE change_set_id = ?1
+             ORDER BY path",
+        )?;
+        let rows = stmt.query_map(params![change_set_id], |row| {
+            let change_type_str: String = row.get(2)?;
+            let quality_str: String = row.get(7)?;
+            Ok(FileChangeRecord {
+                change_set_id: row.get(0)?,
+                path: normalize_change_path(&row.get::<_, String>(1)?),
+                change_type: file_change_type_from_str(&change_type_str),
+                old_text: row.get(3)?,
+                new_text: row.get(4)?,
+                added_lines: row.get::<_, i64>(5)? as usize,
+                removed_lines: row.get::<_, i64>(6)? as usize,
+                quality: diff_quality_from_str(&quality_str),
+                updated_at: row.get(8)?,
+            })
+        })?;
+        let mut records = Vec::new();
+        for row in rows {
+            records.push(row?);
+        }
+        Ok(records)
+    }
+
+    /// Finalize AgentTurn change sets that were left `Pending` without a
+    /// message id. A turn whose finalize never ran (app closed before the
+    /// turn-finish poll, kill during a tool call, ...) leaves its change set
+    /// Pending with `message_id = NULL`, which the frontend's
+    /// `selectReviewChangeSet` cannot select after the turn is over — the
+    /// recorded edits silently vanish from the review tab. Repair: anchor the
+    /// set to the turn's last assistant message (from the summary id's user
+    /// message) and mark it Complete, and mirror the files into the per-turn
+    /// table so the restored timeline/turn bar covers them too.
+    ///
+    /// Called on session restore/bootstrap; safe to run repeatedly (already
+    /// Complete sets are ignored, empty Pending rows are left alone).
+    pub fn repair_pending_agent_turn_change_sets(&self) -> Result<usize> {
+        let stale: Vec<(String, Option<String>)> = {
+            let mut stmt = self.conn.prepare(
+                "SELECT id, session_id
+                 FROM change_sets
+                 WHERE source = 'AgentTurn' AND status = 'Pending'",
+            )?;
+            let rows = stmt
+                .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get(1)?)))?
+                .collect::<Result<Vec<_>, _>>()?;
+            rows
+        };
+
+        let mut repaired = 0;
+        for (change_set_id, stored_session_id) in stale {
+            // The set id embeds the owning turn's user message id:
+            // agent-turn:{session}:{user_message}.
+            let Some(user_message_id) = change_set_id
+                .rsplit(':')
+                .next()
+                .filter(|tail| Uuid::parse_str(tail).is_ok())
+            else {
+                continue;
+            };
+            let session_id = stored_session_id
+                .clone()
+                .or_else(|| self.change_set_session_id(&change_set_id).ok().flatten());
+            let Some(session_id) = session_id else {
+                continue;
+            };
+
+            // Anchor the turn: the last assistant message between the owning
+            // user message and the next user message, if any.
+            let user_seq: Option<i64> = self
+                .conn
+                .query_row(
+                    "SELECT seq FROM messages WHERE session_id = ?1 AND id = ?2",
+                    params![&session_id, &user_message_id],
+                    |row| row.get(0),
+                )
+                .optional()
+                .ok()
+                .flatten();
+            if user_seq.is_none() {
+                // Cannot anchor the turn (messages pruned?) — still mark the
+                // set Complete without a message id so the review panel can
+                // at least fall back to it.
+                if self.finalize_pending_change_set(&change_set_id, None) {
+                    repaired += 1;
+                }
+                continue;
+            }
+            let user_seq = user_seq.unwrap();
+            let next_user_seq: Option<i64> = self
+                .conn
+                .query_row(
+                    "SELECT MIN(seq) FROM messages
+                     WHERE session_id = ?1 AND role = 'User' AND seq > ?2",
+                    params![&session_id, user_seq],
+                    |row| row.get(0),
+                )
+                .unwrap_or(None);
+            let assistant_id: Option<String> = self
+                .conn
+                .query_row(
+                    "SELECT id FROM messages
+                     WHERE session_id = ?1 AND role = 'Assistant' AND seq > ?2 AND seq < ?3
+                     ORDER BY seq DESC
+                     LIMIT 1",
+                    params![&session_id, user_seq, next_user_seq.unwrap_or(i64::MAX)],
+                    |row| row.get(0),
+                )
+                .ok();
+
+            if !self.finalize_pending_change_set(&change_set_id, assistant_id.as_deref()) {
+                continue;
+            }
+            repaired += 1;
+
+            // Mirror the change set files into the per-turn table so the
+            // restored `ui.turn_changes` (phone turn bar, GetFileDiff) covers
+            // the repaired turn too.
+            if let (Some(assistant_id), Ok(records)) = (
+                assistant_id.as_ref(),
+                self.change_set_file_records(&change_set_id),
+            )
+                && let Some(message_id) = uuid::Uuid::parse_str(&assistant_id).ok()
+            {
+                let changes = records
+                    .iter()
+                    .map(|record| SessionFileChange {
+                        path: record.path.clone(),
+                        change_type: record.change_type.clone(),
+                        old_text: record.old_text.clone(),
+                        new_text: record.new_text.clone().unwrap_or_default(),
+                        added_lines: record.added_lines,
+                        removed_lines: record.removed_lines,
+                        timestamp: record.updated_at.clone(),
+                    })
+                    .collect::<Vec<_>>();
+                if !changes.is_empty() {
+                    let _ = self.replace_turn_file_changes(&session_id, &message_id, &changes);
+                }
+            }
+        }
+
+        Ok(repaired)
+    }
+
+    fn finalize_pending_change_set(
+        &self,
+        change_set_id: &str,
+        message_id: Option<&str>,
+    ) -> bool {
+        self.conn
+            .execute(
+                "UPDATE change_sets
+                 SET status = 'Complete',
+                     message_id = COALESCE(?2, message_id),
+                     updated_at = ?3
+                 WHERE id = ?1 AND status = 'Pending'",
+                params![change_set_id, message_id, now_iso()],
+            )
+            .map(|updated| updated > 0)
+            .unwrap_or(false)
+    }
+
     pub fn upsert_change_set_file(&self, file: &FileChangeRecord) -> Result<()> {
         let change_type = format!("{:?}", file.change_type);
         let quality = diff_quality_to_str(&file.quality);
@@ -2513,18 +2697,6 @@ impl SessionStore {
                 .find(|record| normalize_change_path(&record.path) == normalized));
         }
         self.load_change_set_file_diff(change_set_id, path)
-    }
-
-    fn change_set_session_id(&self, change_set_id: &str) -> Result<Option<String>> {
-        let value = self
-            .conn
-            .query_row(
-                "SELECT session_id FROM change_sets WHERE id = ?1",
-                params![change_set_id],
-                |row| row.get(0),
-            )
-            .optional()?;
-        Ok(value.flatten())
     }
 
     fn load_legacy_change_set_summaries(&self, session_id: &str) -> Result<Vec<ChangeSetSummary>> {

@@ -376,6 +376,20 @@ impl Application {
         ui.prompt_capabilities.image = image_capabilities.image_capable();
         crate::startup_perf::mark("app/bootstrap/end", "");
 
+        // A turn whose finalize never ran (app close, crash) leaves its
+        // AgentTurn change set Pending without a message id — unanchorable by
+        // the review panel. Repair stale sets before the restored session is
+        // served, then refresh the per-turn rows the restore just loaded.
+        if store
+            .repair_pending_agent_turn_change_sets()
+            .map(|repaired| repaired > 0)
+            .unwrap_or(false)
+        {
+            ui.turn_changes = store
+                .load_recent_turn_file_changes(&ui.session.id.to_string(), RESTORE_TURN_CHANGE_LIMIT)
+                .unwrap_or_default();
+        }
+
         Ok(Self {
             ui,
             session,
@@ -635,6 +649,17 @@ impl Application {
 
         let file_tracker = FileChangeTracker::new(workspace_root);
         crate::startup_perf::mark("app/bootstrap_remote/end", "");
+
+        // Same stale-turn repair as the local bootstrap path (see above).
+        if store
+            .repair_pending_agent_turn_change_sets()
+            .map(|repaired| repaired > 0)
+            .unwrap_or(false)
+        {
+            ui.turn_changes = store
+                .load_recent_turn_file_changes(&ui.session.id.to_string(), RESTORE_TURN_CHANGE_LIMIT)
+                .unwrap_or_default();
+        }
 
         Ok(Self {
             ui,

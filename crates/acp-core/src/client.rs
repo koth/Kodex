@@ -306,16 +306,26 @@ impl SessionHandle {
     }
 
     /// Fork the conversation from a completed turn. `at_user_turn` is the
-    /// 1-based ordinal of the turn to keep through; the backend cuts the
-    /// agent-side history at that turn's end and returns the child agent-side
-    /// session id. Blocking reply — the fork is a fast control-plane call (no
-    /// LLM work), but it must complete before the caller can create the local
-    /// branch session.
-    pub fn fork_session(&self, at_user_turn: u64) -> anyhow::Result<String> {
+    /// 1-based ordinal of the turn to keep through; `user_message_text` (with
+    /// its 1-based occurrence among same-text prompts) anchors on the target
+    /// turn's prompt content, which is robust against agent-side turn counters
+    /// being inflated by injected turns. The backend cuts the agent-side
+    /// history at that turn's end and returns the child agent-side session id.
+    /// Blocking reply — the fork is a fast control-plane call (no LLM work),
+    /// but it must complete before the caller can create the local branch
+    /// session.
+    pub fn fork_session(
+        &self,
+        at_user_turn: u64,
+        user_message_text: Option<String>,
+        user_message_occurrence: u64,
+    ) -> anyhow::Result<String> {
         let (reply_tx, reply_rx) = mpsc::channel();
         self.command_tx
             .send(RuntimeCommand::ForkSession {
                 at_user_turn,
+                user_message_text,
+                user_message_occurrence,
                 reply_tx,
             })
             .map_err(|_| anyhow!("ACP command channel closed"))?;

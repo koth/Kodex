@@ -181,3 +181,51 @@ fn fork_candidates_list_every_turn_from_full_history() {
     assert!(candidates[1].reply_excerpt.contains("第二轮的回复"));
     app.session.shutdown();
 }
+
+#[test]
+fn fork_prompt_anchor_resolves_text_and_occurrence() {
+    // The dsh fork anchors on the target turn's prompt text; repeated prompts
+    // must count their occurrence so a repeated send forks the right turn, and
+    // steer/compact messages must resolve to the turn that owns them.
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = test_app(&dir);
+    let u1 = uuid::Uuid::new_v4();
+    let a1 = uuid::Uuid::new_v4();
+    let steer = uuid::Uuid::new_v4();
+    let u2 = uuid::Uuid::new_v4();
+    let a2 = uuid::Uuid::new_v4();
+    let compact = uuid::Uuid::new_v4();
+    let u3 = uuid::Uuid::new_v4();
+    let a3 = uuid::Uuid::new_v4();
+    persist_message(&mut app, u1, "User", "同一个问题", 1);
+    persist_message(&mut app, a1, "Assistant", "回答一", 2);
+    app.store
+        .insert_steer_message(&app.ui.session.id.to_string(), &steer.to_string(), "补充说明", 3)
+        .unwrap();
+    persist_message(&mut app, a2, "Assistant", "回答二", 4);
+    persist_message(&mut app, compact, "User", "/compact", 5);
+    persist_message(&mut app, u3, "User", "重复的问题", 6);
+    persist_message(&mut app, a3, "Assistant", "回答三", 7);
+
+    // 第一轮：文本首次出现 → occurrence 1。
+    let (text, occurrence) = app.fork_prompt_anchor(&u1.to_string());
+    assert_eq!(text.as_deref(), Some("同一个问题"));
+    assert_eq!(occurrence, 1);
+    // 重复发送的相同文本：第二次出现 → occurrence 2。
+    persist_message(&mut app, u2, "User", "同一个问题", 7);
+    let (text, occurrence) = app.fork_prompt_anchor(&u2.to_string());
+    assert_eq!(text.as_deref(), Some("同一个问题"));
+    assert_eq!(occurrence, 2);
+    // steer 归属其所在轮的 opening prompt 文本。
+    let (text, occurrence) = app.fork_prompt_anchor(&steer.to_string());
+    assert_eq!(text.as_deref(), Some("同一个问题"));
+    assert_eq!(occurrence, 1);
+    // /compact 同理。
+    let (text, occurrence) = app.fork_prompt_anchor(&compact.to_string());
+    assert_eq!(text.as_deref(), Some("同一个问题"));
+    assert_eq!(occurrence, 1);
+    // 未知消息 → 无锚点，调用方退回序号切分。
+    let unknown = uuid::Uuid::new_v4();
+    assert_eq!(app.fork_prompt_anchor(&unknown.to_string()), (None, 0));
+    app.session.shutdown();
+}

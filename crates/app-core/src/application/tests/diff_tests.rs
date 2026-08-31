@@ -4334,6 +4334,74 @@ fn dsh_str_replace_editor_create_enters_review_when_batch_is_coalesced() {
     assert_eq!(app.ui.review_changes[0].new_text, new_text);
 }
 #[test]
+fn dsh_write_created_recovery_without_result_text_survives_coalesced_batch() {
+    // Regression for dsh-harness `write` when the whole tool lifecycle lands
+    // in ONE poll batch AND the result carries no text (real dsh `write`
+    // replies render as a diff card with empty result text): ToolStarted is
+    // processed only after the file already exists on disk, so the tracker
+    // baseline captured from raw_input equals the post-write content and
+    // `finish_recording` sees "no change". The evidence left is the synthetic
+    // whole-file ToolDiff preview plus the file being absent from git HEAD;
+    // the completion path must land the creation from the write payload
+    // instead of silently dropping it, or the review panel never shows files
+    // like scripts/*.py created mid-turn.
+    let dir = tempfile::tempdir().unwrap();
+    let file_path = dir.path().join("scripts").join("collect_dataset.py");
+    let new_text = [
+        "\"\"\"Collect a dataset.\"\"\"",
+        "",
+        "from pathlib import Path",
+        "",
+        "print(Path(__file__))",
+        "",
+    ]
+    .join("\n");
+    fs::create_dir_all(file_path.parent().unwrap()).unwrap();
+    // The write landed BEFORE the app processes the coalesced batch.
+    fs::write(&file_path, &new_text).unwrap();
+
+    let mut app = test_app(&dir);
+    let raw_input = serde_json::json!({
+        "content": new_text,
+        "file_path": file_path.display().to_string(),
+    })
+    .to_string();
+
+    let result = app.apply_runtime_events_with_file_tracking(vec![
+        ClientEvent::ToolStarted {
+            id: "call-create-dataset".into(),
+            parent_id: None,
+            name: "write".into(),
+            kind: "edit".into(),
+            summary: "write scripts/collect_dataset.py".into(),
+            is_subagent: false,
+            raw_input: Some(raw_input.clone()),
+        },
+        ClientEvent::ToolDiff {
+            id: "call-create-dataset".into(),
+            path: file_path.display().to_string(),
+            old_text: Some(String::new()),
+            new_text: new_text.clone(),
+        },
+        ClientEvent::ToolCompleted {
+            id: "call-create-dataset".into(),
+            name: None,
+            outcome: "completed".into(),
+            raw_output: None,
+            terminal_output: None,
+        },
+    ]);
+
+    assert!(result.had_file_changes, "the created file must be captured");
+    assert_eq!(app.ui.review_changes.len(), 1, "review_changes");
+    let change = &app.ui.review_changes[0];
+    assert_eq!(change.change_type, FileChangeType::Created);
+    assert_eq!(change.path, "scripts/collect_dataset.py");
+    assert_eq!(change.new_text, new_text);
+    assert_eq!(change.added_lines, 5);
+}
+
+#[test]
 fn dsh_write_tool_new_file_enters_review_from_raw_input_hints() {
     // dsh harness `write` tool: arguments carry `content` + `file_path` (an
     // absolute path inside the workspace); the result card has NO diff view,
@@ -4479,14 +4547,18 @@ fn fs_write_tool_diff_stays_out_of_review_when_disk_does_not_match() {
 }
 
 #[test]
-fn late_write_tool_diff_without_recoverable_baseline_still_shows_tool_preview() {
+fn coalesced_dsh_write_with_added_only_preview_records_creation() {
+    // dsh writes land between the bridge events, so by the time the coalesced
+    // poll batch is applied the tracker baseline captured from raw_input
+    // equals the post-write content and the disk verification in
+    // `finish_recording` finds "no change". With an added-only diff preview
+    // from the bridge and the file absent from git HEAD, the write payload is
+    // trustworthy enough to record the creation (instead of only drawing the
+    // tool card, which previously hid the file from the review panel).
     let dir = tempfile::tempdir().unwrap();
     let relative_path = "packages/backend/src/services/query-understanding/index.ts";
     let file_path = dir.path().join(relative_path);
     fs::create_dir_all(file_path.parent().unwrap()).unwrap();
-    fs::write(&file_path, "export const before = true;\n").unwrap();
-
-    let mut app = test_app(&dir);
     let new_text = [
         "import { config } from '../../config/index.js';",
         "export function analyzeQueryUnderstanding() {",
@@ -4495,8 +4567,10 @@ fn late_write_tool_diff_without_recoverable_baseline_still_shows_tool_preview() 
         "",
     ]
     .join("\n");
+    // The write already landed before the app processes the cohort batch.
     fs::write(&file_path, &new_text).unwrap();
 
+    let mut app = test_app(&dir);
     let result = app.apply_runtime_events_with_file_tracking(vec![
         ClientEvent::ToolStarted {
             id: "write-index".into(),
@@ -4528,7 +4602,7 @@ fn late_write_tool_diff_without_recoverable_baseline_still_shows_tool_preview() 
         },
     ]);
 
-    assert!(!result.had_file_changes);
+    assert!(result.had_file_changes, "the creation must be recovered");
     let tool = app
         .ui
         .tools
@@ -4546,7 +4620,11 @@ fn late_write_tool_diff_without_recoverable_baseline_still_shows_tool_preview() 
 
     app.advance_runtime_clock(Duration::from_secs(1));
     assert!(!app.retry_pending_tool_write_detections());
-    assert!(app.ui.review_changes.is_empty());
+    assert_eq!(app.ui.review_changes.len(), 1);
+    let change = &app.ui.review_changes[0];
+    assert_eq!(change.change_type, FileChangeType::Created);
+    assert_eq!(change.path, relative_path);
+    assert_eq!(change.new_text, new_text);
 }
 
 #[test]

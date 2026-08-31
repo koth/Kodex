@@ -79,8 +79,17 @@ pub enum RuntimeCommand {
     /// backend cuts the agent-side history at the end of that turn and returns
     /// the child agent-side session id. The caller (app-core) then creates the
     /// local session row and switches to it.
+    ///
+    /// `user_message_text`/`user_message_occurrence` anchor on the target
+    /// turn's opening prompt content instead of the ordinal: agent-side turn
+    /// counters diverge from kodex's turn-opening count (injected turns like
+    /// subagent notifications, splice-joined prompts, repeated sends), so a
+    /// pure ordinal can cut several turns early. `None` keeps the legacy
+    /// ordinal-only behavior.
     ForkSession {
         at_user_turn: u64,
+        user_message_text: Option<String>,
+        user_message_occurrence: u64,
         reply_tx: mpsc::Sender<anyhow::Result<String>>,
     },
     Shutdown,

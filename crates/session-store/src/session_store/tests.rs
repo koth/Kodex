@@ -2943,6 +2943,71 @@ fn load_recent_turn_file_changes_keeps_newest_and_orders_chronologically() {
 }
 
 #[test]
+fn repair_pending_agent_turn_change_sets_anchors_assistant_message() {
+    // A turn whose finalize never ran leaves an AgentTurn set Pending with a
+    // NULL message id — the review panel's `selectReviewChangeSet` cannot
+    // select such a set once the turn is over, so the recorded edits vanished
+    // from the tab. The repair must anchor the set to the turn's last
+    // assistant message, mark it Complete, and mirror the files into the
+    // per-turn table the restore path reads.
+    let dir = tempfile::tempdir().unwrap();
+    let store = SessionStore::open(dir.path(), dir.path()).unwrap();
+    let session_id = Uuid::new_v4().to_string();
+    let user_id = Uuid::new_v4();
+    let assistant_id = Uuid::new_v4();
+    let next_user_id = Uuid::new_v4();
+    store.create_session(&session_id, "gpt-4").unwrap();
+    store
+        .insert_message(&session_id, &user_id.to_string(), "User", "go", 1)
+        .unwrap();
+    store
+        .insert_message(&session_id, &assistant_id.to_string(), "Assistant", "did it", 2)
+        .unwrap();
+    store
+        .insert_message(&session_id, &next_user_id.to_string(), "User", "next", 3)
+        .unwrap();
+
+    let change_set_id = format!("agent-turn:{session_id}:{user_id}");
+    let mut summary = make_change_set_summary(
+        &store,
+        &change_set_id,
+        &session_id,
+        ChangeSetSource::AgentTurn,
+        None,
+        "本轮对话",
+    );
+    // The helper hardcodes Complete; the stuck-pending shape is what repair
+    // looks for.
+    summary.status = ChangeSetStatus::Pending;
+    store
+        .replace_change_set(
+            &summary,
+            &[
+                make_file_record(&change_set_id, "scripts/new.py", None, Some("created"), 9, 0),
+                make_file_record(&change_set_id, "src/main.rs", Some("old"), Some("new"), 2, 1),
+            ],
+        )
+        .unwrap();
+
+    assert_eq!(store.repair_pending_agent_turn_change_sets().unwrap(), 1, "one set repaired");
+
+    let summaries = store
+        .list_change_sets(Some(&session_id), Some(ChangeSetSource::AgentTurn))
+        .unwrap();
+    assert_eq!(summaries.len(), 1);
+    assert_eq!(summaries[0].status, ChangeSetStatus::Complete);
+    assert_eq!(summaries[0].message_id, Some(assistant_id));
+
+    let turns = store.load_turn_file_changes(&session_id).unwrap();
+    assert_eq!(turns.len(), 1);
+    assert_eq!(turns[0].message_id, assistant_id);
+    assert_eq!(turns[0].changes.len(), 2);
+
+    // Idempotent: a rerun must not report further repairs.
+    assert_eq!(store.repair_pending_agent_turn_change_sets().unwrap(), 0);
+}
+
+#[test]
 fn list_sessions_emits_iso8601_timestamps_for_phone_date_parse() {
     // The phone formats relative times with `Date.parse`, which is
     // engine-specific for bare epoch strings (Hermes mis-parsed them and

@@ -277,7 +277,12 @@ pub(super) async fn run_command_loop(
                             }
                             // Forking requires an idle turn boundary; a queued
                             // prompt would only race the seed cut.
-                            RuntimeCommand::ForkSession { reply_tx, .. } => {
+                            RuntimeCommand::ForkSession {
+                                at_user_turn: _,
+                                user_message_text: _,
+                                user_message_occurrence: _,
+                                reply_tx,
+                            } => {
                                 let _ = reply_tx.send(Err(anyhow::anyhow!(
                                     "会话运行中无法分叉，请等当前轮次结束"
                                 )));
@@ -667,6 +672,8 @@ pub(super) async fn run_command_loop(
             // child's replayed history rebuilds the branch transcript.
             RuntimeCommand::ForkSession {
                 at_user_turn,
+                user_message_text: _,
+                user_message_occurrence: _,
                 reply_tx,
             } => {
                 let result = async {
