@@ -23,11 +23,14 @@ const NEAR_BOTTOM_THRESHOLD = 80;
 //
 // The list is INVERTED with reversed data: the newest row anchors to offset 0,
 // so incoming messages and streaming growth land on the pinned edge without a
-// single scroll command. The previous explicit chase (onContentSizeChange →
-// scrollToEnd) raced progressive markdown measurement — content height
-// changed several frames in a row, each change teleporting the viewport, and
-// most syncs shook the screen. Scrolling up to read history is stable too:
-// new content inserts on the far side of the viewport, never shifting it.
+// single scroll command. A chronological list with an explicit chase
+// (onContentSizeChange → scrollToEnd) was tried and is measurably worse:
+// every streaming patch re-measures markdown, each measurement fired another
+// scroll teleport, and the screen visibly flickered for the whole turn.
+// VirtualizedList cells are flow-laid-out in RN 0.81, so the inverted
+// geometry has no stale-offset overlap failure mode either. Scrolling up to
+// read history is stable too: new content inserts on the far side of the
+// viewport, never shifting it.
 function ConversationTimelineImpl({ snapshot, onStopTool }: Props) {
   const listRef = useRef<FlatList<Row> | null>(null);
   const [showJump, setShowJump] = useState(false);
@@ -95,9 +98,8 @@ function ConversationTimelineImpl({ snapshot, onStopTool }: Props) {
   // the inverted scroll pins to offset 0. Incoming messages, streaming
   // growth, and ThinkingIndicator appear/disappear all land on that anchored
   // edge, so the viewport never moves — no scroll commands, no chase races,
-  // no jitter. (The manual onContentSizeChange → scrollToEnd chase this
-  // replaces fought progressive markdown measurement frame by frame and
-  // shook the screen on most syncs.)
+  // no jitter. (A chronological list + scroll-command chase was tried here
+  // and flickered on every streaming update — see the file header comment.)
 
   const handleScroll = useCallback((event: { nativeEvent: { contentOffset: { y: number }; contentSize: { height: number }; layoutMeasurement: { height: number } } }) => {
     const { contentOffset, contentSize, layoutMeasurement } = event.nativeEvent;
