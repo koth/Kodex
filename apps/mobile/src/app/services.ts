@@ -39,6 +39,16 @@ import {
   NO_SUBSCRIPTION,
   type SubscriptionState,
 } from "../account/subscription";
+import {
+  TurnCompletionWatcher,
+  type AlertPresenter,
+} from "../session/turn-completion";
+import {
+  DEFAULT_ALERT_SETTINGS,
+  loadAlertSettings,
+  saveAlertSettings,
+  type AlertSettings,
+} from "../features/notifications/settings";
 
 // Framework-agnostic controller wiring the relay connection, control client,
 // session store, permission store, and connection state machine. The React
@@ -77,6 +87,13 @@ export class AppController {
   private subscription: SubscriptionState = { ...NO_SUBSCRIPTION };
   private onSubscriptionChange: ((state: SubscriptionState) => void) | null = null;
   private readonly reconnectTransportFactory: ReconnectTransportFactory | null;
+  /** Turn-completion alerting: the watcher is always attached (it is pure
+   * snapshot-diff logic); the presenter is injected by the app shell, which
+   * owns the native adapters. Without a presenter the watcher is a no-op. */
+  private readonly turnWatcher: TurnCompletionWatcher;
+  private alertPresenter: AlertPresenter | null = null;
+  private alertSettingsState: AlertSettings = { ...DEFAULT_ALERT_SETTINGS };
+  private alertSettingsListeners = new Set<(settings: AlertSettings) => void>();
 
   constructor(
     secretStore: SecretStore,
@@ -92,6 +109,12 @@ export class AppController {
     // A lost patch frame (revision gap) wedges the incremental chain: the
     // store asks for a full re-sync, debounced here into one GetState.
     this.sessionStore.setResyncHandler(() => this.scheduleSnapshotResync());
+    // Turn-completion alerts: dispatch through the shell-installed presenter
+    // (null until the React layer wires the native adapters).
+    this.turnWatcher = new TurnCompletionWatcher(this.sessionStore, {
+      onTurnCompleted: (ctx) => this.alertPresenter?.onTurnCompleted(ctx),
+      onTurnInterrupted: (ctx) => this.alertPresenter?.onTurnInterrupted(ctx),
+    });
   }
 
   private resyncTimer: ReturnType<typeof setTimeout> | null = null;
@@ -615,10 +638,53 @@ export class AppController {
    * binding happens inside `loadBoundDevices`. */
   async boot(): Promise<boolean> {
     await this.ensureIdentity();
+    // Alert settings load before any session can complete a turn; failures
+    // fall back to defaults (alerting must never block boot).
+    try {
+      this.alertSettingsState = await loadAlertSettings(this.secretStore);
+    } catch {
+      this.alertSettingsState = { ...DEFAULT_ALERT_SETTINGS };
+    }
+    this.emitAlertSettings();
     const devices = await loadBoundDevices(this.secretStore);
     this.connState.transition("disconnected");
     diagnostics.log("services", `boot: ${devices.length} bound machine(s); awaiting selection`);
     return false;
+  }
+
+  // --- Turn-completion alerts ---
+
+  /** Install (or clear) the presenter that renders turn-completion alerts.
+   * Called by the app shell once native adapters exist. */
+  setAlertPresenter(presenter: AlertPresenter | null): void {
+    this.alertPresenter = presenter;
+  }
+
+  get alertSettings(): AlertSettings {
+    return this.alertSettingsState;
+  }
+
+  subscribeAlertSettings(listener: (settings: AlertSettings) => void): () => void {
+    this.alertSettingsListeners.add(listener);
+    listener(this.alertSettingsState);
+    return () => this.alertSettingsListeners.delete(listener);
+  }
+
+  async setAlertSettings(next: AlertSettings): Promise<void> {
+    this.alertSettingsState = next;
+    this.emitAlertSettings();
+    try {
+      await saveAlertSettings(this.secretStore, next);
+    } catch (e) {
+      diagnostics.log(
+        "services",
+        `alert settings persist failed: ${e instanceof Error ? e.message : String(e)}`,
+      );
+    }
+  }
+
+  private emitAlertSettings(): void {
+    for (const l of this.alertSettingsListeners) l(this.alertSettingsState);
   }
 
   /** Forget every machine and the persisted session (Settings kill path). */
@@ -731,6 +797,10 @@ export class AppController {
   }
 
   async cancel() {
+    // The user cancelled on purpose: suppress the resulting interruption
+    // alert (one-shot, short window — a later unrelated interruption still
+    // alerts).
+    this.turnWatcher.suppressNextInterruption();
     return this.controlClient().cancel();
   }
 

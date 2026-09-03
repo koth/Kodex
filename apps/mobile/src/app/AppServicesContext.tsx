@@ -5,14 +5,26 @@ import {
   useState,
   type ReactNode,
 } from "react";
+import { AppState } from "react-native";
 import { AppController } from "./services";
 import { SecureSecretStore } from "./secure-store";
 import { FileLogSink } from "./diagnostics-sink";
 import { diagnostics } from "../util/diagnostics";
 import { WsTransport } from "../relay/transport";
+import { CompositeAlertPresenter } from "../features/notifications/presenter";
+import { expoHaptics } from "../features/notifications/haptics";
+import { expoSound } from "../features/notifications/sound";
+import { bannerPort } from "../features/notifications/banner";
+import {
+  ensureNotificationSetup,
+  localNotifier,
+  requestNotificationPermission,
+} from "../features/notifications/local-notification";
+import { isViewingConversation } from "./navigation-ref";
 import type { PendingApproval } from "../session/permission";
 import type { ConnectionState } from "../relay/state-machine";
 import type { SubscriptionState } from "../account/subscription";
+import type { AlertSettings } from "../features/notifications/settings";
 import type { UiSnapshot } from "../types";
 
 // React glue for the AppController. Constructs a single controller backed by
@@ -39,10 +51,41 @@ export function AppServicesProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     void (async () => {
       await controller.boot();
+      // Request POST_NOTIFICATIONS proactively at launch (Android 13+).
+      // The settings toggle's on-change request never fires when the toggle
+      // already sits at its default ON value, so waiting for the user to
+      // toggle it means notifications silently never work.
+      if (controller.alertSettings.enabled && controller.alertSettings.systemNotifications) {
+        const granted = await requestNotificationPermission();
+        diagnostics.log("alerts", `boot permission request granted=${granted}`);
+      }
     })();
     return () => {
       void controller.disconnect();
     };
+  }, [controller]);
+
+  // Turn-completion alerts: wire the native adapters into the controller's
+  // watcher. The environment probes are read lazily at alert time so the
+  // policy always sees the current app/route state.
+  useEffect(() => {
+    void ensureNotificationSetup();
+    controller.setAlertPresenter(
+      new CompositeAlertPresenter(
+        {
+          haptics: expoHaptics,
+          sound: expoSound,
+          banner: bannerPort,
+          notify: localNotifier,
+        },
+        {
+          appState: () => AppState.currentState,
+          isViewingSession: (sessionId) => isViewingConversation(sessionId),
+        },
+        () => controller.alertSettings,
+      ),
+    );
+    return () => controller.setAlertPresenter(null);
   }, [controller]);
 
   return (
@@ -97,5 +140,12 @@ export function useSubscriptionState(): SubscriptionState {
     return () => controller.setSubscriptionListener(() => {});
   }, [controller]);
   return state;
+}
+
+export function useAlertSettings(): AlertSettings {
+  const controller = useAppController();
+  const [settings, setSettings] = useState<AlertSettings>(controller.alertSettings);
+  useEffect(() => controller.subscribeAlertSettings(setSettings), [controller]);
+  return settings;
 }
 // end of file

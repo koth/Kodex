@@ -26,6 +26,9 @@ type Row =
       key: string;
       session: SessionListItem;
       isSessionActive: boolean;
+      // Owning workspace root of this row's group — the PC needs it to route
+      // the switch to the right workspace app.
+      workspaceRoot: string;
     };
 
 function sortSessions(sessions: SessionListItem[]): SessionListItem[] {
@@ -97,7 +100,7 @@ export function SessionListScreen({
   onOpenSession,
   onOpenSettings,
 }: {
-  onOpenSession: (sessionId: string, title: string) => void;
+  onOpenSession: (sessionId: string, title: string, workspaceRoot?: string | null) => void;
   onOpenSettings: () => void;
 }) {
   const controller = useAppController();
@@ -152,7 +155,7 @@ export function SessionListScreen({
         const id = await controller.createSession({
           workspaceRoot: group.workspace.root,
         });
-        onOpenSession(id, "新会话");
+        onOpenSession(id, "新会话", group.workspace.root);
       } catch (e) {
         setError(e instanceof Error ? e.message : String(e));
       } finally {
@@ -199,6 +202,7 @@ export function SessionListScreen({
           session,
           isSessionActive:
             chatsGroup.is_active && session.id === chatsGroup.active_session_id,
+          workspaceRoot: chatsGroup.workspace.root,
         });
       }
     }
@@ -215,6 +219,7 @@ export function SessionListScreen({
           key: `${group.workspace.root}:${session.id}`,
           session,
           isSessionActive: group.is_active && session.id === group.active_session_id,
+          workspaceRoot: group.workspace.root,
         });
       }
     }
@@ -276,7 +281,7 @@ export function SessionListScreen({
               onPress={
                 item.session.id === ""
                   ? undefined
-                  : () => onOpenSession(item.session.id, item.session.title)
+                  : () => onOpenSession(item.session.id, item.session.title, item.workspaceRoot)
               }
             />
           )

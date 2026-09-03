@@ -11,12 +11,14 @@ import { ConversationScreen } from "../features/conversation/ConversationScreen"
 import { SessionInfoButton } from "../features/conversation/SessionInfoSheet";
 import { SettingsScreen } from "../features/settings/SettingsScreen";
 import { DiagnosticsScreen } from "../features/settings/DiagnosticsScreen";
+import { AlertBannerHost } from "../features/notifications/banner";
 import { AppServicesProvider, useConnectionState, useSnapshot } from "./AppServicesContext";
+import { navigationRef } from "./navigation-ref";
 import { colors, spacing } from "../features/theme";
 
 export type RootStackParamList = {
   Sessions: undefined;
-  Conversation: { sessionId: string; title: string };
+  Conversation: { sessionId: string; title: string; workspaceRoot?: string | null };
   Settings: undefined;
   Diagnostics: undefined;
 };
@@ -90,7 +92,9 @@ function MainStack({ onRescan }: { onRescan: () => void }) {
       >
         {({ navigation }) => (
           <SessionListScreen
-            onOpenSession={(sessionId, title) => navigation.navigate("Conversation", { sessionId, title })}
+            onOpenSession={(sessionId, title, workspaceRoot) =>
+              navigation.navigate("Conversation", { sessionId, title, workspaceRoot })
+            }
             onOpenSettings={() => navigation.navigate("Settings")}
           />
         )}
@@ -106,6 +110,7 @@ function MainStack({ onRescan }: { onRescan: () => void }) {
           <ConversationScreen
             key={route.params.sessionId}
             sessionId={route.params.sessionId}
+            workspaceRoot={route.params.workspaceRoot ?? null}
           />
         )}
       </Stack.Screen>
@@ -166,10 +171,29 @@ function Root() {
 export function Navigation() {
   return (
     <SafeAreaProvider>
-      <NavigationContainer>
-        <StatusBar style="light" />
+      <NavigationContainer ref={navigationRef}>
+        {/* translucent MUST stay false: expo-status-bar 3.x defaults it to
+            true, which at runtime makes the window draw under a transparent
+            status bar — the app's header then shows through behind the
+            time/icons ("顶部都花了") regardless of the native edge-to-edge
+            config. Explicit opaque dark bar keeps the window below it.
+            (When we migrate to targetSdk 36 / forced edge-to-edge, drop this
+            in favor of safe-area insets.) */}
+        <StatusBar style="light" translucent={false} backgroundColor="#11131f" />
         <AppServicesProvider>
           <Root />
+          {/* Global turn-completion banner: overlays every screen; tapping it
+              opens the completed session's conversation. */}
+          <AlertBannerHost
+            onOpen={(ctx) => {
+              if (navigationRef.isReady()) {
+                navigationRef.navigate("Conversation", {
+                  sessionId: ctx.sessionId,
+                  title: ctx.sessionTitle || "会话",
+                });
+              }
+            }}
+          />
         </AppServicesProvider>
       </NavigationContainer>
     </SafeAreaProvider>

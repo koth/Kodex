@@ -10,6 +10,11 @@ import { styles, colors, spacing } from "../theme";
 
 interface Props {
   sessionId: string;
+  // Owning workspace root, threaded from the session list. The PC routes the
+  // switch to that workspace's app — without it the switch lands on whatever
+  // workspace is active on the desktop and a dsh session resume fails with
+  // `session-conflict` (cwd mismatch).
+  workspaceRoot?: string | null;
 }
 
 // Session view: the conversation timeline, the prompt composer (which carries
@@ -17,7 +22,7 @@ interface Props {
 // Chrome (back navigation, session title) belongs to the native stack header —
 // a second in-screen header row only repeated it. The timeline is driven by
 // the snapshot reducer so it stays byte-equivalent to the desktop.
-export function ConversationScreen({ sessionId }: Props) {
+export function ConversationScreen({ sessionId, workspaceRoot }: Props) {
   const controller = useAppController();
   const snapshot = useSnapshot();
   const [sendError, setSendError] = useState<string | null>(null);
@@ -57,7 +62,7 @@ export function ConversationScreen({ sessionId }: Props) {
     // stream — do we pay for an explicit (duplicate) full GetState.
     (async () => {
       try {
-        await controller.switchSession(sessionId);
+        await controller.switchSession(sessionId, workspaceRoot);
         fallback = setTimeout(() => {
           if (!active || controller.snapshot) return;
           void controller
@@ -74,7 +79,7 @@ export function ConversationScreen({ sessionId }: Props) {
       active = false;
       if (fallback !== null) clearTimeout(fallback);
     };
-  }, [controller, sessionId]);
+  }, [controller, sessionId, workspaceRoot]);
 
   const streaming =
     snapshot?.session.status === "Streaming" || snapshot?.session.status === "WaitingForTool";
