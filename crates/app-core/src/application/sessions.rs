@@ -362,7 +362,7 @@ impl Application {
         model: &str,
         preset_override: Option<String>,
     ) -> Result<PreparedSessionRuntime, String> {
-        self.prepare_session_runtime_for_resume(agent_command, model, preset_override, false)
+        self.prepare_session_runtime_for_resume(agent_command, model, preset_override, false, None)
     }
 
     fn prepare_session_runtime_for_resume(
@@ -371,6 +371,14 @@ impl Application {
         model: &str,
         preset_override: Option<String>,
         resuming_existing_session: bool,
+        // The session's own persisted workspace root. Resuming a stored
+        // session must use the workspace the session was created in, not the
+        // workspace currently open in the UI: for dsh-harness sessions the
+        // harness rejects a resume whose cwd differs from the persisted one
+        // (`session-conflict`). New sessions pass `None` (they belong to the
+        // current workspace). Remote workspaces ignore this — their root
+        // comes from the SSH config.
+        workspace_root_override: Option<String>,
     ) -> Result<PreparedSessionRuntime, String> {
         if self.is_remote_workspace() {
             return self.prepare_remote_session_runtime(agent_command);
@@ -388,7 +396,10 @@ impl Application {
         if crate::settings::is_deepseek_harness_command(agent_command) {
             let harness_endpoint =
                 crate::dsh_bringup::dsh_bringup().ensure_harness_endpoint(&self.app_paths)?;
-            let workspace_root = self.session_config_workspace_root(None);
+            let workspace_root = workspace_root_override
+                .clone()
+                .filter(|root| !root.is_empty())
+                .unwrap_or_else(|| self.session_config_workspace_root(None));
             // Per-session preset override wins over the global `dsh_default_preset`
             // setting; fall back to the configured default when none is supplied.
             // When RESUMING, the stored preset is passed through so the UI can
@@ -432,7 +443,9 @@ impl Application {
 
         crate::settings::ensure_agent_ready_for_command(agent_command, &self.app_paths)
             .map_err(|e| e.to_string())?;
-        let workspace_root = self.session_config_workspace_root(None);
+        let workspace_root = workspace_root_override
+            .filter(|root| !root.is_empty())
+            .unwrap_or_else(|| self.session_config_workspace_root(None));
         let (mut mcp_servers, web_tools_mcp) =
             prepare_web_tools_mcp(&self.app_paths, agent_command, false)?;
         let (image_servers, image_mcp, image_capabilities) = prepare_image_mcp(
@@ -992,6 +1005,9 @@ impl Application {
             &self.ui.session.model,
             reconnect_preset,
             has_resume_id,
+            // The active session belongs to the current workspace by
+            // construction — no override needed.
+            None,
         )?;
         let mut session = SessionHandle::start(SessionConfig {
             workspace_root: prepared_runtime.workspace_root,
@@ -1152,11 +1168,23 @@ impl Application {
         // not fall back to the global default (which can conflict with the
         // session's fixed preset and cause dsh to reject the resume).
         let stored_preset = self.store.get_session_agent_preset(id).ok().flatten();
+        // Resume in the session's OWN workspace, not whatever workspace the UI
+        // has open right now: a dsh resume whose cwd differs from the
+        // persisted session's fails with `session-conflict` (the remote-control
+        // switch path once hit exactly this when the desktop had another
+        // workspace active).
+        let stored_workspace_root = self
+            .store
+            .get_session_workspace_root(id)
+            .ok()
+            .flatten()
+            .filter(|root| !root.is_empty());
         let prepared_runtime = self.prepare_session_runtime_for_resume(
             &session_agent_command,
             &model,
             stored_preset,
             has_resume_id,
+            stored_workspace_root,
         )?;
         let agent_cli_label =
             active_agent_label_for_command(&session_agent_command, stored_agent_cli);
@@ -1295,6 +1323,8 @@ impl Application {
             pending_image_degradation: None,
             history_total_count,
             history_earliest_seq,
+            conversation_change_set_signature: 0,
+            conversation_change_set_turn_cache: HashMap::new(),
         })
     }
 
@@ -1304,7 +1334,11 @@ impl Application {
         preset: Option<String>,
     ) -> Result<SessionRuntime, String> {
         let new_id = uuid::Uuid::new_v4();
-        let initial_model = AGENT_DEFAULT_MODEL_LABEL.to_string();
+        let initial_model = if crate::settings::is_deepseek_harness_command(&self.agent_command) {
+            String::new()
+        } else {
+            AGENT_DEFAULT_MODEL_LABEL.to_string()
+        };
         self.store
             .create_session(&new_id.to_string(), &initial_model)
             .map_err(|e| e.to_string())?;
@@ -1413,6 +1447,8 @@ impl Application {
             pending_image_degradation: None,
             history_total_count: 0,
             history_earliest_seq: None,
+            conversation_change_set_signature: 0,
+            conversation_change_set_turn_cache: HashMap::new(),
         })
     }
 }

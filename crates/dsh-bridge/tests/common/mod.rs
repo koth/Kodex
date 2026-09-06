@@ -111,6 +111,9 @@ pub struct MockHarnessConfig {
     /// Script for the first mux connection. Reconnections use
     /// `reconnect_scripts` when non-empty, else `mux` again.
     pub mux: Vec<MuxScript>,
+    /// Frames for the per-session `session/follow` WS. Each new follow
+    /// connection drains one script (same lifecycle as `mux`).
+    pub follow: Vec<MuxScript>,
     /// Per-session history failure: session ids whose `session.history` call
     /// should return an error (to exercise per-session re-baseline isolation).
     pub history_failures: Vec<String>,
@@ -123,6 +126,12 @@ pub struct MockHarnessConfig {
     /// When true, `/api/respond` rejects with `bad-response` (as dsh does for
     /// a malformed/ mismatched answer payload).
     pub respond_reject: bool,
+    /// When true, token-authenticated endpoints reject requests without the
+    /// `dsh-auth-` cookie.
+    pub require_auth: bool,
+    /// Projection values returned by `session/page` under its top-level
+    /// `projections.values` object (dsh supplies `modelSelection` here).
+    pub history_projections: Option<Value>,
 }
 #[derive(Debug, Default)]
 struct MockState {
@@ -165,6 +174,11 @@ impl MockHarness {
         let state = Arc::new(Mutex::new(MockState::default()));
         let (drop_tx, drop_rx) = mpsc::channel(1);
         let mux_conns = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let launch_token = if config.lock().unwrap().require_auth {
+            Some("mock-launch-token".to_string())
+        } else {
+            None
+        };
 
         let config_handle = config.clone();
         let state_handle = state.clone();
@@ -178,8 +192,17 @@ impl MockHarness {
                 let state = state_handle.clone();
                 let drop_tx = drop_tx.clone();
                 let mux_conns = mux_conns_handle.clone();
+                let launch_token = launch_token.clone();
                 tokio::spawn(async move {
-                    handle_connection(stream, config, state, drop_tx, mux_conns).await;
+                    handle_connection(
+                        stream,
+                        config,
+                        state,
+                        drop_tx,
+                        mux_conns,
+                        launch_token.as_deref(),
+                    )
+                    .await;
                 });
             }
         });
@@ -252,6 +275,7 @@ async fn handle_connection(
     state: Arc<Mutex<MockState>>,
     drop_tx: mpsc::Sender<()>,
     mux_conns: Arc<std::sync::atomic::AtomicUsize>,
+    launch_token: Option<&str>,
 ) {
     let mut buf = Vec::new();
     // Read the request head (until \r\n\r\n).
@@ -274,15 +298,48 @@ async fn handle_connection(
     let mut parts = request_line.split_whitespace();
     let method = parts.next().unwrap_or("").to_string();
     let path = parts.next().unwrap_or("").to_string();
+    let mut cookies = String::new();
+    let mut content_length = 0usize;
+    for line in lines {
+        let lower = line.to_ascii_lowercase();
+        if let Some(value) = lower.strip_prefix("cookie:") {
+            cookies = value.trim().to_string();
+        } else if let Some(value) = lower.strip_prefix("content-length:") {
+            content_length = value.trim().parse::<usize>().unwrap_or(0);
+        }
+    }
+    if let Some(token) = launch_token {
+        if method == "GET" && path.starts_with('/') {
+            let (root_path, query) = path.split_once('?').unwrap_or((path.as_str(), ""));
+            if root_path == "/" {
+                let token_matches = query
+                    .split('&')
+                    .filter_map(|pair| pair.split_once('='))
+                    .any(|(name, value)| name == "token" && value == token);
+                if token_matches {
+                    let cookie = format!(
+                        "HTTP/1.1 303 See Other\r\nlocation: /\r\nset-cookie: dsh-auth-test={token}; Path=/; HttpOnly\r\ncontent-length: 0\r\n\r\n"
+                    );
+                    stream.write_all(cookie.as_bytes()).await.unwrap();
+                    return;
+                }
+                let response = b"HTTP/1.1 401 Unauthorized\r\ncontent-length: 0\r\n\r\n";
+                stream.write_all(response).await.unwrap();
+                return;
+            }
+        }
+        if !cookies
+            .split(';')
+            .any(|pair| pair.trim().starts_with("dsh-auth-test="))
+        {
+            stream
+                .write_all(b"HTTP/1.1 401 Unauthorized\r\ncontent-length: 0\r\n\r\n")
+                .await
+                .unwrap();
+            return;
+        }
+    }
 
-    // Content-Length body (control POSTs).
-    let content_length = lines
-        .find_map(|line| {
-            line.to_ascii_lowercase()
-                .strip_prefix("content-length:")
-                .map(|value| value.trim().parse::<usize>().unwrap_or(0))
-        })
-        .unwrap_or(0);
     while buf.len() < head_end + content_length {
         let n = stream.read(&mut tmp).await.unwrap_or(0);
         if n == 0 {
@@ -297,7 +354,7 @@ async fn handle_connection(
     };
 
     match (method.as_str(), path.as_str()) {
-        ("GET", "/api/events.mux") => {
+        ("GET", "/api/remote.mux") => {
             mux_conns.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
             let scripts = {
                 let mut guard = config.lock().unwrap();
@@ -314,7 +371,15 @@ async fn handle_connection(
                 }
                 next.unwrap_or_else(|| scripts_for_hold().remove(0))
             };
-            serve_mux(stream, buf[..head_end].to_vec(), scripts, drop_tx, state.clone()).await;
+            serve_mux(
+                stream,
+                buf[..head_end].to_vec(),
+                scripts,
+                drop_tx,
+                state.clone(),
+                config.clone(),
+            )
+            .await;
         }
         ("GET", "/api/events.host") => {
             // Host stream: WebSocket keep-alive with no frames (idle).
@@ -390,8 +455,13 @@ async fn handle_connection(
                 .to_string();
             let method_name = path.strip_prefix("/api/").unwrap_or("").to_string();
             let session_id = parsed
-                .pointer("/payload/sessionId")
+                .pointer("/payload/args/request/sessionId")
                 .and_then(Value::as_str)
+                .or_else(|| {
+                    parsed
+                        .pointer("/payload/args/request/address/sessionId")
+                        .and_then(Value::as_str)
+                })
                 .unwrap_or("s-mock")
                 .to_string();
             state
@@ -399,15 +469,21 @@ async fn handle_connection(
                 .unwrap()
                 .calls
                 .push((method_name.clone(), rpc_id.clone()));
-            if method_name == "session.create" {
-                let payload = parsed.get("payload").cloned().unwrap_or(Value::Null);
+            if method_name == "session/create" {
+                let payload = parsed
+                    .pointer("/payload/args/request")
+                    .cloned()
+                    .unwrap_or(Value::Null);
                 state.lock().unwrap().creates.push(payload);
             }
-            if method_name == "session.fork" {
-                let payload = parsed.get("payload").cloned().unwrap_or(Value::Null);
+            if method_name == "session/fork" {
+                let payload = parsed
+                    .pointer("/payload/args")
+                    .cloned()
+                    .unwrap_or(Value::Null);
                 state.lock().unwrap().forks.push(payload);
             }
-            if method_name == "session.models" {
+            if method_name == "session/modelCatalog" {
                 // Sent by `run_harness_session` only after the session sink is
                 // registered — used as the frame-hold barrier.
                 state.lock().unwrap().models_served = true;
@@ -421,11 +497,11 @@ async fn handle_connection(
                     "canOpenPath": false,
                 }),
                 "session.list" => serde_json::json!({ "items": [] }),
-                "session.create" => serde_json::json!({ "sessionId": "s-1" }),
-                "session.fork" => serde_json::json!({ "sessionId": "s-fork" }),
-                "session.prompt" => serde_json::json!({ "accepted": true }),
-                "session.cancel" => serde_json::json!({ "accepted": true }),
-                "session.history" => {
+                "session/create" => serde_json::json!({ "sessionId": "s-1" }),
+                "session/fork" => serde_json::json!({ "sessionId": "s-fork" }),
+                "session/prompt" => serde_json::json!({ "accepted": true }),
+                "session/cancel" => serde_json::json!({ "accepted": true }),
+                "session/page" => {
                     let fail = config
                         .lock()
                         .unwrap()
@@ -446,11 +522,16 @@ async fn handle_connection(
                         return;
                     }
                     let events = config.lock().unwrap().history_events.clone();
-                    serde_json::json!({ "events": events, "hasMore": false })
+                    let projections = config.lock().unwrap().history_projections.clone();
+                    let mut response = serde_json::json!({ "records": events, "hasMore": false });
+                    if let Some(projections) = projections {
+                        response["projections"] = projections;
+                    }
+                    response
                 }
-                "session.models" => serde_json::json!({
-                    "current": { "provider": "deepseek", "model": "deepseek-v4-pro" },
-                    "routable": true,
+                "session/modelCatalog" => serde_json::json!({
+                    "default": { "provider": "deepseek", "model": "deepseek-v4-pro" },
+                    "routableProviders": ["deepseek"],
                     "groups": [
                         {
                             "id": "deepseek",
@@ -463,10 +544,10 @@ async fn handle_connection(
                     ],
                     "failures": [],
                 }),
-                "session.selectModel" => serde_json::json!({
+                "session/selectModel" => serde_json::json!({
                     "selected": { "provider": "deepseek", "model": "deepseek-v4-pro" }
                 }),
-                "agentPreset.list" => serde_json::json!({
+                "agentPresets/list" => serde_json::json!({
                     "presets": [
                         { "id": "code", "trust": "system", "isDefault": true, "name": "Code", "description": "Standard coding agent" },
                         { "id": "standard", "trust": "system", "isDefault": false, "name": "Standard", "description": "Full coding agent" },
@@ -476,9 +557,9 @@ async fn handle_connection(
                     "authorable": false,
                     "hasDocument": false,
                 }),
-                "agentPreset.select" => {
+                "agentPresets/select" => {
                     let preset = parsed
-                        .pointer("/payload/agentPreset")
+                        .pointer("/payload/args/agentPreset")
                         .and_then(Value::as_str)
                         .unwrap_or("code")
                         .to_string();
@@ -531,6 +612,7 @@ async fn serve_mux(
     script: MuxScript,
     drop_tx: mpsc::Sender<()>,
     state: Arc<Mutex<MockState>>,
+    config: Arc<Mutex<MockHarnessConfig>>,
 ) {
     let prefixed = PrefixedStream {
         prefix: head,
@@ -541,6 +623,38 @@ async fn serve_mux(
         Ok(ws) => ws,
         Err(_) => return,
     };
+    // The first client frame identifies the logical stream: `{ type: "open",
+    // endpoint: "$events" | "session/follow", … }`. Route accordingly.
+    let first = match ws.next().await {
+        Some(Ok(tokio_tungstenite::tungstenite::Message::Text(text))) => text,
+        _ => return,
+    };
+    let open: Value = match serde_json::from_str(&first) {
+        Ok(value) => value,
+        Err(_) => return,
+    };
+    let endpoint = open
+        .get("endpoint")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    if endpoint == "session/follow" {
+        let session_id = open
+            .pointer("/payload/args/request/address/sessionId")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
+        let follow_script = {
+            let mut guard = config.lock().unwrap();
+            if guard.follow.is_empty() {
+                guard.follow = scripts_for_hold();
+            }
+            guard.follow.drain(..1).next().unwrap()
+        };
+        serve_follow(ws, follow_script, session_id, drop_tx).await;
+        return;
+    }
+    // `$events` mux: fall through to the original scripted path.
     if script.hold_frames_until == HoldFramesUntil::SessionRegistered {
         // `run_harness_session` registers the sink before POSTing
         // `session.models`, so serving that call is the earliest observable
@@ -554,14 +668,17 @@ async fn serve_mux(
     for frame in &script.frames {
         // Record pending questions so the respond handler can validate answers
         // the way dsh's `matchesQuestions` does.
-        if frame.get("method").and_then(Value::as_str) == Some("question/requested") {
+        let is_question_waterfall = frame.get("type").and_then(Value::as_str) == Some("waterfall")
+            && frame.get("event").and_then(Value::as_str) == Some("user-questions/request")
+            && frame.get("eventId").and_then(Value::as_str).is_some();
+        if is_question_waterfall {
             let rpc_id = frame
-                .get("rpcId")
+                .get("eventId")
                 .and_then(Value::as_str)
                 .unwrap_or("")
                 .to_string();
             let questions = frame
-                .pointer("/payload/questions")
+                .pointer("/request/questions")
                 .and_then(Value::as_array)
                 .cloned()
                 .unwrap_or_default();
@@ -571,7 +688,12 @@ async fn serve_mux(
                 .pending_questions
                 .insert(rpc_id, questions);
         }
-        let payload = serde_json::to_string(frame).unwrap();
+        let payload = serde_json::to_string(&serde_json::json!({
+            "type": "item",
+            "streamId": "mock-$events",
+            "value": frame
+        }))
+        .unwrap();
         let _ = ws.send(Message::Text(payload.into())).await;
     }
     match script.end {
@@ -580,6 +702,35 @@ async fn serve_mux(
             // (client→host is a protocol violation; tungstenite closes on it).
             while ws.next().await.is_some() {}
         }
+        MuxEnd::Close => {
+            let _ = drop_tx.send(()).await;
+            let _ = ws.close(None).await;
+        }
+    }
+}
+
+/// Serve one `session/follow` WS: emit the scripted journal frames as
+/// `{ type: "item", value: <frame> }`, then hold or close per `script.end`.
+async fn serve_follow(
+    mut ws: tokio_tungstenite::WebSocketStream<PrefixedStream>,
+    script: MuxScript,
+    session_id: String,
+    drop_tx: mpsc::Sender<()>,
+) {
+    for frame in &script.frames {
+        // Journal frames carry the session id in their payload; the bridge
+        // demuxes by stream, not by frame content.
+        let _ = session_id;
+        let payload = serde_json::to_string(&serde_json::json!({
+            "type": "item",
+            "streamId": "mock-follow",
+            "value": frame
+        }))
+        .unwrap();
+        let _ = ws.send(Message::Text(payload.into())).await;
+    }
+    match script.end {
+        MuxEnd::Hold => while ws.next().await.is_some() {},
         MuxEnd::Close => {
             let _ = drop_tx.send(()).await;
             let _ = ws.close(None).await;
@@ -615,17 +766,16 @@ fn scripts_for_hold() -> Vec<MuxScript> {
     }]
 }
 
-/// Build a mux `session/event` `ServerRequest` frame.
+/// Build a `$events` emit frame for one SessionEvent.
 pub fn mux_session_event(session_id: &str, seq: u64, type_tag: &str, data: Value) -> Value {
     serde_json::json!({
-        "type": "server-request",
-        "rpcId": format!("rpc-{session_id}-{seq}"),
-        "method": "session/event",
-        "payload": {
+        "type": "emit",
+        "event": "session/event",
+        "args": [{
             "type": "session/event",
             "sessionId": session_id,
             "event": { "type": type_tag, "seq": seq, "time": 0.0, "data": data }
-        }
+        }]
     })
 }
 
@@ -657,17 +807,12 @@ pub fn mux_assistant_final(session_id: &str, seq: u64) -> Value {
     )
 }
 
-/// Build a mux `session/subscribed` `ServerRequest` frame.
+/// Build a `$events` subscribed emit frame.
 pub fn mux_subscribed(session_id: &str, last_seq: i64) -> Value {
     serde_json::json!({
-        "type": "server-request",
-        "rpcId": format!("rpc-sub-{session_id}"),
-        "method": "session/event",
-        "payload": {
-            "type": "session/subscribed",
-            "sessionId": session_id,
-            "lastSeq": last_seq
-        }
+        "type": "emit",
+        "event": "session/subscribed",
+        "args": [{ "type": "session/subscribed", "sessionId": session_id, "lastSeq": last_seq }]
     })
 }
 
@@ -683,10 +828,13 @@ pub fn scripts_with(frames: Vec<Value>) -> Vec<MuxScript> {
 pub fn default_config() -> MockHarnessConfig {
     MockHarnessConfig {
         mux: Vec::new(),
+        follow: Vec::new(),
         history_failures: Vec::new(),
         history_events: Vec::new(),
         preset_locked: false,
         respond_reject: false,
+        require_auth: false,
+        history_projections: None,
     }
 }
 

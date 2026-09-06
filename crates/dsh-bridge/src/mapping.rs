@@ -157,11 +157,33 @@ pub fn map_mux_frame(frame: &MuxFrame, sink: &SessionSink) -> MappedEvents {
             outcome: outcome.clone(),
         }),
         MuxFrame::SessionProjection { key, value, .. } => {
+            if key == "agentPreset" {
+                if let Some(preset) = value.as_str().filter(|preset| !preset.is_empty()) {
+                    return MappedEvents::single(ClientEvent::SessionConfigValueChanged {
+                        control_id: "agent_preset".to_string(),
+                        value_id: preset.to_string(),
+                        value_label: None,
+                    });
+                }
+                return MappedEvents::default();
+            }
             if key == "title" {
                 if let Some(title) = value.as_str() {
                     return MappedEvents::single(ClientEvent::SessionTitleUpdated {
                         title: title.to_string(),
                     });
+                }
+                return MappedEvents::default();
+            }
+            if key == "modelSelection" {
+                let selection = value
+                    .get("next")
+                    .or_else(|| value.get("lastUsed"))
+                    .filter(|selection| selection.is_object());
+                if let Some(selection) = selection
+                    && let Some(event) = model_selection_config_event(selection)
+                {
+                    return MappedEvents::single(event);
                 }
                 return MappedEvents::default();
             }
@@ -202,6 +224,67 @@ pub fn map_mux_frame(frame: &MuxFrame, sink: &SessionSink) -> MappedEvents {
     }
 }
 
+/// Map a projection baseline's `values` map (from `session/page` or the
+/// `session/follow` opening snapshot) into client events.
+///
+/// dsh 0.1.2 does not carry `agentPreset` on the resumed `session.create`
+/// response; it restores it through a projection baseline. Without mapping the
+/// whole baseline, kodex cannot distinguish a compaction-capable standard
+/// session from a minimal one.
+pub fn map_projection_values(values: &Value) -> Vec<ClientEvent> {
+    let Some(values) = values.as_object() else {
+        return Vec::new();
+    };
+    values
+        .iter()
+        .filter_map(|(key, value)| {
+            let frame = MuxFrame::SessionProjection {
+                session_id: String::new(),
+                key: key.clone(),
+                value: value.clone(),
+                seq: 0,
+            };
+            let mapped = map_mux_frame(&frame, &SessionSink::new_for_projection_mapping());
+            if mapped.events.is_empty() {
+                None
+            } else {
+                Some(mapped.events)
+            }
+        })
+        .flatten()
+        .collect()
+}
+
+/// Convert a dsh `modelSelection` projection into a provider-qualified model
+/// config change. `next` is authoritative for a blank session; `lastUsed` is
+/// the restored selection for an existing session.
+pub fn model_selection_config_event(selection: &serde_json::Value) -> Option<ClientEvent> {
+    // dsh stores the selection as `{ lastUsed?: {provider, model}, next?: {provider, model} }`.
+    // Prefer the active `next`, fall back to `lastUsed`.
+    let active = selection
+        .get("next")
+        .or_else(|| selection.get("lastUsed"))
+        .filter(|candidate| candidate.is_object())
+        .unwrap_or(selection);
+    // `next`/`lastUsed` may be `null` when the session has never explicitly
+    // selected a model — the projection carries no durable choice. In that
+    // case the harness falls back to the deployment default; the caller must
+    // resolve it from the model catalog.
+    if active.is_null() {
+        return None;
+    }
+    let provider = active.get("provider")?.as_str()?.trim();
+    let model = active.get("model")?.as_str()?.trim();
+    if provider.is_empty() || model.is_empty() {
+        return None;
+    }
+    Some(ClientEvent::SessionConfigValueChanged {
+        control_id: "model".to_string(),
+        value_id: format!("kodex-provider/{provider}/{model}"),
+        value_label: Some(model.to_string()),
+    })
+}
+
 /// Map a `HostFrame` (demuxed by `sessionId` where present).
 pub fn map_host_frame(frame: &HostFrame) -> MappedEvents {
     match frame {
@@ -236,6 +319,20 @@ pub fn map_session_event(
     view: Option<&ToolEventView>,
     _sink: &SessionSink,
 ) -> Vec<ClientEvent> {
+    // History replay rebuilds the transcript from SQLite; a replayed
+    // `tool/call` must not re-emit `ToolStarted`, otherwise app-core
+    // `persist_event` would overwrite the persisted row back to Running.
+    // Record the call args so a later replayed `tool/result` can still
+    // synthesize the diff preview.
+    if _sink.is_replaying() && event.type_tag == "tool/call" {
+        let data: Option<ToolCallData> = event.data();
+        if let Some(d) = data
+            && let Ok(value) = serde_json::from_str::<Value>(&d.arguments)
+        {
+            _sink.record_tool_call(d.call_id, d.name, value);
+        }
+        return Vec::new();
+    }
     match event.type_tag.as_str() {
         "assistant/chunk" => {
             let data: Option<AssistantChunkData> = event.data();
@@ -393,7 +490,11 @@ pub fn map_session_event(
                             // semantic kind so `view`/`str_replace` do not fall
                             // back to the shell card.
                             let inferred = infer_tool_kind(&name, raw_input_value.as_ref());
-                            if inferred.is_empty() { "execute".to_string() } else { inferred }
+                            if inferred.is_empty() {
+                                "execute".to_string()
+                            } else {
+                                inferred
+                            }
                         }
                         ToolCallView::Diff(_) => "edit".to_string(),
                         // dsh renders file tools (view / str_replace / search...)
@@ -407,9 +508,7 @@ pub fn map_session_event(
                         // Unknown cards (e.g. a `read` call card added by a
                         // newer dsh) still need kind inference so the UI does
                         // not fall back to the shell surface.
-                        ToolCallView::Other => {
-                            infer_tool_kind(&name, raw_input_value.as_ref())
-                        }
+                        ToolCallView::Other => infer_tool_kind(&name, raw_input_value.as_ref()),
                     };
                     let summary = view
                         .title()
@@ -423,14 +522,12 @@ pub fn map_session_event(
                 ),
             };
             let summary = {
-                let path = raw_input_value
-                    .as_ref()
-                    .and_then(|v| {
-                        v.get("path")
-                            .or_else(|| v.get("file_path"))
-                            .or_else(|| v.get("filePath"))
-                            .and_then(Value::as_str)
-                    });
+                let path = raw_input_value.as_ref().and_then(|v| {
+                    v.get("path")
+                        .or_else(|| v.get("file_path"))
+                        .or_else(|| v.get("filePath"))
+                        .and_then(Value::as_str)
+                });
                 if (kind == "read" || kind == "edit")
                     && let Some(path) = path
                     && !summary.contains(path)
@@ -447,9 +544,7 @@ pub fn map_session_event(
                 kind,
                 summary,
                 is_subagent: false,
-                raw_input: raw_input_value
-                    .as_ref()
-                    .map(|v| json_compact_no_escape(v)),
+                raw_input: raw_input_value.as_ref().map(|v| json_compact_no_escape(v)),
             }]
         }
         "tool/result" => {
@@ -500,19 +595,34 @@ pub fn map_session_event(
                     infer_tool_kind(name, Some(&args_value))
                 })
                 .unwrap_or_default();
-            let (outcome, terminal_output, raw_output) = match (data.as_ref(), view, inferred_kind.as_str()) {
-                (Some(d), Some(ToolEventView::Result { view: ToolResultView::Terminal(_) }), "read") => {
-                    // Keep read tools on the file-view surface even when dsh
-                    // reported the result through a terminal card: use the
-                    // model-facing text as raw_output instead of a shell output.
-                    (result_outcome(d), None, result_text(d))
-                }
-                (Some(d), Some(ToolEventView::Result { view }), _) => render_result(d, view),
-                (Some(d), None, _) => (result_outcome(d), None, result_text(d)),
-                _ => ("completed".to_string(), None, None),
-            };
+            let (outcome, terminal_output, raw_output) =
+                match (data.as_ref(), view, inferred_kind.as_str()) {
+                    (
+                        Some(d),
+                        Some(ToolEventView::Result {
+                            view: ToolResultView::Terminal(_),
+                        }),
+                        "read",
+                    ) => {
+                        // Keep read tools on the file-view surface even when dsh
+                        // reported the result through a terminal card: use the
+                        // model-facing text as raw_output instead of a shell output.
+                        (result_outcome(d), None, result_text(d))
+                    }
+                    (Some(d), Some(ToolEventView::Result { view }), _) => render_result(d, view),
+                    (Some(d), None, _) => (result_outcome(d), None, result_text(d)),
+                    _ => ("completed".to_string(), None, None),
+                };
 
-            if data.as_ref().is_some_and(|d| d.error.is_some()) {
+            if _sink.is_replaying() {
+                // History replay only rebuilds the UI transcript. The tool row
+                // already exists in SQLite with its terminal state; re-emitting
+                // `ToolStarted`/`ToolCompleted` here would let app-core
+                // `persist_event` overwrite the persisted row back to Running.
+                // Keep any diff previews so the card still renders, but do not
+                // send a terminal-state event.
+                out.retain(|event| matches!(event, ClientEvent::ToolDiff { .. }));
+            } else if data.as_ref().is_some_and(|d| d.error.is_some()) {
                 out.push(ClientEvent::ToolFailed {
                     id: call_id,
                     name: None,
@@ -827,11 +937,17 @@ fn infer_tool_kind(name: &str, raw_input: Option<&Value>) -> String {
         })
     };
 
-
     // Edit tools: replace/patch/write-shaped names, or any tool whose input
     // carries an old/new text pair (str_replace-style arguments).
-    if matches_any(&["edit", "str replace", "replace", "patch", "apply patch", "write", "create"])
-    {
+    if matches_any(&[
+        "edit",
+        "str replace",
+        "replace",
+        "patch",
+        "apply patch",
+        "write",
+        "create",
+    ]) {
         return "edit".to_string();
     }
     if let Some(input) = raw_input {
@@ -929,7 +1045,6 @@ fn synthetic_edit_diff(
     })
 }
 
-
 fn render_result(
     data: &ToolResultData,
     view: &ToolResultView,
@@ -957,15 +1072,15 @@ fn render_result(
             // them as numbered file content so the exploration card shows the
             // actual file instead of raw JSON.
             let rendered = render_read_view(v);
-            (result_outcome(data), None, rendered.or_else(|| result_text(data)))
-        }
-        ToolResultView::Search(v) | ToolResultView::Web(v) => {
-            // Unrepresentable structured views → raw_output JSON (recoverable).
             (
                 result_outcome(data),
                 None,
-                Some(json_compact_no_escape(v)),
+                rendered.or_else(|| result_text(data)),
             )
+        }
+        ToolResultView::Search(v) | ToolResultView::Web(v) => {
+            // Unrepresentable structured views → raw_output JSON (recoverable).
+            (result_outcome(data), None, Some(json_compact_no_escape(v)))
         }
         ToolResultView::Generic(_) => ("completed".to_string(), None, result_text(data)),
         ToolResultView::Other => ("completed".to_string(), None, result_text(data)),
@@ -1094,16 +1209,31 @@ fn context_pressure_usage_event(value: &Value) -> Option<ClientEvent> {
 }
 
 /// `session/projection` `tokenUsage` value — durable cumulative provider usage
-/// for the whole session. Emitted as `SessionTotal` so the reducer replaces the
-/// per-turn-delta estimate with the harness's authoritative cumulative.
+/// for the whole session. dsh 0.1.2 nests the durable buckets under `totals`
+/// and records the most recent model call under `last`; dsh 0.1.1 carried the
+/// same buckets flat. Accept both wire versions.
 ///
-/// Like the per-call `TokenUsage`, the projection's four buckets are disjoint
+/// The projection's four buckets are disjoint
 /// (`@deepseek-ai/dsh-token-meter/projection`: "The four buckets are
-/// disjoint"), so `uncachedInputTokens` alone must NOT become
+/// disjoint"), so the uncached-input bucket alone must NOT become
 /// `input_tokens` — fold in the cache axes to keep the cache-inclusive
 /// convention the rest of Kodex relies on.
 #[derive(serde::Deserialize)]
 struct TokenUsageProjection {
+    #[serde(default)]
+    totals: Option<TokenUsageBuckets>,
+    #[serde(default, rename = "uncachedInputTokens")]
+    uncached_input_tokens: Option<u64>,
+    #[serde(default, rename = "outputTokens")]
+    output_tokens: Option<u64>,
+    #[serde(default, rename = "cacheReadTokens")]
+    cache_read_tokens: Option<u64>,
+    #[serde(default, rename = "cacheWriteTokens")]
+    cache_write_tokens: Option<u64>,
+}
+
+#[derive(serde::Deserialize)]
+struct TokenUsageBuckets {
     #[serde(default, rename = "uncachedInputTokens")]
     uncached_input_tokens: u64,
     #[serde(default, rename = "outputTokens")]
@@ -1115,7 +1245,26 @@ struct TokenUsageProjection {
 }
 
 fn token_usage_projection_event(value: &Value) -> Option<ClientEvent> {
-    let usage: TokenUsageProjection = serde_json::from_value(value.clone()).ok()?;
+    let projection: TokenUsageProjection = serde_json::from_value(value.clone()).ok()?;
+    let usage = if let Some(totals) = projection.totals {
+        totals
+    } else {
+        let (uncached_input_tokens, output_tokens) =
+            match (projection.uncached_input_tokens, projection.output_tokens) {
+                (Some(uncached_input_tokens), Some(output_tokens)) => {
+                    (uncached_input_tokens, output_tokens)
+                }
+                _ => return None,
+            };
+        let cache_read_tokens = projection.cache_read_tokens?;
+        let cache_write_tokens = projection.cache_write_tokens?;
+        TokenUsageBuckets {
+            uncached_input_tokens,
+            output_tokens,
+            cache_read_tokens,
+            cache_write_tokens,
+        }
+    };
     let input_tokens = usage
         .uncached_input_tokens
         .saturating_add(usage.cache_read_tokens)
@@ -1160,7 +1309,6 @@ pub fn file_diff_to_hunks(path: &str, old: Option<&str>, new: &str) -> DiffHunk 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::host::SessionSink;
     use acp_core::PermissionBroker;
     use std::sync::mpsc;
 
@@ -1345,7 +1493,10 @@ mod tests {
         ));
 
         let live = map_mux_frame(&frame, &sink);
-        assert!(live.events.is_empty(), "live user/message must stay unmapped");
+        assert!(
+            live.events.is_empty(),
+            "live user/message must stay unmapped"
+        );
 
         sink.set_replaying(true);
         let replayed = map_mux_frame(&frame, &sink);
@@ -1544,7 +1695,6 @@ mod tests {
                     && new_text == "import React from 'react';\n\nexport const X = () => null;\n"
         ));
     }
-
 
     #[test]
     fn missing_view_still_infers_kind_from_tool_name() {
@@ -1910,6 +2060,88 @@ mod tests {
     }
 
     #[test]
+    fn maps_nested_token_usage_projection_to_session_total() {
+        // dsh 0.1.2 nests the durable cumulative buckets under `totals`;
+        // accepting only the old flat shape silently dropped every update.
+        let (sink, _rx) = test_sink();
+        let frame = mux(serde_json::json!({
+            "type": "session/projection",
+            "sessionId": "s-1",
+            "key": "tokenUsage",
+            "value": {
+                "totals": {
+                    "uncachedInputTokens": 476,
+                    "outputTokens": 670,
+                    "cacheReadTokens": 319_808,
+                    "cacheWriteTokens": 0
+                },
+                "last": {
+                    "turn": 151,
+                    "step": 6,
+                    "buckets": {
+                        "uncachedInputTokens": 100,
+                        "outputTokens": 20,
+                        "cacheReadTokens": 1_000,
+                        "cacheWriteTokens": 0
+                    }
+                }
+            },
+            "seq": 13
+        }));
+        let mapped = map_mux_frame(&frame, &sink);
+        assert_eq!(mapped.events.len(), 1);
+        match &mapped.events[0] {
+            ClientEvent::UsageUpdated { usage } => {
+                assert_eq!(usage.scope, UsageEventScope::SessionTotal);
+                assert_eq!(usage.tokens.input_tokens, Some(320_284));
+                assert_eq!(usage.tokens.output_tokens, Some(670));
+                assert_eq!(usage.tokens.cache_read_tokens, Some(319_808));
+                assert_eq!(usage.tokens.cache_write_tokens, Some(0));
+            }
+            other => panic!("expected UsageUpdated, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn maps_projection_baseline_model_and_agent_preset() {
+        // dsh 0.1.2 restores the session's actual preset through the projection
+        // baseline, not through a resumed `session.create` response. Mapping
+        // only `modelSelection` previously made compaction-capable resumed
+        // sessions look preset-less.
+        let values = serde_json::json!({
+            "modelSelection": {
+                "next": { "provider": "custom_tencent", "model": "glm-5.3-ioa" }
+            },
+            "agentPreset": "standard",
+            "tokenUsage": {
+                "totals": {
+                    "uncachedInputTokens": 10,
+                    "outputTokens": 5,
+                    "cacheReadTokens": 0,
+                    "cacheWriteTokens": 0
+                }
+            }
+        });
+        let events = map_projection_values(&values);
+        assert!(events.iter().any(|event| matches!(
+            event,
+            ClientEvent::SessionConfigValueChanged { control_id, value_id, .. }
+                if control_id == "model"
+                    && value_id == "kodex-provider/custom_tencent/glm-5.3-ioa"
+        )));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            ClientEvent::SessionConfigValueChanged { control_id, value_id, .. }
+                if control_id == "agent_preset" && value_id == "standard"
+        )));
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, ClientEvent::UsageUpdated { .. }))
+        );
+    }
+
+    #[test]
     fn usage_chunk_folds_disjoint_cache_buckets_into_input() {
         // dsh's per-call `TokenUsage` is disjoint: `inputTokens` counts
         // uncached input only and the cached prefix lives in
@@ -2075,7 +2307,10 @@ mod tests {
         match &mapped.events[0] {
             ClientEvent::ContextCompactionStarted { message } => {
                 assert!(message.contains("正在压缩上下文"), "message={message}");
-                assert!(message.contains("cmp-1"), "message should name compaction id: {message}");
+                assert!(
+                    message.contains("cmp-1"),
+                    "message should name compaction id: {message}"
+                );
             }
             other => panic!("expected ContextCompactionStarted, got {other:?}"),
         }
@@ -2300,9 +2535,15 @@ mod tests {
         }));
         let mapped = map_mux_frame(&frame, &sink);
         match &mapped.events[0] {
-            ClientEvent::ToolCompleted { raw_output: Some(raw), .. } => {
+            ClientEvent::ToolCompleted {
+                raw_output: Some(raw),
+                ..
+            } => {
                 assert!(raw.contains("a.rs"), "path header missing: {raw}");
-                assert!(raw.contains("1 | fn main() {}"), "numbered line missing: {raw}");
+                assert!(
+                    raw.contains("1 | fn main() {}"),
+                    "numbered line missing: {raw}"
+                );
                 assert!(!raw.contains("\"lines\""), "must not be raw JSON: {raw}");
             }
             other => panic!("expected ToolCompleted with raw_output, got {other:?}"),
@@ -2389,15 +2630,66 @@ mod tests {
         for frame in &frames {
             events.extend(map_mux_frame(frame, &sink).events);
         }
-        // assistant message → tool started → tool completed → turn finished
+        // assistant message → (replayed tool/call is filtered — SQLite
+        // already holds the row; replaying ToolStarted would reset it to
+        // Running) → (replayed tool/result is filtered for the same reason)
+        // → turn finished
         assert!(
             matches!(&events[0], ClientEvent::MessageChunk { role: MessageRole::Assistant, content } if content == "Working on it")
         );
-        assert!(matches!(&events[1], ClientEvent::ToolStarted { id, .. } if id == "call-1"));
-        assert!(matches!(&events[2], ClientEvent::ToolCompleted { id, .. } if id == "call-1"));
-        assert!(matches!(&events[3], ClientEvent::TurnFinished { .. }));
+        assert!(matches!(&events[1], ClientEvent::TurnFinished { .. }));
         // last_seq ends at the final event so a re-baseline resumes past it.
         assert_eq!(sink.last_seq.load(std::sync::atomic::Ordering::Acquire), 4);
+    }
+
+    #[test]
+    fn replayed_tool_result_keeps_sqlite_terminal_state() {
+        // During history replay the tool row already exists in SQLite with its
+        // terminal state. The replayed `tool/result` must not re-emit
+        // `ToolCompleted`/`ToolFailed`, otherwise app-core `persist_event`
+        // overwrites the persisted row back to Running. Any diff previews are
+        // still forwarded so the card renders the patch surface.
+        let (sink, _rx) = test_sink();
+        sink.set_replaying(true);
+        let call = mux(serde_json::json!({
+            "type": "session/event",
+            "sessionId": "s-1",
+            "event": {
+                "type": "tool/call",
+                "seq": 2,
+                "time": 0.0,
+                "data": { "turn": 1, "step": 1, "callId": "call-1", "name": "bash", "arguments": "{\"command\":\"ls\"}" }
+            },
+            "view": { "for": "call", "view": { "card": "generic", "title": "bash" } }
+        }));
+        let _ = map_mux_frame(&call, &sink);
+
+        let result = mux(serde_json::json!({
+            "type": "session/event",
+            "sessionId": "s-1",
+            "event": {
+                "type": "tool/result",
+                "seq": 3,
+                "time": 0.0,
+                "data": {
+                    "turn": 1, "step": 1,
+                    "message": {
+                        "role": "user",
+                        "content": [{ "type": "tool-result", "toolCallId": "call-1", "content": [{ "type": "text", "text": "done" }] }]
+                    }
+                }
+            },
+            "view": { "for": "result", "view": { "card": "terminal", "output": "done", "exitCode": 0 } }
+        }));
+        let mapped = map_mux_frame(&result, &sink);
+        assert!(
+            mapped.events.iter().all(|e| !matches!(
+                e,
+                ClientEvent::ToolCompleted { .. } | ClientEvent::ToolFailed { .. }
+            )),
+            "replay must not emit terminal tool events, got {events:?}",
+            events = mapped.events,
+        );
     }
 
     #[test]

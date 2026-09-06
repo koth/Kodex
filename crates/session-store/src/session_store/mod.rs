@@ -637,6 +637,21 @@ impl SessionStore {
         }
     }
 
+    /// The workspace this session belongs to (the store is one global DB; the
+    /// column records the owning workspace). `None` when the session row is
+    /// missing; `Some("")` is possible for rows that predate the column.
+    pub fn get_session_workspace_root(&self, id: &str) -> Result<Option<String>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT workspace_root FROM sessions WHERE id = ?1")?;
+        let mut rows = stmt.query(params![id])?;
+        if let Some(row) = rows.next()? {
+            Ok(row.get::<_, Option<String>>(0)?)
+        } else {
+            Ok(None)
+        }
+    }
+
     pub fn get_session_model_mode(&self, id: &str) -> Result<Option<(String, Option<String>)>> {
         let mut stmt = self
             .conn

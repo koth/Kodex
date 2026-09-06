@@ -507,10 +507,7 @@ pub async fn settings_check_dsh_update() -> Result<DshVersionInfo, String> {
 pub async fn settings_list_dsh_presets() -> Result<Vec<workspace_model::DshPresetOption>, String> {
     let paths = app_core::AppPaths::resolve().map_err(|e| e.to_string())?;
     tokio::task::spawn_blocking(move || {
-        let endpoint = app_core::dsh_bringup::dsh_bringup().ensure_harness_endpoint(&paths)?;
-        let host = dsh_bridge::HarnessHostRegistry::new()
-            .acquire(endpoint)
-            .map_err(|e| e.to_string())?;
+        let host = app_core::dsh_bringup::dsh_bringup().ensure_harness_host(&paths)?;
         let client = host.client().clone();
         let value = host
             .runtime()

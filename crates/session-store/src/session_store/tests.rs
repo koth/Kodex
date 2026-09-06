@@ -175,6 +175,30 @@ fn test_archive_workspace_sessions_hides_only_that_workspace() {
 }
 
 #[test]
+fn test_get_session_workspace_root_reads_across_workspace_stores() {
+    // Regression for the remote-switch `session-conflict`: the database is
+    // global, so a store opened on workspace B must still report the owning
+    // workspace root of a session created in workspace A — the app-core
+    // resume path uses this to rebuild the session with its OWN cwd.
+    let dir = tempfile::tempdir().unwrap();
+    let app_data = dir.path().join("home").join(".kodex");
+    let workspace_a = dir.path().join("a");
+    let workspace_b = dir.path().join("b");
+    std::fs::create_dir_all(&workspace_a).unwrap();
+    std::fs::create_dir_all(&workspace_b).unwrap();
+
+    let store_a = SessionStore::open(&app_data, &workspace_a).unwrap();
+    store_a.create_session("a1", "gpt-4").unwrap();
+
+    let store_b = SessionStore::open(&app_data, &workspace_b).unwrap();
+    let root = store_b.get_session_workspace_root("a1").unwrap();
+    assert_eq!(root.as_deref(), Some(store_a.workspace_root()));
+
+    // Unknown session ids yield None, not an error.
+    assert_eq!(store_b.get_session_workspace_root("nope").unwrap(), None);
+}
+
+#[test]
 fn test_update_session_title() {
     let dir = tempfile::tempdir().unwrap();
     let store = SessionStore::open(dir.path(), dir.path()).unwrap();

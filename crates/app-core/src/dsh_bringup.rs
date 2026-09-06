@@ -81,6 +81,15 @@ impl DshBringup {
         &self.registry
     }
 
+    /// Return the managed harness host, reusing the same authenticated
+    /// client/mux as sessions. Creates it only when bring-up succeeds.
+    pub fn ensure_harness_host(&self, paths: &AppPaths) -> Result<Arc<HarnessHost>, String> {
+        let endpoint = self.ensure_harness_endpoint(paths)?;
+        self.registry
+            .acquire(endpoint)
+            .map_err(|e| format!("failed to connect dsh harness host: {e}"))
+    }
+
     /// Ensure a `dsh web` process is running and return its loopback endpoint.
     ///
     /// On first call: write `settings.yaml`, spawn `dsh web --port 0`, wait for

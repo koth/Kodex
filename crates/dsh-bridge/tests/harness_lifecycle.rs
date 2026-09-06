@@ -67,6 +67,24 @@ async fn lifecycle_hydrate_and_set_model() {
     }
     assert!(hydrated, "config never hydrated");
 
+    let calls = mock.calls();
+    assert!(
+        calls.iter().any(|(method, _)| method == "session/create"),
+        "Typert session.create must be called: {calls:?}"
+    );
+    assert!(
+        calls
+            .iter()
+            .any(|(method, _)| method == "session/modelCatalog"),
+        "Typert modelCatalog must be called: {calls:?}"
+    );
+    assert!(
+        calls
+            .iter()
+            .any(|(method, _)| method == "agentPresets/list"),
+        "Typert agentPresets list must be called: {calls:?}"
+    );
+
     // 2. SetModel: must return refreshed config, not Interrupted.
     let (model_reply_tx, model_reply_rx) = mpsc::channel();
     command_tx
@@ -100,7 +118,7 @@ async fn lifecycle_hydrate_and_set_model() {
     let calls = mock.calls();
     let select_model_calls: Vec<_> = calls
         .iter()
-        .filter(|(m, _)| m == "session.selectModel")
+        .filter(|(m, _)| m == "session/selectModel")
         .collect();
     assert!(
         !select_model_calls.is_empty(),
@@ -219,10 +237,7 @@ async fn lifecycle_hydrate_includes_preset_mode_control_and_set_mode() {
     let mode_control = mode_control.expect("no Mode control published");
     assert_eq!(mode_control.current_value_id, "code");
     assert!(
-        mode_control
-            .choices
-            .iter()
-            .any(|c| c.id == "standard"),
+        mode_control.choices.iter().any(|c| c.id == "standard"),
         "preset choices missing `standard`: {:?}",
         mode_control.choices
     );
@@ -322,11 +337,23 @@ fn fork_history_events() -> Vec<serde_json::Value> {
     use common::history_event;
     vec![
         history_event(1, "turn/start", serde_json::json!({ "turn": 1 })),
-        history_event(10, "turn/end", serde_json::json!({ "turn": 1, "reason": { "kind": "completed" } })),
+        history_event(
+            10,
+            "turn/end",
+            serde_json::json!({ "turn": 1, "reason": { "kind": "completed" } }),
+        ),
         history_event(11, "turn/start", serde_json::json!({ "turn": 2 })),
-        history_event(20, "turn/end", serde_json::json!({ "turn": 2, "reason": { "kind": "completed" } })),
+        history_event(
+            20,
+            "turn/end",
+            serde_json::json!({ "turn": 2, "reason": { "kind": "completed" } }),
+        ),
         history_event(21, "turn/start", serde_json::json!({ "turn": 3 })),
-        history_event(30, "turn/end", serde_json::json!({ "turn": 3, "reason": { "kind": "completed" } })),
+        history_event(
+            30,
+            "turn/end",
+            serde_json::json!({ "turn": 3, "reason": { "kind": "completed" } }),
+        ),
         history_event(
             31,
             "compaction/start",
@@ -486,13 +513,25 @@ fn fork_history_with_injected_turn() -> Vec<serde_json::Value> {
     vec![
         history_event(1, "turn/start", serde_json::json!({ "turn": 1 })),
         history_event(5, "user/message", prompt_data("turn one question")),
-        history_event(10, "turn/end", serde_json::json!({ "turn": 1, "reason": { "kind": "completed" } })),
+        history_event(
+            10,
+            "turn/end",
+            serde_json::json!({ "turn": 1, "reason": { "kind": "completed" } }),
+        ),
         history_event(11, "turn/start", serde_json::json!({ "turn": 2 })),
         history_event(15, "user/message", injected_data),
-        history_event(20, "turn/end", serde_json::json!({ "turn": 2, "reason": { "kind": "completed" } })),
+        history_event(
+            20,
+            "turn/end",
+            serde_json::json!({ "turn": 2, "reason": { "kind": "completed" } }),
+        ),
         history_event(21, "turn/start", serde_json::json!({ "turn": 3 })),
         history_event(25, "user/message", prompt_data("turn two question")),
-        history_event(30, "turn/end", serde_json::json!({ "turn": 3, "reason": { "kind": "completed" } })),
+        history_event(
+            30,
+            "turn/end",
+            serde_json::json!({ "turn": 3, "reason": { "kind": "completed" } }),
+        ),
     ]
 }
 

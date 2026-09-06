@@ -146,6 +146,13 @@ impl SessionSink {
         }
     }
 
+    /// Receiver-less sink for mapping projection baselines, where the caller
+    /// only inspects the returned client events and never sends them.
+    pub fn new_for_projection_mapping() -> Self {
+        let (tx, _rx) = mpsc::channel();
+        Self::new(tx, PermissionBroker::default())
+    }
+
     pub fn set_replaying(&self, active: bool) {
         self.replaying.store(active, Ordering::Release);
     }
@@ -539,9 +546,9 @@ impl HarnessHost {
         // version. Fail fast with a diagnostic instead of hanging on SSE.
         let probed = host.clone();
         host.runtime.spawn(async move {
-            match probed.client.host_describe(uuid::Uuid::new_v4().to_string()).await {
-                Ok(value) => {
-                    let version = value.version.clone();
+            match probed.client.probe(uuid::Uuid::new_v4().to_string()).await {
+                Ok(()) => {
+                    let version = "0.1.2-remote".to_string();
                     if let Ok(mut guard) = probed.version.lock() {
                         *guard = Some(version.clone());
                     }
@@ -557,13 +564,10 @@ impl HarnessHost {
                 }
             }
         });
-        // Start the SSE read loops on the host's own runtime.
+        // Start the single remote-event read loop on the host's own runtime.
         let host_for_mux = host.clone();
         host.runtime
             .spawn(async move { host_for_mux.run_mux_loop().await });
-        let host_for_host = host.clone();
-        host.runtime
-            .spawn(async move { host_for_host.run_host_loop().await });
         Ok(host)
     }
 
@@ -637,41 +641,98 @@ impl HarnessHost {
         }
     }
 
-    /// Host SSE read loop. Reconnects with backoff; routes per-session frames
-    /// and honors `host/session-removed` (marks the sink removed so re-baseline
-    /// skips it). Host-global frames are ignored in v1.
-    async fn run_host_loop(self: Arc<Self>) {
-        loop {
-            tokio::select! {
-                _ = self.stop.notified() => return,
-                result = self.client.open_host() => {
-                    let mut stream = match result {
-                        Ok(stream) => stream,
-                        Err(err) => {
-                            tracing::warn!(target: "dsh-bridge::host::host", error = %err, "host stream open failed; backing off");
-                            if !self.backoff_or_fail().await { return; }
-                            continue;
-                        }
-                    };
-                    loop {
-                        tokio::select! {
-                            _ = self.stop.notified() => return,
-                            frame = stream.next() => {
-                                let Some(req) = frame else { break; };
-                                self.dispatch_host(&req);
-                            }
-                        }
-                    }
-                    tracing::debug!(target: "dsh-bridge::host::host", "host stream ended; reconnecting");
-                }
-            }
-        }
-    }
-
     /// Dispatch one mux `ServerRequest`: parse the payload as a `MuxFrame`,
     /// demux by `sessionId`, map to `ClientEvent`(s), send to the matched sink.
     /// Unmatched/unknown frames are dropped with a debug log.
     fn dispatch_mux(&self, req: &ServerRequest) {
+        if req.method == "remote/event" {
+            let Some(event) = req.payload.get("event").and_then(Value::as_str) else {
+                return;
+            };
+            match event {
+                "api-session/status" => {
+                    if let (Some(session_id), Some(running)) = (
+                        req.payload
+                            .get("args")
+                            .and_then(|args| args.get(0))
+                            .and_then(Value::as_str),
+                        req.payload
+                            .get("args")
+                            .and_then(|args| args.get(1))
+                            .and_then(Value::as_bool),
+                    ) {
+                        let frame = serde_json::json!({
+                            "type": "host/session-status",
+                            "sessionId": session_id,
+                            "running": running
+                        });
+                        if let Ok(frame) = serde_json::from_value::<HostFrame>(frame) {
+                            self.dispatch_host_frame(frame);
+                        }
+                    }
+                }
+                "api-session/removed" => {
+                    if let Some(session_id) = req
+                        .payload
+                        .get("args")
+                        .and_then(|args| args.get(0))
+                        .and_then(Value::as_str)
+                    {
+                        let frame = serde_json::json!({
+                            "type": "host/session-removed",
+                            "sessionId": session_id
+                        });
+                        if let Ok(frame) = serde_json::from_value::<HostFrame>(frame) {
+                            self.dispatch_host_frame(frame);
+                        }
+                    }
+                }
+                "approval/request" => {
+                    if let Some(session_id) = req.payload.get("agentId").and_then(Value::as_str) {
+                        let request = req.payload.get("request").cloned().unwrap_or(Value::Null);
+                        let frame = serde_json::json!({
+                            "type": "approval/requested",
+                            "sessionId": session_id,
+                            "approvalId": request
+                                .get("approvalId")
+                                .or_else(|| request.get("id")),
+                            "toolName": request.get("toolName"),
+                            "callId": request.get("callId"),
+                            "reason": request.get("reason")
+                        });
+                        if let Ok(frame) = serde_json::from_value(frame) {
+                            self.dispatch_mux_frame(frame, req.rpcId.clone());
+                        }
+                    }
+                }
+                "user-questions/request" => {
+                    if let Some(session_id) = req.payload.get("agentId").and_then(Value::as_str) {
+                        let request = req.payload.get("request").cloned().unwrap_or(Value::Null);
+                        let frame = serde_json::json!({
+                            "type": "question/requested",
+                            "sessionId": session_id,
+                            "questions": request.get("questions")
+                        });
+                        if let Ok(frame) = serde_json::from_value(frame) {
+                            self.dispatch_mux_frame(frame, req.rpcId.clone());
+                        }
+                    }
+                }
+                _ => {}
+            }
+            if matches!(event, "session/event" | "session/subscribed") {
+                if let Some(frame) = req
+                    .payload
+                    .get("args")
+                    .and_then(Value::as_array)
+                    .and_then(|args| args.first())
+                    .and_then(|value| serde_json::from_value::<MuxFrame>(value.clone()).ok())
+                {
+                    self.dispatch_mux_frame(frame, req.rpcId.clone());
+                }
+            }
+            return;
+        }
         let frame: MuxFrame = match serde_json::from_value(req.payload.clone()) {
             Ok(f) => f,
             Err(err) => {
@@ -679,6 +740,26 @@ impl HarnessHost {
                 return;
             }
         };
+        self.dispatch_mux_frame(frame, req.rpcId.clone());
+    }
+
+    fn dispatch_host_frame(&self, frame: HostFrame) {
+        if let HostFrame::HostSessionRemoved { session_id } = &frame {
+            if let Some(sink) = self.router.get(session_id) {
+                sink.mark_removed();
+            }
+        }
+        let mapped = crate::mapping::map_host_frame(&frame);
+        for event in mapped.events {
+            if let Some(session_id) = frame.session_id() {
+                if let Some(sink) = self.router.get(&session_id) {
+                    sink.send(event);
+                }
+            }
+        }
+    }
+
+    fn dispatch_mux_frame(&self, frame: MuxFrame, rpc_id: RpcId) {
         // Attach question rpcId: question/requested frames carry the batch's
         // stable rpcId on the ServerRequest envelope; record it on the sink so
         // the respond path can echo it.
@@ -690,7 +771,7 @@ impl HarnessHost {
         {
             if let Some(sink) = self.router.get(session_id) {
                 if let Some(first) = questions.first() {
-                    sink.attach_question_rpc_id(first.id.clone(), req.rpcId.clone());
+                    sink.attach_question_rpc_id(first.id.clone(), rpc_id);
                 }
             }
         }

@@ -102,6 +102,132 @@ fn retry_user_message_updates_failed_prompt_and_removes_failure_artifacts() {
     app.session.shutdown();
 }
 
+/// A tool whose terminal event never arrived (or whose `ToolStarted` was
+/// re-delivered by a dsh follow-stream re-baseline) must not stay Running
+/// once the session is fully idle — the idle poll finalizes it and persists
+/// the terminal state so the card stops rendering "运行中".
+#[test]
+fn stale_running_tool_is_finalized_when_session_goes_idle() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = test_app(&dir);
+    wait_for_control(&mut app, SessionConfigCategory::Model);
+
+    // Simulate a completed turn where one tool's terminal event was lost.
+    app.apply_event_with_dirty_tracking(&ClientEvent::ToolStarted {
+        id: "call-stale".into(),
+        parent_id: None,
+        name: "bash".into(),
+        kind: "execute".into(),
+        summary: "ls".into(),
+        is_subagent: false,
+        raw_input: None,
+    });
+    app.apply_event_with_dirty_tracking(&ClientEvent::TurnFinished {
+        stop_reason: "end_turn".into(),
+        detail: None,
+    });
+    assert_eq!(app.ui.session.status, SessionStatus::Idle);
+
+    // A late `tool/call` re-delivery (dsh follow-stream re-baseline) or a
+    // partial `tool_call_update` resurrects the card to Running without a
+    // terminal event. Use ToolStarted here: it exercises the same regression
+    // path and the reducer's duplicate guard must not block this resurrection
+    // for an Interrupted row (the idle sweep below is the real fix).
+    // Bypass the reducer's duplicate guard (which correctly blocks this
+    // resurrection for a Succeeded row) to simulate the post-resume SQLite
+    // state: the row is Running because its terminal event never persisted.
+    {
+        let tool = app
+            .ui
+            .tools
+            .iter_mut()
+            .find(|tool| tool.call_id == "call-stale")
+            .expect("tool row must exist");
+        tool.status = ToolStatus::Running;
+    }
+
+    // Next idle poll finalizes the stale row.
+    app.poll_prompt_progress();
+
+    let tool = app
+        .ui
+        .tools
+        .iter()
+        .find(|tool| tool.call_id == "call-stale")
+        .expect("tool row must exist");
+    assert_eq!(
+        tool.status,
+        ToolStatus::Interrupted,
+        "idle session must finalize a stale running tool"
+    );
+    app.session.shutdown();
+}
+
+/// After a resume, an ACP `session/load` replayed `ToolCallUpdate` with
+/// status Completed must still be applied (it is kept for codex sessions) so
+/// the persisted tool row is not left stuck in Running.
+#[test]
+fn resumed_codex_session_applies_replayed_tool_completed() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = test_app(&dir);
+    wait_for_control(&mut app, SessionConfigCategory::Model);
+
+    // Simulate resume: skip_replay is armed, the tool row already exists in
+    // the UI snapshot with a terminal state (persisted from the original run).
+    app.skip_replay = true;
+    let call_id = "call-replayed".to_string();
+    let tool_id = uuid::Uuid::new_v4();
+    app.ui.tools.push(ToolInvocation {
+        id: tool_id,
+        call_id: call_id.clone(),
+        parent_call_id: None,
+        name: "bash".into(),
+        kind: "execute".into(),
+        summary: "ls".into(),
+        status: ToolStatus::Succeeded,
+        is_subagent: false,
+        detail_text: String::new(),
+        logs: Vec::new(),
+        diff_paths: Vec::new(),
+        diff_previews: Vec::new(),
+        raw_input: None,
+        raw_output: None,
+        terminal_output: None,
+        error: None,
+        permission_options: Vec::new(),
+        permission_input: None,
+        permission_decision: None,
+        can_stop: false,
+        stop_kind: None,
+        stop_status: None,
+    });
+    app.ui.timeline.push(TimelineItem::Tool(tool_id));
+
+    // skip_replay keeps the event (codex path) and applies it without
+    // resetting the persisted terminal state.
+    app.apply_event_and_restore_model(ClientEvent::ToolCompleted {
+        id: call_id.clone(),
+        name: Some("bash".into()),
+        outcome: "done".into(),
+        raw_output: None,
+        terminal_output: None,
+    });
+
+    let tool = app
+        .ui
+        .tools
+        .iter()
+        .find(|tool| tool.call_id == call_id)
+        .expect("tool row must exist");
+    assert_eq!(
+        tool.status,
+        ToolStatus::Succeeded,
+        "replayed completion must not reset the persisted tool state"
+    );
+    app.session.shutdown();
+}
+
+
 #[test]
 fn retry_user_message_is_rejected_after_assistant_started() {
     let dir = tempfile::tempdir().unwrap();

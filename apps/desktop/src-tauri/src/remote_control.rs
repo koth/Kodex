@@ -34,10 +34,14 @@ impl RemoteControl for DesktopRemoteControl {
 
     fn create_session(
         &self,
-        _workspace_root: Option<String>,
+        workspace_root: Option<String>,
         agent: Option<AgentCliId>,
     ) -> impl std::future::Future<Output = Result<String, String>> + Send {
-        let result = self.app.state::<AppState>().with_app(|app| {
+        // Honor the phone-supplied workspace root: session creation must land
+        // in the workspace the user picked on the phone, not whichever
+        // workspace happens to be active on the desktop (mirrors the local
+        // `session_create` command's `with_workspace_app` routing).
+        let result = self.app.state::<AppState>().with_workspace_app(workspace_root, |app| {
             app.session_create(agent, None)?;
             Ok(app.ui.session.id.to_string())
         });
@@ -47,12 +51,18 @@ impl RemoteControl for DesktopRemoteControl {
     fn switch_session(
         &self,
         session_id: String,
-        _workspace_root: Option<String>,
+        workspace_root: Option<String>,
     ) -> impl std::future::Future<Output = Result<(), String>> + Send {
+        // Route through the session's OWN workspace: resuming a session
+        // against the currently-active workspace makes the dsh harness
+        // reject the resume with `session-conflict` (the persisted session's
+        // cwd differs from the requested one). The phone sends the root from
+        // the `ListSessions` grouping; the local `session_switch` command
+        // does the same via `with_workspace_app`.
         let result = self
             .app
             .state::<AppState>()
-            .with_app(|app| app.session_switch(&session_id));
+            .with_workspace_app(workspace_root, |app| app.session_switch(&session_id));
         async move { result }
     }
 

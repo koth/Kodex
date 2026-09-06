@@ -301,8 +301,9 @@ pub async fn spawn_dsh_web(config: SpawnDshWebConfig) -> anyhow::Result<(String,
     } else {
         Command::new(&dsh)
     };
-    // `--no-open`: dsh web would otherwise open the default browser; Kodex
-    // connects to the discovered endpoint itself.
+    // `--no-open` suppresses the default-browser handoff. dsh 0.1.2 prints
+    // an authenticated readiness URL containing the one-time launch token;
+    // HttpClient exchanges that token for its shared auth cookie.
     spawn_with_args(cmd, &dsh, &["web", "--port", "0", "--no-open"], config).await
 }
 
@@ -657,7 +658,9 @@ fn is_script_file(_path: &std::path::Path) -> bool {
 /// - npm `.cmd`: the entry `.js` path is spelled out in the shim text.
 /// - volta `.cmd`: `volta run <name>`, resolved via Volta's package layout.
 #[cfg(windows)]
-fn resolve_dsh_direct_command(dsh: &std::path::Path) -> Option<(std::path::PathBuf, std::path::PathBuf)> {
+fn resolve_dsh_direct_command(
+    dsh: &std::path::Path,
+) -> Option<(std::path::PathBuf, std::path::PathBuf)> {
     if !is_windows_batch_script(dsh) {
         return None;
     }
@@ -761,7 +764,10 @@ fn resolve_volta_package_entry(name: &str) -> Option<std::path::PathBuf> {
 
 /// Read `package.json` and return the absolute path of the `bin.<name>` entry.
 #[cfg(windows)]
-fn bin_entry_from_package_json(pkg_json: &std::path::Path, name: &str) -> Option<std::path::PathBuf> {
+fn bin_entry_from_package_json(
+    pkg_json: &std::path::Path,
+    name: &str,
+) -> Option<std::path::PathBuf> {
     let raw = std::fs::read_to_string(pkg_json).ok()?;
     let value: serde_json::Value = serde_json::from_str(&raw).ok()?;
     let entry = match value.get("bin")? {

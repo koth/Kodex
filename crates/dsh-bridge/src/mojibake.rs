@@ -99,7 +99,9 @@ fn repair_with_threshold(text: &str, min_hits: usize) -> (String, bool) {
         if run.is_empty() {
             return;
         }
-        if signature_hits(run) >= min_hits && let Some(decoded) = try_decode_run(run) {
+        if signature_hits(run) >= min_hits
+            && let Some(decoded) = try_decode_run(run)
+        {
             tracing::debug!(
                 target: "dsh-bridge::mojibake",
                 run_chars = run.len(),
@@ -308,7 +310,10 @@ mod tests {
     #[test]
     fn repairs_only_the_corrupted_span_in_mixed_text() {
         // Real sample from dsh session 4645b746: clean prefix, corrupted tail.
-        let mixed = format!("正在进行修改。让我先从 `process.rs` {}", mangle("进行更改。"));
+        let mixed = format!(
+            "正在进行修改。让我先从 `process.rs` {}",
+            mangle("进行更改。")
+        );
         assert_eq!(
             repair_mojibake(&mixed),
             "正在进行修改。让我先从 `process.rs` 进行更改。"

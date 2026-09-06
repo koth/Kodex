@@ -66,8 +66,16 @@ pub fn run_harness_session(
     } else {
         config.agent_preset.clone().filter(|p| !p.is_empty())
     };
+    // dsh compares the resume `cwd` against the persisted identity with a
+    // strict string match. Kodex's session-store normalizes workspace roots
+    // to lowercase drive + forward slashes (e.g. `d:/work/admesh`), but the
+    // harness persisted the verbatim path at creation (`D:\work\admesh`), so
+    // a resume carrying the normalized form is rejected with
+    // `session/conflict`. Re-canonicalize before sending so the wire form
+    // matches the harness's stored identity on Windows.
+    let harness_cwd = canonicalize_harness_cwd(&config.workspace_root);
     let create_payload = SessionCreatePayload {
-        cwd: Some(config.workspace_root.clone()),
+        cwd: Some(harness_cwd.clone()),
         session_id: config.resume_session_id.clone().filter(|id| !id.is_empty()),
         agent_preset,
         ..Default::default()
@@ -100,15 +108,41 @@ pub fn run_harness_session(
     sink.set_inflight_flag(inflight.clone());
     host.router().register(session_id.clone(), sink.clone());
 
+    // dsh 0.1.2 delivers session content events (assistant chunks, tool
+    // calls, …) on a per-session `session/follow` journal stream — not on
+    // the shared `$events` mux. Open that stream here and forward its frames
+    // through the mapping layer so the UI actually renders the turn.
+    {
+        let follow_client = client.clone();
+        let follow_sink = sink.clone();
+        let follow_session_id = session_id.clone();
+        let follow_shutdown = shutdown_signal.clone();
+        host.runtime().spawn(async move {
+            run_session_follow(
+                follow_client,
+                follow_sink,
+                follow_session_id,
+                follow_shutdown,
+            )
+            .await;
+        });
+    }
+
     // If resuming, replay history before the live stream delivers events. The
     // resumed dsh session already carries the full model context; this replay
-    // only rebuilds the UI transcript.
+    // only rebuilds the UI transcript. The page response also carries the
+    // durable model selection — capture it so the Model control restores the
+    // session's actual provider+model instead of the catalog default.
+    let mut restored_model_selection: Option<(String, String)> = None;
     if let Some(resume_id) = config.resume_session_id.clone()
         && !resume_id.is_empty()
     {
-        let _ = host
+        if let Ok(selection) = host
             .runtime()
-            .block_on(replay_history(&client, &resume_id, &sink));
+            .block_on(replay_history(&client, &resume_id, &sink))
+        {
+            restored_model_selection = selection;
+        }
     }
 
     // Emit SessionStarted so the reducer flips to the running state. The dsh
@@ -159,6 +193,7 @@ pub fn run_harness_session(
         &host,
         &session_id,
         session_preset.as_deref(),
+        restored_model_selection.as_ref(),
         &tx_events,
     );
     tracing::info!(
@@ -167,14 +202,15 @@ pub fn run_harness_session(
         session_id = %session_id,
         "session.models + agentPreset.list published",
     );
-    // Publish the `/compact` slash command for sessions whose preset composes
-    // the compaction seam (`standard`). The harness publishes no ACP
+    // Publish the `/compact` slash command. The harness publishes no ACP
     // `available_commands_update`, so the bridge synthesizes the one command
     // kodex executes on the user's behalf: the composer renders it in the "/"
     // menu, and sending it routes to the manual-compaction path in app-core
-    // (`ForceCompact` → `commands/execute`). `minimal` sessions have neither
-    // the command nor auto-compaction, so they get no entry.
-    if session_preset.as_deref() == Some("standard") {
+    // (`ForceCompact` → `commands/execute`). dsh 0.1.2 can omit `agentPreset`
+    // on resume and custom presets may compose compaction, so only the
+    // explicitly tool-less `minimal` preset is excluded; if the command is
+    // absent, `commands/execute` reports `undefined` and the UI surfaces it.
+    if compact_command_should_be_published(session_preset.as_deref()) {
         let _ = tx_events.send(ClientEvent::AvailableCommandsUpdated {
             commands: compact_slash_commands(),
         });
@@ -237,15 +273,18 @@ pub fn run_harness_session(
                 } else {
                     PromptMode::Queue
                 };
-                let parts: Vec<PromptContentPart> =
-                    prompt.into_iter().map(|p| prompt_part_to_wire(p, &workspace_root)).collect();
+                let parts: Vec<PromptContentPart> = prompt
+                    .into_iter()
+                    .map(|p| prompt_part_to_wire(p, &workspace_root))
+                    .collect();
+                let rpc_id = Uuid::new_v4().to_string();
                 let payload = SessionPromptPayload {
+                    request_id: rpc_id.clone(),
                     session_id: session_id.clone(),
                     mode,
                     content: parts,
                     client_time_zone: Some(local_timezone()),
                 };
-                let rpc_id = Uuid::new_v4().to_string();
                 let prompt_start = Instant::now();
                 let result = host
                     .runtime()
@@ -331,9 +370,7 @@ pub fn run_harness_session(
                 let send_result = send_result.and_then(|receipt| {
                     if !receipt.accepted() {
                         let reason = match &receipt {
-                            crate::rpc_types::RpcReceipt::Rejected { reason, .. } => {
-                                reason.clone()
-                            }
+                            crate::rpc_types::RpcReceipt::Rejected { reason, .. } => reason.clone(),
                             _ => "rejected".to_string(),
                         };
                         tracing::warn!(
@@ -407,6 +444,7 @@ pub fn run_harness_session(
                             &host,
                             &session_id,
                             session_preset.as_deref(),
+                            None,
                             &mut refreshed,
                         );
                         refreshed
@@ -518,9 +556,10 @@ pub fn run_harness_session(
                         user_message_occurrence.max(1),
                         at_user_turn,
                     )) {
-                        Ok(target_seq) => host
-                            .runtime()
-                            .block_on(fork_at_seq(&client, &session_id, target_seq)),
+                        Ok(target_seq) => {
+                            host.runtime()
+                                .block_on(fork_at_seq(&client, &session_id, target_seq))
+                        }
                         Err(bridge_error) => {
                             tracing::warn!(
                                 target: "dsh-bridge::session",
@@ -536,9 +575,11 @@ pub fn run_harness_session(
                             ))
                         }
                     },
-                    None => host
-                        .runtime()
-                        .block_on(fork_session_at_turn(&client, &session_id, at_user_turn)),
+                    None => host.runtime().block_on(fork_session_at_turn(
+                        &client,
+                        &session_id,
+                        at_user_turn,
+                    )),
                 };
                 match &result {
                     Ok(child) => tracing::info!(
@@ -593,6 +634,7 @@ pub fn run_harness_session(
                                 &host,
                                 &session_id,
                                 session_preset.as_deref(),
+                                None,
                                 &mut refreshed,
                             );
                             refreshed
@@ -625,10 +667,7 @@ pub fn run_harness_session(
                 };
                 let started = host
                     .runtime()
-                    .block_on(client.session_history(
-                        Uuid::new_v4().to_string(),
-                        &history_payload,
-                    ))
+                    .block_on(client.session_history(Uuid::new_v4().to_string(), &history_payload))
                     .map(|value| !value.events.is_empty())
                     .unwrap_or(false);
                 if started {
@@ -657,6 +696,7 @@ pub fn run_harness_session(
                             &host,
                             &session_id,
                             Some(value.agent_preset.as_str()),
+                            None,
                             &mut refreshed,
                         );
                         refreshed
@@ -698,13 +738,34 @@ pub fn run_harness_session(
     Ok(())
 }
 
+/// Canonicalize a workspace path for the harness wire form so a Windows
+/// resume `cwd` matches the path dsh persisted at session creation.
+/// dsh compares the resume `cwd` against its stored identity with a strict
+/// string match; kodex's session-store normalization (lowercase drive +
+/// forward slashes, e.g. `d:/work/admesh`) differs from the verbatim path
+/// dsh stored (`D:\work\admesh`), causing `session/conflict` on resume.
+///
+/// Mirrors Node's `path.resolve()` on Windows: `fs::canonicalize` produces
+/// `\\?\D:\work\admesh`; strip the `\\?\` prefix and leave the rest in the
+/// verbatim form dsh persisted.
+fn canonicalize_harness_cwd(workspace_root: &str) -> String {
+    let path = std::path::Path::new(workspace_root);
+    let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    let text = canonical.to_string_lossy().to_string();
+    // Rust's canonicalize on Windows yields a verbatim path with `\\?\`
+    // prefix; dsh (Node path.resolve) does not use that prefix, so strip it.
+    text.strip_prefix(r"\\?\")
+        .map(str::to_string)
+        .unwrap_or(text)
+}
+
 /// Replay a session's history through the mapping layer before the live stream
 /// delivers events. Used on resume/switch.
 async fn replay_history(
     client: &crate::transport::HttpClient,
     session_id: &SessionId,
     sink: &SessionSink,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<Option<(String, String)>> {
     let payload = crate::rpc_types::SessionHistoryPayload {
         session_id: session_id.to_string(),
         before_seq: None,
@@ -727,8 +788,41 @@ async fn replay_history(
                 .store(event.seq, std::sync::atomic::Ordering::Release);
         }
     }
+    // Resume into an empty transcript (e.g. a fork child) needs the replayed
+    // `turn/end` to land as the final `TurnFinished`, otherwise the session
+    // stays in the streaming state forever after the fork.
+    sink.send(ClientEvent::TurnFinished {
+        stop_reason: "end_turn".to_string(),
+        detail: None,
+    });
+    if let Some(values) = value
+        .projections
+        .as_ref()
+        .and_then(|projections| projections.get("values"))
+    {
+        for event in crate::mapping::map_projection_values(values) {
+            sink.send(event);
+        }
+    }
     sink.set_replaying(false);
-    Ok(())
+    // Extract the durable model selection so the caller can seed the Model
+    // control with the session's actual provider+model (not the catalog
+    // default). The `SessionConfigValueChanged` event was already sent above.
+    let selection = value
+        .projections
+        .as_ref()
+        .and_then(|projections| projections.get("values"))
+        .and_then(|values| values.get("modelSelection"))
+        .and_then(|selection| {
+            let active = selection
+                .get("next")
+                .or_else(|| selection.get("lastUsed"))
+                .filter(|candidate| candidate.is_object())?;
+            let provider = active.get("provider")?.as_str()?.to_string();
+            let model = active.get("model")?.as_str()?.to_string();
+            Some((provider, model))
+        });
+    Ok(selection)
 }
 
 /// Fork the harness session so the child inherits everything through the end
@@ -818,7 +912,8 @@ async fn find_prompt_turn_end_seq(
             .map_err(|error| anyhow::anyhow!("分叉会话失败：读取会话历史失败：{error}"))?;
         let mut oldest_seq: Option<u64> = None;
         for entry in &value.events {
-            let Ok(event) = serde_json::from_value::<crate::frame::SessionEvent>(entry.event.clone())
+            let Ok(event) =
+                serde_json::from_value::<crate::frame::SessionEvent>(entry.event.clone())
             else {
                 continue;
             };
@@ -863,9 +958,7 @@ async fn find_prompt_turn_end_seq(
 
     let mut matching_prompts: Vec<u64> = prompts
         .into_iter()
-        .filter(|(_, kind_is_user, first_text)| {
-            *kind_is_user && normalize(first_text) == wanted
-        })
+        .filter(|(_, kind_is_user, first_text)| *kind_is_user && normalize(first_text) == wanted)
         .map(|(seq, _, _)| seq)
         .collect();
     matching_prompts.sort_unstable();
@@ -873,9 +966,7 @@ async fn find_prompt_turn_end_seq(
         .get((occurrence.max(1) - 1) as usize)
         .copied()
         .ok_or_else(|| {
-            anyhow::anyhow!(
-                "分叉锚点未匹配：历史中找不到目标提示文本（第 {occurrence} 次出现）"
-            )
+            anyhow::anyhow!("分叉锚点未匹配：历史中找不到目标提示文本（第 {occurrence} 次出现）")
         })?;
     turn_ends.sort_unstable();
     turn_ends
@@ -923,7 +1014,8 @@ async fn find_completed_turn_end_seq(
         // collect and sort at the end.
         let mut oldest_seq: Option<u64> = None;
         for entry in &value.events {
-            let Ok(event) = serde_json::from_value::<crate::frame::SessionEvent>(entry.event.clone())
+            let Ok(event) =
+                serde_json::from_value::<crate::frame::SessionEvent>(entry.event.clone())
             else {
                 continue;
             };
@@ -951,16 +1043,14 @@ async fn find_completed_turn_end_seq(
         .get((at_user_turn - 1) as usize)
         .copied()
         .ok_or_else(|| {
-            anyhow::anyhow!(
-                "无法分叉：第 {at_user_turn} 轮尚未完成（或该消息所在轮次不存在）"
-            )
+            anyhow::anyhow!("无法分叉：第 {at_user_turn} 轮尚未完成（或该消息所在轮次不存在）")
         })
 }
 
 /// The slash commands kodex can execute on behalf of a harness session. The
 /// harness surfaces no ACP command list, so the bridge publishes the commands
-/// it can route itself; `standard` composes the compaction seam, whose
-/// `/compact` command runs over `commands/execute`.
+/// it can route itself; compaction-capable presets run `/compact` over
+/// `commands/execute`.
 fn compact_slash_commands() -> Vec<workspace_model::AvailableCommand> {
     vec![workspace_model::AvailableCommand {
         name: "compact".into(),
@@ -969,16 +1059,32 @@ fn compact_slash_commands() -> Vec<workspace_model::AvailableCommand> {
     }]
 }
 
+/// Manual compaction is available for every deployment preset that can compose
+/// the compaction seam. `minimal` explicitly omits compaction; other or absent
+/// preset ids must not disable the menu item because dsh 0.1.2 may not restore
+/// `agentPreset` before the composer is ready.
+fn compact_command_should_be_published(session_preset: Option<&str>) -> bool {
+    session_preset != Some("minimal")
+}
+
 /// Emit both config controls (Model + agent-preset Mode) in one update.
 fn emit_config_controls(
     client: &crate::transport::HttpClient,
     host: &crate::host::HarnessHost,
     session_id: &SessionId,
     current_preset: Option<&str>,
+    restored_model: Option<&(String, String)>,
     tx_events: &mpsc::Sender<ClientEvent>,
 ) {
     let mut events = Vec::new();
-    emit_model_control_into(client, host, session_id, current_preset, &mut events);
+    emit_model_control_into(
+        client,
+        host,
+        session_id,
+        current_preset,
+        restored_model,
+        &mut events,
+    );
     for event in events {
         let _ = tx_events.send(event);
     }
@@ -992,16 +1098,15 @@ fn emit_model_control_into(
     host: &crate::host::HarnessHost,
     session_id: &SessionId,
     current_preset: Option<&str>,
+    restored_model: Option<&(String, String)>,
     out: &mut Vec<ClientEvent>,
 ) {
-    let payload = crate::rpc_types::SessionModelsPayload {
-        session_id: session_id.to_string(),
-    };
+    let payload = crate::rpc_types::SessionModelsPayload { args: None };
     let model_control = match host
         .runtime()
         .block_on(client.session_models(Uuid::new_v4().to_string(), &payload))
     {
-        Ok(value) => model_control_from_models(&value),
+        Ok(value) => model_control_from_models(&value, restored_model),
         // No model catalog yet (e.g. no provider configured): fall through
         // with no Model control so the UI settles instead of spinning forever.
         Err(_) => None,
@@ -1068,9 +1173,7 @@ fn preset_control_from_list(
     Some(workspace_model::SessionConfigControl {
         id: "mode".to_string(),
         label: "Mode".to_string(),
-        description: Some(
-            "切换将开启新会话（dsh 预设仅在会话空白时可切换）".to_string(),
-        ),
+        description: Some("切换将开启新会话（dsh 预设仅在会话空白时可切换）".to_string()),
         category: workspace_model::SessionConfigCategory::Mode,
         // LegacyMode routes the change through `RuntimeCommand::SetMode`,
         // which this backend maps to `agentPreset.select`. (LocalMode would
@@ -1090,10 +1193,20 @@ fn preset_label(p: &crate::rpc_types::AgentPresetEntry) -> String {
 /// Translate the dsh `session.models` response into a Model `SessionConfigControl`.
 fn model_control_from_models(
     value: &serde_json::Value,
+    restored_model: Option<&(String, String)>,
 ) -> Option<workspace_model::SessionConfigControl> {
-    let current = value.get("current")?;
-    let current_provider = current.get("provider")?.as_str()?.to_string();
-    let current_model = current.get("model")?.as_str()?.to_string();
+    // The session's durable model selection (from the `modelSelection`
+    // projection) wins over the catalog default — a resumed session carries
+    // its own provider+model, not the deployment default.
+    let (current_provider, current_model) = match restored_model {
+        Some((provider, model)) => (provider.clone(), model.clone()),
+        None => {
+            let current = value.get("default")?;
+            let provider = current.get("provider")?.as_str()?.to_string();
+            let model = current.get("model")?.as_str()?.to_string();
+            (provider, model)
+        }
+    };
 
     let mut choices = Vec::new();
     let mut current_value_id = String::new();
@@ -1229,6 +1342,105 @@ fn local_timezone() -> String {
     std::env::var("TZ").unwrap_or_else(|_| "UTC".to_string())
 }
 
+/// Drive the per-session `session/follow` journal stream.
+///
+/// The dsh gateway routes session content events (assistant chunks, tool
+/// calls, turn lifecycle) through this per-session stream — the shared
+/// `$events` mux only carries host-level frames (`api-session/*`,
+/// `approval/*`, `user-questions/*`). Without this loop the UI never sees
+/// LLM replies.
+///
+/// The opening `snapshot` frame carries the durable projections (model
+/// selection) and historical records; both are replayed through the mapping
+/// layer. Subsequent `event` frames are mapped and forwarded live.
+async fn run_session_follow(
+    client: crate::transport::HttpClient,
+    sink: Arc<SessionSink>,
+    session_id: SessionId,
+    shutdown: ShutdownSignal,
+) {
+    loop {
+        if shutdown.is_requested() {
+            return;
+        }
+        let mut stream = match client.open_session_follow(&session_id).await {
+            Ok(stream) => stream,
+            Err(err) => {
+                tracing::warn!(
+                    target: "dsh-bridge::session::follow",
+                    session_id = %session_id,
+                    error = %err,
+                    "session follow open failed; retrying"
+                );
+                tokio::select! {
+                    _ = tokio::time::sleep(std::time::Duration::from_millis(500)) => {}
+                    _ = shutdown_wait(&shutdown) => return,
+                }
+                continue;
+            }
+        };
+        loop {
+            if shutdown.is_requested() {
+                return;
+            }
+            let Some(value) = stream.next_item().await else {
+                tracing::debug!(
+                    target: "dsh-bridge::session::follow",
+                    session_id = %session_id,
+                    "session follow stream ended; reconnecting"
+                );
+                break;
+            };
+            let (frames, projections) =
+                crate::transport::follow_item_to_frames(&session_id, &value);
+            // The snapshot's projections carry durable session metadata
+            // (model selection, agent preset, usage). Map the whole baseline
+            // so resumed sessions restore everything instead of only the
+            // model selection.
+            if let Some(projections) = &projections
+                && let Some(values) = projections.get("values")
+            {
+                for event in crate::mapping::map_projection_values(values) {
+                    sink.send(event);
+                }
+            }
+            for frame in frames {
+                if let crate::frame::MuxFrame::SessionEvent { event, view, .. } = &frame {
+                    // SSE re-baseline can re-deliver frames at or below the
+                    // last seen seq. Applying them again re-runs `tool/call`
+                    // → `ToolStarted`, resurrecting an already-completed card
+                    // to Running with no terminal event ever following.
+                    let last = sink.last_seq.load(std::sync::atomic::Ordering::Acquire);
+                    if event.seq <= last {
+                        continue;
+                    }
+                    let events = crate::mapping::map_session_event(event, view.as_ref(), &sink);
+                    for ev in events {
+                        sink.send(ev);
+                    }
+                    sink.last_seq
+                        .store(event.seq, std::sync::atomic::Ordering::Release);
+                }
+            }
+        }
+        // Backoff before reconnect.
+        tokio::select! {
+            _ = tokio::time::sleep(std::time::Duration::from_millis(500)) => {}
+            _ = shutdown_wait(&shutdown) => return,
+        }
+    }
+}
+
+/// `select!`-friendly wrapper around `ShutdownSignal` polling.
+async fn shutdown_wait(shutdown: &ShutdownSignal) {
+    loop {
+        if shutdown.is_requested() {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1352,11 +1564,141 @@ mod tests {
     }
 
     #[test]
-    fn compact_slash_command_is_published_for_the_standard_preset() {
+    fn compact_command_is_available_unless_minimal() {
+        assert!(compact_command_should_be_published(None));
+        assert!(compact_command_should_be_published(Some("standard")));
+        assert!(compact_command_should_be_published(Some(
+            "custom-with-compaction"
+        )));
+        assert!(!compact_command_should_be_published(Some("minimal")));
         let commands = compact_slash_commands();
         assert_eq!(commands.len(), 1);
         assert_eq!(commands[0].name, "compact");
         assert!(!commands[0].description.is_empty());
         assert!(commands[0].input_hint.is_none());
+    }
+
+    /// Windows: a workspace root normalized by kodex's session-store
+    /// (`d:/work/admesh`) must canonicalize back to the verbatim form dsh
+    /// persisted at creation (`D:\work\admesh`), otherwise resume fails with
+    /// `session/conflict`.
+    #[cfg(windows)]
+    #[test]
+    fn harness_cwd_canonicalizes_normalized_workspace_root() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("Some Project");
+        std::fs::create_dir_all(&root).unwrap();
+
+        // What session-store would have persisted.
+        let normalized = root
+            .to_string_lossy()
+            .replace('\\', "/")
+            .to_ascii_lowercase();
+        let harness_cwd = canonicalize_harness_cwd(&normalized);
+        // What dsh persisted at creation (Node path.resolve verbatim form).
+        let verbatim = root.canonicalize().unwrap();
+        let verbatim = verbatim.to_string_lossy().replace("\\\\?\\", "");
+        assert_eq!(harness_cwd, verbatim);
+        assert!(harness_cwd.contains("Some Project"));
+        assert!(!harness_cwd.starts_with("d:/"));
+    }
+
+    /// Non-Windows roots pass through canonicalized; missing paths fall back
+    /// to the input unchanged so a deleted workspace does not break resume.
+    #[test]
+    fn harness_cwd_missing_path_passes_through() {
+        let missing = "d:/work/definitely-not-a-real-path-12345";
+        assert_eq!(canonicalize_harness_cwd(missing), missing);
+    }
+
+    /// `run_session_follow` must not re-apply frames at or below the last seen
+    /// seq: an SSE re-baseline re-delivers the tail of the journal, and
+    /// re-running `tool/call` → `ToolStarted` would resurrect an
+    /// already-completed card to Running with no terminal event following.
+    #[test]
+    fn follow_frames_at_or_below_last_seq_are_dropped() {
+        use std::sync::mpsc;
+
+        let (tx, _rx) = mpsc::channel::<acp_core::ClientEvent>();
+        let sink = crate::host::SessionSink::new(tx, acp_core::PermissionBroker::default());
+        // Simulate "replay + live stream already advanced to seq 10".
+        sink.last_seq
+            .store(10, std::sync::atomic::Ordering::Release);
+
+        // A re-baselined `tool/call` at seq 5 must be dropped before mapping.
+        // The guard lives in run_session_follow's loop (not in mapping) because
+        // the history replay path must still see every seq.
+        let event = crate::frame::SessionEvent {
+            type_tag: "tool/call".into(),
+            seq: 5,
+            time: 0.0,
+            data: serde_json::json!({
+                "turn": 1, "step": 1,
+                "callId": "call-stale", "name": "bash", "arguments": "{\"command\":\"ls\"}"
+            }),
+            source_event_seqs: None,
+            surface_op: None,
+            ignorable: None,
+        };
+        let last = sink.last_seq.load(std::sync::atomic::Ordering::Acquire);
+        assert!(
+            event.seq <= last,
+            "frame at or below last seq must be skipped by the follow loop"
+        );
+    }
+
+    #[test]
+    fn model_control_from_models_uses_catalog_default() {
+        // The dsh `session.modelCatalog` response carries the deployment
+        // default under `default`; the Model control must render it even when
+        // no `restored_model` projection exists (new session).
+        let catalog = serde_json::json!({
+            "default": { "provider": "timiai", "model": "gpt-5.5" },
+            "routableProviders": ["timiai"],
+            "groups": [
+                {
+                    "id": "timiai",
+                    "name": "Timi AI",
+                    "models": [
+                        { "id": "gpt-5.5", "name": "GPT 5.5" },
+                        { "id": "gpt-5.4", "name": "GPT 5.4" }
+                    ]
+                }
+            ],
+            "failures": []
+        });
+        let control = model_control_from_models(&catalog, None)
+            .expect("Model control must be built from the catalog default");
+        assert_eq!(control.current_value_id, "kodex-provider/timiai/gpt-5.5");
+        assert_eq!(control.current_value_label, "gpt-5.5");
+        assert!(!control.choices.is_empty());
+    }
+
+    #[test]
+    fn model_control_from_models_prefers_restored_selection() {
+        // A resumed session's durable selection overrides the catalog default.
+        let catalog = serde_json::json!({
+            "default": { "provider": "deepseek", "model": "deepseek-v4-pro" },
+            "groups": [
+                {
+                    "id": "timiai",
+                    "name": "Timi AI",
+                    "models": [{ "id": "glm-5.3-ioa", "name": "GLM 5.3 IOA" }]
+                },
+                {
+                    "id": "deepseek",
+                    "name": "DeepSeek",
+                    "models": [{ "id": "deepseek-v4-pro", "name": "DeepSeek V4 Pro" }]
+                }
+            ]
+        });
+        let restored = ("timiai".to_string(), "glm-5.3-ioa".to_string());
+        let control = model_control_from_models(&catalog, Some(&restored))
+            .expect("Model control must be built from the restored selection");
+        assert_eq!(
+            control.current_value_id,
+            "kodex-provider/timiai/glm-5.3-ioa"
+        );
+        assert_eq!(control.current_value_label, "glm-5.3-ioa");
     }
 }

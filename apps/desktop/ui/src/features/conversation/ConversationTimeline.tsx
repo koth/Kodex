@@ -703,6 +703,39 @@ function retryableUserMessageIds(snapshot: UiSnapshot) {
   return retryableIds;
 }
 
+/** Minimum window size that keeps the last completed turn's user prompt and
+ *  final assistant reply visible. A long codex session can end with hundreds
+ *  of tool rows between two replies; a fixed 80-entry initial window then
+ *  starts mid-tool-run, hides both boundary messages, and every visible tool
+ *  collapses into the turn summary — leaving an apparently empty timeline.
+ */
+function minimumVisibleCountForLastTurn(
+  timeline: UiSnapshot["timeline"],
+  messages: UiSnapshot["messages"],
+) {
+  const messagesById = new Map(messages.map((message) => [message.id, message]));
+  let finalAssistantIndex = -1;
+  for (let index = timeline.length - 1; index >= 0; index -= 1) {
+    const item = timeline[index];
+    if (typeof item !== "object" || !("Message" in item)) continue;
+    const message = messagesById.get(item.Message);
+    if (message?.role === "Assistant" && message.body.trim().length > 0) {
+      finalAssistantIndex = index;
+      break;
+    }
+  }
+  if (finalAssistantIndex < 0) return 0;
+  for (let index = finalAssistantIndex - 1; index >= 0; index -= 1) {
+    const item = timeline[index];
+    if (typeof item !== "object" || !("Message" in item)) continue;
+    const message = messagesById.get(item.Message);
+    if (message?.role === "User" && !message.is_steer) {
+      return timeline.length - index;
+    }
+  }
+  return timeline.length - finalAssistantIndex;
+}
+
 function UserMessageText({ text }: { text: string }) {
   return <span className="msg-user-text">{normalizeUserMessageText(text)}</span>;
 }
@@ -830,6 +863,10 @@ function buildTimelineCollapseState({
 
     const itemsToCollapse = turnItems.filter((candidate) => {
       if (candidate.index === finalAssistant.index) return false;
+      // Never collapse assistant replies: the user needs to see the full
+      // reasoning chain when browsing a restored session. Only tools and
+      // other non-message items go into the turn summary.
+      if (candidate.kind === "assistant") return false;
       if (
         candidate.message &&
         turnChangeSetsByMessageId[candidate.message.id]?.files.length
@@ -1273,10 +1310,12 @@ export function ConversationTimeline({
     };
   }, []);
 
-  const effectiveVisibleCount =
+  const effectiveVisibleCount = Math.max(
     visibleSessionId.current === snapshot.session.id
       ? visibleCount
-      : INITIAL_TIMELINE_WINDOW;
+      : INITIAL_TIMELINE_WINDOW,
+    minimumVisibleCountForLastTurn(snapshot.timeline, snapshot.messages),
+  );
   const timelineStart = Math.max(0, snapshot.timeline.length - effectiveVisibleCount);
   const visibleTimeline = useMemo(
     () => snapshot.timeline.slice(timelineStart),

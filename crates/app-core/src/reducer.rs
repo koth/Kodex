@@ -94,6 +94,14 @@ pub(crate) fn apply_event(ui: &mut UiSnapshot, event: ClientEvent) {
             is_subagent,
             raw_input,
         } => {
+            // A duplicate `ToolStarted` for an already-finalized tool (dsh
+            // follow-stream re-baseline, ACP late `tool_call`) must not
+            // resurrect the card to Running with no terminal event following.
+            if let Some(existing) = ui.tools.iter().find(|tool| tool.call_id == id)
+                && matches!(existing.status, ToolStatus::Succeeded | ToolStatus::Failed)
+            {
+                return;
+            }
             let task_update_raw_input = if name == "TaskUpdate" {
                 raw_input.clone()
             } else {
@@ -344,6 +352,14 @@ pub(crate) fn apply_event(ui: &mut UiSnapshot, event: ClientEvent) {
             raw_output,
             terminal_output,
         } => {
+            // Idempotent terminal state: a duplicate or late ToolCompleted for
+            // an already-finalized tool (e.g. dsh follow-stream re-delivery)
+            // must not resurrect the row.
+            if let Some(existing) = ui.tools.iter().find(|tool| tool.call_id == id)
+                && matches!(existing.status, ToolStatus::Succeeded | ToolStatus::Failed)
+            {
+                return;
+            }
             let fallback_name = name.as_deref().unwrap_or("tool");
             let display_summary =
                 normalize_tool_summary_for_display(ui, &summarize_completion(&outcome));
@@ -373,6 +389,11 @@ pub(crate) fn apply_event(ui: &mut UiSnapshot, event: ClientEvent) {
             raw_output,
             terminal_output,
         } => {
+            if let Some(existing) = ui.tools.iter().find(|tool| tool.call_id == id)
+                && matches!(existing.status, ToolStatus::Succeeded | ToolStatus::Failed)
+            {
+                return;
+            }
             let fallback_name = name.as_deref().unwrap_or("tool");
             let tool = ensure_tool(ui, &id, None, fallback_name, "tool", false);
             if let Some(name) = name {
@@ -2397,6 +2418,87 @@ mod tests {
         );
         assert_eq!(tool.summary, "权限已通过，等待工具执行");
         assert_eq!(ui.session.status, SessionStatus::WaitingForTool);
+    }
+
+    #[test]
+    fn late_tool_completed_does_not_resurrect_finalized_tool() {
+        let mut ui = empty_ui();
+
+        apply_event(
+            &mut ui,
+            ClientEvent::ToolStarted {
+                id: "call-1".into(),
+                parent_id: None,
+                name: "bash".into(),
+                kind: "execute".into(),
+                summary: "ls".into(),
+                is_subagent: false,
+                raw_input: None,
+            },
+        );
+        assert_eq!(ui.tools[0].status, ToolStatus::Running);
+
+        apply_event(
+            &mut ui,
+            ClientEvent::TurnFinished {
+                stop_reason: "end_turn".into(),
+                detail: None,
+            },
+        );
+        assert_eq!(ui.tools[0].status, ToolStatus::Succeeded);
+
+        // ACP agents can deliver the tool completion in a session/update
+        // *after* the turn's StopReason. The late ToolCompleted must be a
+        // no-op for a tool already finalized by the turn end.
+        apply_event(
+            &mut ui,
+            ClientEvent::ToolCompleted {
+                id: "call-1".into(),
+                name: Some("bash".into()),
+                outcome: "done".into(),
+                raw_output: None,
+                terminal_output: None,
+            },
+        );
+        assert_eq!(ui.tools[0].status, ToolStatus::Succeeded);
+    }
+
+    #[test]
+    fn late_tool_failed_does_not_resurrect_finalized_tool() {
+        let mut ui = empty_ui();
+
+        apply_event(
+            &mut ui,
+            ClientEvent::ToolStarted {
+                id: "call-2".into(),
+                parent_id: None,
+                name: "bash".into(),
+                kind: "execute".into(),
+                summary: "ls".into(),
+                is_subagent: false,
+                raw_input: None,
+            },
+        );
+        apply_event(
+            &mut ui,
+            ClientEvent::TurnFinished {
+                stop_reason: "end_turn".into(),
+                detail: None,
+            },
+        );
+        assert_eq!(ui.tools[0].status, ToolStatus::Succeeded);
+
+        apply_event(
+            &mut ui,
+            ClientEvent::ToolFailed {
+                id: "call-2".into(),
+                name: Some("bash".into()),
+                error: "boom".into(),
+                raw_output: None,
+                terminal_output: None,
+            },
+        );
+        assert_eq!(ui.tools[0].status, ToolStatus::Succeeded);
     }
 
     #[test]

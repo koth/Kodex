@@ -422,6 +422,8 @@ impl Application {
             pending_image_degradation: None,
             history_total_count: restored_history_total_count,
             history_earliest_seq: restored_history_earliest_seq,
+            conversation_change_set_signature: 0,
+            conversation_change_set_turn_cache: HashMap::new(),
         })
     }
 
@@ -692,6 +694,8 @@ impl Application {
             pending_image_degradation: None,
             history_total_count: restored_history_total_count,
             history_earliest_seq: restored_history_earliest_seq,
+            conversation_change_set_signature: 0,
+            conversation_change_set_turn_cache: HashMap::new(),
         })
     }
 }

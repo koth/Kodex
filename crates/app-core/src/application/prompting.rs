@@ -86,14 +86,29 @@ impl Application {
         mut prompt: Vec<UserPromptContent>,
         existing_user_message_id: Option<uuid::Uuid>,
     ) -> anyhow::Result<PromptSendOutcome> {
-        // User is sending a new prompt or command — drain any buffered replay
-        // events from session/load before sending, so they don't mix with real
-        // responses. This must also cover the `/compact` command path below:
-        // its compaction lifecycle events arrive while the session stays Idle,
-        // and a still-active skip_replay would make the idle drain in
-        // `poll_prompt_progress` silently drop them (no notices at all).
+        // User is sending a new prompt or command — clear the replay-skip flag
+        // so the live turn's events are applied normally. Do NOT drain the
+        // buffered replay events here: for codex/ACP `session/load` startup
+        // notifications that would throw away the real `TurnFinished` the new
+        // prompt still needs to see; for dsh `session.history` replay that
+        // would re-apply already-persisted tools/messages into the UI. The
+        // in-flight skip_replay branch in `poll_prompt_progress` keeps the
+        // replay filtered until `TurnFinished`, which is the correct lifecycle.
+        //
         if self.skip_replay {
-            self.session.drain_events();
+            if crate::settings::is_deepseek_harness_command(&self.agent_command) {
+                // dsh `session.history` replay rebuilds the UI transcript from
+                // the same frames already persisted in SQLite; draining them
+                // into the live channel would re-apply tools/messages and
+                // overwrite the persisted terminal states.
+                self.session.drain_events();
+            }
+            // `/compact` needs skip_replay cleared immediately because its
+            // compaction lifecycle events arrive while the session stays Idle
+            // (no in-flight turn exists to consume the flag later). For codex
+            // the flag is cleared without draining so a still-flying ACP
+            // `session/load` `TurnFinished` can still terminate the in-flight
+            // prompt state instead of being silently discarded.
             self.skip_replay = false;
         }
 
@@ -520,6 +535,7 @@ impl Application {
         }
 
         let pending_retry_changed = self.retry_pending_tool_write_detections();
+        let stale_tools_finalized = self.finalize_stale_running_tools_when_idle();
 
         // Drain a completed background image degradation before doing anything
         // else: it produces the (degraded) prompt that this turn actually sends
@@ -534,13 +550,19 @@ impl Application {
         let Some(in_flight) = self.in_flight_prompt.as_mut() else {
             let events = self.session.collect_pending_events();
             if events.is_empty() {
-                if pending_retry_changed {
+                if pending_retry_changed || stale_tools_finalized {
                     self.bump_revision();
                 }
                 return;
             }
             if self.skip_replay {
                 self.session.update_session_id(&events);
+                // A resumed session must present Idle while replay is being
+                // filtered; any non-Idle status here is residue from an
+                // earlier replay window and would self-lock the UI.
+                if self.ui.session.status != SessionStatus::Idle {
+                    self.ui.session.status = SessionStatus::Idle;
+                }
                 // Replay events from session/load (or dsh history replay) are
                 // already represented in the SQLite-restored UI. Applying
                 // message/tool/turn events again would append duplicate history
@@ -563,6 +585,18 @@ impl Application {
                         | ClientEvent::PromptCapabilitiesUpdated { .. }
                         | ClientEvent::AvailableCommandsUpdated { .. }
                         | ClientEvent::SessionTitleUpdated { .. } => true,
+                        // Tool completion/failure can arrive after the turn
+                        // formally ends (the agent processes the tool result
+                        // asynchronously). Dropping them leaves the tool card
+                        // stuck in "running" — the UI never sees the terminal
+                        // state. Keep them only for codex/ACP sessions: the
+                        // dsh history replay re-delivers the same terminal
+                        // state already persisted in SQLite, and re-applying
+                        // it resets the persisted tool row to Running.
+                        ClientEvent::ToolCompleted { .. }
+                        | ClientEvent::ToolFailed { .. } => {
+                            !crate::settings::is_deepseek_harness_command(&self.agent_command)
+                        }
                         ClientEvent::UsageUpdated { usage } => {
                             usage.scope != UsageEventScope::TurnDelta
                         }
@@ -576,7 +610,11 @@ impl Application {
                 return;
             }
             let result = self.apply_idle_runtime_events_with_file_tracking(events);
-            if pending_retry_changed || result.ui_changed || result.had_file_changes {
+            if pending_retry_changed
+                || stale_tools_finalized
+                || result.ui_changed
+                || result.had_file_changes
+            {
                 self.bump_revision();
             }
             return;
@@ -651,9 +689,66 @@ impl Application {
             self.in_flight_prompt = None;
         }
 
-        if pending_retry_changed || ui_changed || had_file_changes {
+        if pending_retry_changed || stale_tools_finalized || ui_changed || had_file_changes {
             self.bump_revision();
         }
+    }
+
+    /// Force-finalize any tool still in Pending/Running when the session is
+    /// fully Idle (no in-flight prompt, no pending image degradation). This
+    /// is the last-line guard for late `tool_call_update`s that arrive after
+    /// `TurnFinished` and resurrect a tool card to Running without a matching
+    /// terminal event: once the session is idle there can be no live tool
+    /// still running, so the row is finalized instead of rendering forever.
+    pub(super) fn finalize_stale_running_tools_when_idle(&mut self) -> bool {
+        if self.in_flight_prompt.is_some()
+            || self.pending_image_degradation.is_some()
+            || self.ui.session.status != SessionStatus::Idle
+        {
+            return false;
+        }
+        let stale: Vec<String> = self
+            .ui
+            .tools
+            .iter()
+            .filter(|tool| {
+                tool.kind != "system"
+                    && tool.call_id != "workspace.scan"
+                    && matches!(tool.status, ToolStatus::Pending | ToolStatus::Running)
+            })
+            .map(|tool| tool.call_id.clone())
+            .collect();
+        if stale.is_empty() {
+            return false;
+        }
+        let session_id = self.ui.session.id.to_string();
+        let mut changed = false;
+        for call_id in &stale {
+            let tool_snapshot = {
+                let Some(tool) = self
+                    .ui
+                    .tools
+                    .iter_mut()
+                    .find(|tool| &tool.call_id == call_id)
+                else {
+                    continue;
+                };
+                tool.status = ToolStatus::Interrupted;
+                if tool.summary.trim().is_empty() || tool.summary == "等待活动" {
+                    tool.summary = "已结束".into();
+                }
+                tool.logs.push(ToolLogEntry {
+                    title: "已结束".into(),
+                    body: "会话空闲时仍未收到终态，按已结束处理".into(),
+                });
+                tool.clone()
+            };
+            self.mark_tool_call_dirty(call_id);
+            let seq = self.next_seq();
+            let _ = self.store.insert_tool(&session_id, &tool_snapshot, seq);
+            changed = true;
+        }
+        changed
     }
 
     pub(super) fn apply_runtime_events_with_file_tracking(
@@ -880,9 +975,21 @@ impl Application {
                 old_text,
                 new_text,
             } = event
-                && self.apply_verified_fs_write_tool_diff(id, path, old_text.as_deref(), new_text)
             {
-                had_file_changes = true;
+                let landed = self.apply_verified_fs_write_tool_diff(
+                    id,
+                    path,
+                    old_text.as_deref(),
+                    new_text,
+                ) || self.apply_landed_write_tool_diff(
+                    id,
+                    path,
+                    old_text.as_deref(),
+                    new_text,
+                );
+                if landed {
+                    had_file_changes = true;
+                }
             }
         }
         self.session.update_session_id(&events);

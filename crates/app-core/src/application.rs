@@ -165,6 +165,9 @@ struct SessionRuntime {
     history_total_count: i64,
     /// Smallest loaded seq; `None` when the whole history fits in the window.
     history_earliest_seq: Option<i64>,
+    conversation_change_set_signature: u64,
+    conversation_change_set_turn_cache:
+        HashMap<String, (String, Vec<workspace_model::FileChangeRecord>)>,
 }
 
 impl SessionRuntime {
@@ -293,6 +296,15 @@ pub struct Application {
     pub(crate) history_total_count: i64,
     /// Smallest loaded seq; `None` when the whole history fits in the window.
     pub(crate) history_earliest_seq: Option<i64>,
+    /// Guard + cache for the expensive conversation change-set rebuild.
+    /// `persist_agent_conversation_change_set_from_turns` re-reads every
+    /// historical turn's full diff from SQLite; on a long dsh session this
+    /// can be tens of MB and blocks the UI thread. The aggregate is
+    /// deterministic for a given set of turn change sets, so the per-turn
+    /// results are cached and only changed turns are re-read.
+    conversation_change_set_signature: u64,
+    conversation_change_set_turn_cache:
+        HashMap<String, (String, Vec<workspace_model::FileChangeRecord>)>,
 }
 
 fn current_timestamp() -> String {
@@ -804,6 +816,14 @@ impl Application {
         std::mem::swap(
             &mut self.history_earliest_seq,
             &mut runtime.history_earliest_seq,
+        );
+        std::mem::swap(
+            &mut self.conversation_change_set_signature,
+            &mut runtime.conversation_change_set_signature,
+        );
+        std::mem::swap(
+            &mut self.conversation_change_set_turn_cache,
+            &mut runtime.conversation_change_set_turn_cache,
         );
     }
 

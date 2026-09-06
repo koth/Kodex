@@ -761,6 +761,67 @@ fn scoped_change_set_queries_keep_agent_sources_separate() {
 }
 
 #[test]
+fn conversation_change_set_rebuild_skips_unchanged_turns() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = test_app(&dir);
+    let user_message_id = uuid::Uuid::new_v4();
+    let assistant_message_id = uuid::Uuid::new_v4();
+    let change = SessionFileChange {
+        path: "src/main.rs".into(),
+        change_type: FileChangeType::Modified,
+        old_text: Some("before\n".into()),
+        new_text: "after\n".into(),
+        added_lines: 1,
+        removed_lines: 1,
+        timestamp: "1".into(),
+    };
+
+    app.current_turn_user_message_id = Some(user_message_id);
+    app.ui.review_changes = vec![change.clone()];
+    app.persist_current_agent_turn_change_set(
+        Some(assistant_message_id),
+        ChangeSetStatus::Complete,
+    );
+    app.ui.turn_changes.push(TurnFileChanges {
+        message_id: assistant_message_id,
+        changes: vec![change.clone()],
+    });
+    app.persist_agent_conversation_change_set_from_turns();
+
+    let conversation_sets = app.list_change_sets(ListChangeSetsRequest {
+        source: Some(ChangeSetSource::AgentConversation),
+        ..Default::default()
+    });
+    assert_eq!(conversation_sets.len(), 1);
+    let first_updated_at = conversation_sets[0].updated_at.clone();
+    let first_signature = app.conversation_change_set_signature;
+    assert!(
+        app.conversation_change_set_turn_cache
+            .iter()
+            .all(|(_, (updated_at, records))| !updated_at.is_empty() && !records.is_empty()),
+        "per-turn cache must hold the loaded records after a rebuild"
+    );
+
+    // Same turn set (no updated_at change) → the guard must skip the rebuild
+    // entirely; the persisted conversation set stays untouched.
+    std::thread::sleep(std::time::Duration::from_millis(10));
+    app.persist_agent_conversation_change_set_from_turns();
+    assert_eq!(
+        app.conversation_change_set_signature, first_signature,
+        "unchanged turn set must not rebuild"
+    );
+    let conversation_sets = app.list_change_sets(ListChangeSetsRequest {
+        source: Some(ChangeSetSource::AgentConversation),
+        ..Default::default()
+    });
+    assert_eq!(conversation_sets.len(), 1);
+    assert_eq!(
+        conversation_sets[0].updated_at, first_updated_at,
+        "unchanged turn set must not rewrite the conversation change set"
+    );
+}
+
+#[test]
 fn scoped_change_set_queries_keep_manual_source_separate() {
     let dir = tempfile::tempdir().unwrap();
     let mut app = test_app(&dir);

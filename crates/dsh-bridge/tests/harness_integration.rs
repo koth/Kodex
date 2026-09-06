@@ -10,11 +10,10 @@ mod common;
 use acp_core::{ClientEvent, PermissionBroker};
 use common::{
     HoldFramesUntil, MockHarness, MuxEnd, MuxScript, default_config, history_event,
-    mux_assistant_final, mux_assistant_text_delta, mux_session_event, mux_subscribed,
-    scripts_with,
+    mux_assistant_final, mux_assistant_text_delta, mux_session_event, mux_subscribed, scripts_with,
 };
 use dsh_bridge::{HarnessHostRegistry, HttpClient};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::sync::Arc;
 use std::sync::mpsc;
 use std::time::Duration;
@@ -110,6 +109,24 @@ async fn two_sessions_share_one_host_and_route_frames_to_the_right_sink() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn launch_token_exchange_captures_redirect_cookie() {
+    let mut config = default_config();
+    config.require_auth = true;
+    let mock = MockHarness::start(config).await;
+    let endpoint = format!("{}?token=mock-launch-token", mock.endpoint());
+
+    let client = HttpClient::new(&endpoint).unwrap();
+    client
+        .probe(uuid::Uuid::new_v4().to_string())
+        .await
+        .unwrap();
+
+    let calls = mock.calls();
+    assert_eq!(calls.len(), 1, "expected exactly the auth probe call");
+    assert_eq!(calls[0].0, "session/list");
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn unmatched_frame_is_dropped_not_fatal() {
     let mut c = default_config();
     c.mux = scripts_with(vec![
@@ -151,6 +168,7 @@ async fn concurrent_prompts_across_sessions_are_not_serialized() {
             .session_prompt(
                 "rpc-a".into(),
                 &dsh_bridge::SessionPromptPayload {
+                    request_id: "req-a".into(),
                     session_id: "s-a".into(),
                     mode: dsh_bridge::PromptMode::Queue,
                     content: vec![dsh_bridge::PromptContentPart::text("prompt A")],
@@ -164,6 +182,7 @@ async fn concurrent_prompts_across_sessions_are_not_serialized() {
             .session_prompt(
                 "rpc-b".into(),
                 &dsh_bridge::SessionPromptPayload {
+                    request_id: "req-b".into(),
                     session_id: "s-b".into(),
                     mode: dsh_bridge::PromptMode::Queue,
                     content: vec![dsh_bridge::PromptContentPart::text("prompt B")],
@@ -179,7 +198,7 @@ async fn concurrent_prompts_across_sessions_are_not_serialized() {
     let calls = mock.calls();
     let prompts: Vec<&str> = calls
         .iter()
-        .filter(|(method, _)| method == "session.prompt")
+        .filter(|(method, _)| method == "session/prompt")
         .map(|(_, rpc_id)| rpc_id.as_str())
         .collect();
     assert!(prompts.contains(&"rpc-a"), "prompt A missing: {prompts:?}");
@@ -192,13 +211,13 @@ async fn approval_round_trip_posts_client_response_to_respond() {
     let mut c = default_config();
     c.mux = scripts_with(vec![
         mux_subscribed("s-a", 0),
-        json!({
-            "type": "server-request",
-            "rpcId": "approval-rpc-1",
-            "method": "approval/requested",
-            "payload": {
+        serde_json::json!({
+            "type": "waterfall",
+            "event": "approval/request",
+            "eventId": "approval-rpc-1",
+            "agentId": "s-a",
+            "request": {
                 "type": "approval/requested",
-                "sessionId": "s-a",
                 "approvalId": "a-1",
                 "toolName": "bash",
                 "callId": "call-1",
@@ -537,6 +556,7 @@ async fn single_session_create_prompt_message_flow() {
         .session_prompt(
             "rpc-prompt".into(),
             &dsh_bridge::SessionPromptPayload {
+                request_id: "req-prompt".into(),
                 session_id: "s-1".into(),
                 mode: dsh_bridge::PromptMode::Queue,
                 content: vec![dsh_bridge::PromptContentPart::text("hi")],
@@ -567,10 +587,9 @@ async fn tool_call_and_result_render_as_tool_events() {
     c.mux = scripts_with(vec![
         mux_subscribed("s-1", 0),
         json!({
-            "type": "server-request",
-            "rpcId": "rpc-tool-call",
-            "method": "session/event",
-            "payload": {
+            "type": "emit",
+            "event": "session/event",
+            "args": [{
                 "type": "session/event",
                 "sessionId": "s-1",
                 "event": {
@@ -580,13 +599,12 @@ async fn tool_call_and_result_render_as_tool_events() {
                     "data": { "turn": 1, "step": 1, "callId": "call-1", "name": "bash", "arguments": "{\"command\":\"ls\"}" }
                 },
                 "view": { "for": "call", "view": { "card": "terminal", "title": "ls" } }
-            }
+            }]
         }),
         json!({
-            "type": "server-request",
-            "rpcId": "rpc-tool-result",
-            "method": "session/event",
-            "payload": {
+            "type": "emit",
+            "event": "session/event",
+            "args": [{
                 "type": "session/event",
                 "sessionId": "s-1",
                 "event": {
@@ -602,7 +620,7 @@ async fn tool_call_and_result_render_as_tool_events() {
                     }
                 },
                 "view": { "for": "result", "view": { "card": "terminal", "output": "ok", "exitCode": 0 } }
-            }
+            }]
         }),
     ]);
     let mock = MockHarness::start(c).await;
@@ -710,6 +728,273 @@ async fn session_restore_replays_history_before_started() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn session_follow_delivers_assistant_text() {
+    // dsh 0.1.2 routes session content events (assistant chunks, tool calls)
+    // through the per-session `session/follow` journal stream, not the
+    // `$events` mux. This test proves the bridge opens that stream and maps
+    // its frames into `ClientEvent`s.
+    let mut c = default_config();
+    c.follow = scripts_with(vec![
+        // Opening snapshot: no records, model-selection projection.
+        serde_json::json!({
+            "type": "snapshot",
+            "cursor": 0,
+            "records": [],
+            "hasMore": false,
+            "projections": {
+                "asOfSeq": 0,
+                "values": {
+                    "modelSelection": {
+                        "next": { "provider": "timiai", "model": "gpt-5.5" }
+                    }
+                }
+            }
+        }),
+        // Live assistant text-delta + turn end.
+        serde_json::json!({
+            "type": "event",
+            "event": {
+                "type": "assistant/chunk",
+                "seq": 1,
+                "time": 0.0,
+                "data": {
+                    "turn": 1,
+                    "step": 1,
+                    "chunk": {
+                        "type": "text-delta",
+                        "index": 0,
+                        "text": "follow answer"
+                    }
+                }
+            }
+        }),
+        serde_json::json!({
+            "type": "event",
+            "event": {
+                "type": "turn/end",
+                "seq": 2,
+                "time": 0.0,
+                "data": { "turn": 1, "reason": { "kind": "completed" } }
+            }
+        }),
+    ]);
+    let mock = MockHarness::start(c).await;
+    let registry = Arc::new(HarnessHostRegistry::new());
+
+    let (tx, rx) = mpsc::channel::<ClientEvent>();
+    let (command_tx, command_rx) = mpsc::channel();
+    let config = acp_core::SessionConfig {
+        workspace_root: "/tmp".into(),
+        app_data_root: "/tmp".into(),
+        model: String::new(),
+        agent_command: "dsh".into(),
+        agent_env: Vec::new(),
+        resume_session_id: None,
+        log_id: "test-log".into(),
+        acp_port: 0,
+        remote_ssh: None,
+        mcp_servers: Vec::new(),
+        harness_endpoint: Some(mock.endpoint()),
+        agent_preset: None,
+    };
+    let worker_registry = registry.clone();
+    let worker = std::thread::spawn(move || {
+        dsh_bridge::run_harness_session(
+            worker_registry,
+            config,
+            tx,
+            command_rx,
+            PermissionBroker::default(),
+            acp_core::ShutdownSignal::default(),
+        )
+    });
+
+    let start = std::time::Instant::now();
+    let mut saw_started = false;
+    let mut saw_text = false;
+    let mut saw_turn_end = false;
+    let mut model_value: Option<String> = None;
+    while start.elapsed() < Duration::from_secs(5) && !(saw_started && saw_text && saw_turn_end) {
+        match rx.recv_timeout(Duration::from_millis(100)) {
+            Ok(ClientEvent::SessionStarted { .. }) => saw_started = true,
+            Ok(ClientEvent::MessageChunk { content, .. }) if content == "follow answer" => {
+                saw_text = true;
+            }
+            Ok(ClientEvent::TurnFinished { .. }) => saw_turn_end = true,
+            Ok(ClientEvent::SessionConfigValueChanged {
+                control_id,
+                value_id,
+                ..
+            }) if control_id == "model" => {
+                model_value = Some(value_id);
+            }
+            Ok(_) => {}
+            Err(mpsc::RecvTimeoutError::Timeout) => continue,
+            Err(mpsc::RecvTimeoutError::Disconnected) => break,
+        }
+    }
+    assert!(saw_started, "SessionStarted was not emitted");
+    assert!(saw_text, "session/follow assistant text was not delivered");
+    assert!(saw_turn_end, "session/follow turn/end was not delivered");
+    assert_eq!(
+        model_value.as_deref(),
+        Some("kodex-provider/timiai/gpt-5.5"),
+        "follow snapshot must restore provider + model"
+    );
+
+    let _ = command_tx.send(acp_core::RuntimeCommand::Shutdown);
+    let _ = worker.join();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn session_restore_model_control_uses_projection_not_catalog_default() {
+    // On resume the session's durable model selection (from the
+    // `modelSelection` projection) must drive the Model control's
+    // `current_value_id` — not the catalog default. Without this the composer
+    // shows the default provider+model (e.g. deepseek) while the session
+    // actually runs a different one (e.g. timiai).
+    let mut c = default_config();
+    c.history_projections = Some(json!({
+        "asOfSeq": 3,
+        "values": {
+            "modelSelection": {
+                "lastUsed": { "provider": "timiai", "model": "glm-5.3-ioa" },
+                "next": { "provider": "timiai", "model": "glm-5.3-ioa" }
+            }
+        }
+    }));
+    let mock = MockHarness::start(c).await;
+    let registry = Arc::new(HarnessHostRegistry::new());
+
+    let (tx, rx) = mpsc::channel::<ClientEvent>();
+    let (command_tx, command_rx) = mpsc::channel();
+    let config = acp_core::SessionConfig {
+        workspace_root: "/tmp".into(),
+        app_data_root: "/tmp".into(),
+        model: "old-model".into(),
+        agent_command: "dsh".into(),
+        agent_env: Vec::new(),
+        resume_session_id: Some("s-1".into()),
+        log_id: "test-log".into(),
+        acp_port: 0,
+        remote_ssh: None,
+        mcp_servers: Vec::new(),
+        harness_endpoint: Some(mock.endpoint()),
+        agent_preset: None,
+    };
+    let worker_registry = registry.clone();
+    let worker = std::thread::spawn(move || {
+        dsh_bridge::run_harness_session(
+            worker_registry,
+            config,
+            tx,
+            command_rx,
+            PermissionBroker::default(),
+            acp_core::ShutdownSignal::default(),
+        )
+    });
+
+    let start = std::time::Instant::now();
+    let mut model_control: Option<workspace_model::SessionConfigControl> = None;
+    while start.elapsed() < Duration::from_secs(5) && model_control.is_none() {
+        match rx.recv_timeout(Duration::from_millis(100)) {
+            Ok(ClientEvent::SessionConfigUpdated { state }) => {
+                model_control = state
+                    .controls
+                    .into_iter()
+                    .find(|control| control.id == "model");
+            }
+            Ok(_) => {}
+            Err(mpsc::RecvTimeoutError::Timeout) => continue,
+            Err(mpsc::RecvTimeoutError::Disconnected) => break,
+        }
+    }
+    let control = model_control.expect("Model control was not published");
+    assert_eq!(
+        control.current_value_id, "kodex-provider/timiai/glm-5.3-ioa",
+        "Model control must restore the session's selection, not the catalog default"
+    );
+
+    let _ = command_tx.send(acp_core::RuntimeCommand::Shutdown);
+    let _ = worker.join();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn session_restore_uses_page_model_selection_projection() {
+    // dsh returns the durable per-session model under `page.projections`.
+    // Without consuming it, app-core restores a model label without a
+    // provider and the composer cannot resolve the actual provider.
+    let mut c = default_config();
+    c.history_projections = Some(json!({
+        "asOfSeq": 3,
+        "values": {
+            "modelSelection": {
+                "lastUsed": { "provider": "custom_cline", "model": "glm-5.3-flash" },
+                "next": { "provider": "timiai", "model": "gpt-5.5" }
+            }
+        }
+    }));
+    let mock = MockHarness::start(c).await;
+    let registry = Arc::new(HarnessHostRegistry::new());
+
+    let (tx, rx) = mpsc::channel::<ClientEvent>();
+    let (command_tx, command_rx) = mpsc::channel();
+    let config = acp_core::SessionConfig {
+        workspace_root: "/tmp".into(),
+        app_data_root: "/tmp".into(),
+        model: "old-model".into(),
+        agent_command: "dsh".into(),
+        agent_env: Vec::new(),
+        resume_session_id: Some("s-1".into()),
+        log_id: "test-log".into(),
+        acp_port: 0,
+        remote_ssh: None,
+        mcp_servers: Vec::new(),
+        harness_endpoint: Some(mock.endpoint()),
+        agent_preset: None,
+    };
+    let worker_registry = registry.clone();
+    let worker = std::thread::spawn(move || {
+        dsh_bridge::run_harness_session(
+            worker_registry,
+            config,
+            tx,
+            command_rx,
+            PermissionBroker::default(),
+            acp_core::ShutdownSignal::default(),
+        )
+    });
+
+    let start = std::time::Instant::now();
+    let mut saw_started = false;
+    let mut model_value = None;
+    while start.elapsed() < Duration::from_secs(5) && !(saw_started && model_value.is_some()) {
+        match rx.recv_timeout(Duration::from_millis(100)) {
+            Ok(ClientEvent::SessionStarted { .. }) => saw_started = true,
+            Ok(ClientEvent::SessionConfigValueChanged {
+                control_id,
+                value_id,
+                ..
+            }) if control_id == "model" => {
+                model_value = Some(value_id);
+            }
+            Ok(_) => {}
+            Err(mpsc::RecvTimeoutError::Timeout) => continue,
+            Err(mpsc::RecvTimeoutError::Disconnected) => break,
+        }
+    }
+    assert!(saw_started, "SessionStarted was not emitted");
+    assert_eq!(
+        model_value.as_deref(),
+        Some("kodex-provider/timiai/gpt-5.5"),
+        "page modelSelection projection must restore provider + model"
+    );
+
+    let _ = command_tx.send(acp_core::RuntimeCommand::Shutdown);
+    let _ = worker.join();
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn session_resume_does_not_send_agent_preset() {
     // Regression: a dsh preset is fixed at session creation. Resuming with a
     // (possibly different) preset in `session.create` makes the harness reject
@@ -759,7 +1044,10 @@ async fn session_resume_does_not_send_agent_preset() {
     }
     let creates = mock.creates();
     assert_eq!(creates.len(), 1, "expected exactly one session.create");
-    assert_eq!(creates[0].get("sessionId").and_then(Value::as_str), Some("s-1"));
+    assert_eq!(
+        creates[0].get("sessionId").and_then(Value::as_str),
+        Some("s-1")
+    );
     assert!(
         creates[0].get("agentPreset").is_none(),
         "resume must not send agentPreset; got {:?}",
@@ -780,10 +1068,11 @@ async fn question_answer_multiple_questions_partial_payload() {
         frames: vec![
             mux_subscribed("s-1", 0),
             json!({
-                "type": "server-request",
-                "rpcId": "qrpc-multi",
-                "method": "question/requested",
-                "payload": {
+                "type": "waterfall",
+                "event": "user-questions/request",
+                "eventId": "qrpc-multi",
+                "agentId": "s-1",
+                "request": {
                     "type": "question/requested",
                     "sessionId": "s-1",
                     "questions": [
@@ -829,7 +1118,9 @@ async fn question_answer_multiple_questions_partial_payload() {
     let mut saw_question = false;
     while start.elapsed() < Duration::from_secs(5) && !saw_question {
         match rx.recv_timeout(Duration::from_millis(100)) {
-            Ok(ClientEvent::ToolPermissionRequest { id, input: Some(_), .. }) if id == "q1" => {
+            Ok(ClientEvent::ToolPermissionRequest {
+                id, input: Some(_), ..
+            }) if id == "q1" => {
                 saw_question = true;
             }
             Ok(_) => {}
@@ -865,7 +1156,10 @@ async fn question_answer_multiple_questions_partial_payload() {
             reply_tx,
         })
         .unwrap();
-    reply_rx.recv_timeout(Duration::from_secs(5)).unwrap().unwrap();
+    reply_rx
+        .recv_timeout(Duration::from_secs(5))
+        .unwrap()
+        .unwrap();
     let responds = mock.responds();
     assert_eq!(responds.len(), 1);
     // The respond payload must list answers in the question order (q1 then q2),
@@ -878,7 +1172,11 @@ async fn question_answer_multiple_questions_partial_payload() {
         .iter()
         .map(|a| a.get("id").and_then(Value::as_str).unwrap())
         .collect();
-    assert_eq!(ids, vec!["q1", "q2"], "answers must be re-ordered to the question order");
+    assert_eq!(
+        ids,
+        vec!["q1", "q2"],
+        "answers must be re-ordered to the question order"
+    );
     let _ = command_tx.send(acp_core::RuntimeCommand::Shutdown);
     let _ = worker.join();
 }
@@ -894,10 +1192,11 @@ async fn question_answer_payload_matches_dsh_schema() {
         frames: vec![
             mux_subscribed("s-1", 0),
             json!({
-                "type": "server-request",
-                "rpcId": "qrpc-1",
-                "method": "question/requested",
-                "payload": {
+                "type": "waterfall",
+                "event": "user-questions/request",
+                "eventId": "qrpc-1",
+                "agentId": "s-1",
+                "request": {
                     "type": "question/requested",
                     "sessionId": "s-1",
                     "questions": [
@@ -943,7 +1242,9 @@ async fn question_answer_payload_matches_dsh_schema() {
     let mut saw_question = false;
     while start.elapsed() < Duration::from_secs(5) && !saw_question {
         match rx.recv_timeout(Duration::from_millis(100)) {
-            Ok(ClientEvent::ToolPermissionRequest { id, input: Some(_), .. }) if id == "q1" => {
+            Ok(ClientEvent::ToolPermissionRequest {
+                id, input: Some(_), ..
+            }) if id == "q1" => {
                 saw_question = true;
             }
             Ok(_) => {}
@@ -969,10 +1270,16 @@ async fn question_answer_payload_matches_dsh_schema() {
             reply_tx,
         })
         .unwrap();
-    reply_rx.recv_timeout(Duration::from_secs(5)).unwrap().unwrap();
+    reply_rx
+        .recv_timeout(Duration::from_secs(5))
+        .unwrap()
+        .unwrap();
     let responds = mock.responds();
     assert_eq!(responds.len(), 1);
-    println!("=== RESPOND PAYLOAD ===\n{}", serde_json::to_string_pretty(&responds[0]).unwrap());
+    println!(
+        "=== RESPOND PAYLOAD ===\n{}",
+        serde_json::to_string_pretty(&responds[0]).unwrap()
+    );
     let _ = command_tx.send(acp_core::RuntimeCommand::Shutdown);
     let _ = worker.join();
 }
@@ -989,10 +1296,11 @@ async fn question_answer_rejected_as_bad_response_surfaces_notice() {
         frames: vec![
             mux_subscribed("s-1", 0),
             json!({
-                "type": "server-request",
-                "rpcId": "question-rpc-rej",
-                "method": "question/requested",
-                "payload": {
+                "type": "waterfall",
+                "event": "user-questions/request",
+                "eventId": "question-rpc-rej",
+                "agentId": "s-1",
+                "request": {
                     "type": "question/requested",
                     "sessionId": "s-1",
                     "questions": [
@@ -1040,7 +1348,9 @@ async fn question_answer_rejected_as_bad_response_surfaces_notice() {
     let mut saw_question = false;
     while start.elapsed() < Duration::from_secs(5) && !saw_question {
         match rx.recv_timeout(Duration::from_millis(100)) {
-            Ok(ClientEvent::ToolPermissionRequest { id, input: Some(_), .. }) if id == "q1" => {
+            Ok(ClientEvent::ToolPermissionRequest {
+                id, input: Some(_), ..
+            }) if id == "q1" => {
                 saw_question = true;
             }
             Ok(_) => {}
@@ -1076,8 +1386,7 @@ async fn question_answer_rejected_as_bad_response_surfaces_notice() {
     while start.elapsed() < Duration::from_secs(5) && !saw_notice {
         match rx.recv_timeout(Duration::from_millis(100)) {
             Ok(ClientEvent::MessageChunk { role, content, .. }) => {
-                if role == workspace_model::MessageRole::System
-                    && content.contains("未被接受")
+                if role == workspace_model::MessageRole::System && content.contains("未被接受")
                 {
                     saw_notice = true;
                 }
@@ -1368,10 +1677,11 @@ async fn question_answer_responds_with_envelope_rpc_id() {
         frames: vec![
             mux_subscribed("s-1", 0),
             json!({
-                "type": "server-request",
-                "rpcId": "question-rpc-9",
-                "method": "question/requested",
-                "payload": {
+                "type": "waterfall",
+                "event": "user-questions/request",
+                "eventId": "question-rpc-9",
+                "agentId": "s-1",
+                "request": {
                     "type": "question/requested",
                     "sessionId": "s-1",
                     "questions": [

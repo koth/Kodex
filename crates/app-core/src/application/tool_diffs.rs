@@ -1166,6 +1166,82 @@ impl Application {
         )
     }
 
+    /// Land a real tool-call `ToolDiff` (non-`fs_write:` id) whose `old_text`
+    /// carries a trustworthy before-content. The dsh harness computes a write's
+    /// result diff card against the pre-write file, so when the whole tool
+    /// lifecycle lands in one coalesced poll batch (ToolStarted processed only
+    /// after the write hit the disk) the tracker baseline equals the post-write
+    /// content and `finish_recording` sees "no change" — but the diff event
+    /// still holds the genuine old text. That is exactly how an overwrite of a
+    /// tracked file (`dsh write` rewriting `mesh_env.py`/`rollout.py`) used to
+    /// vanish from the review panel while other writes survived by batch
+    /// timing. Land the modification directly when the tool is write-identity,
+    /// its payload path matches and its content equals the diff's new text,
+    /// and the disk actually holds the new text — every guard anti-spoofs a
+    /// fabricated diff. An empty/absent `old_text` (a creation) stays owned by
+    /// the payload-created recovery.
+    pub(super) fn apply_landed_write_tool_diff(
+        &mut self,
+        call_id: &str,
+        path: &str,
+        old_text: Option<&str>,
+        new_text: &str,
+    ) -> bool {
+        if call_id.starts_with("fs_write:") {
+            // `apply_verified_fs_write_tool_diff` owns the host-mediated
+            // fs-write ids.
+            return false;
+        }
+        let Some(old_text) = old_text.filter(|text| !text.trim().is_empty()) else {
+            return false;
+        };
+        let Some(tool) = self
+            .ui
+            .tools
+            .iter()
+            .find(|tool| tool.call_id == call_id)
+            .cloned()
+        else {
+            return false;
+        };
+        if !is_file_write_tool_identity(&tool.kind, &tool.name) {
+            return false;
+        }
+        let normalized = normalize_path_for_storage(path, &self.ui.workspace.root);
+        let payload_confirms = write_tool_payload_created_content(
+            &tool,
+            &normalized,
+            &self.ui.workspace.root,
+        )
+        .is_some_and(|content| content == normalize_diff_text_for_session_change(new_text));
+        if !payload_confirms {
+            return false;
+        }
+        let new_text = normalize_diff_text_for_session_change(new_text);
+        let old_text = normalize_diff_text_for_session_change(old_text);
+        if old_text == new_text {
+            return false;
+        }
+        let disk_matches = std::fs::read_to_string(self.ui.workspace.root.join(&normalized))
+            .ok()
+            .map(|text| normalize_diff_text_for_session_change(&text) == new_text)
+            .unwrap_or(false);
+        if !disk_matches {
+            return false;
+        }
+        self.apply_tracker_changes(
+            call_id,
+            vec![crate::file_tracker::VerifiedFileChange {
+                path: normalized,
+                change_type: FileChangeType::Modified,
+                old_text: Some(old_text),
+                new_text,
+                skipped_diff: false,
+                quality: DiffQuality::Exact,
+            }],
+        )
+    }
+
     fn tracker_verified_file_change(
         &self,
         call_id: &str,

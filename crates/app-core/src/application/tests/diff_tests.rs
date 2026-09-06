@@ -4402,6 +4402,87 @@ fn dsh_write_created_recovery_without_result_text_survives_coalesced_batch() {
 }
 
 #[test]
+fn dsh_write_overwrite_with_trusted_old_text_lands_as_modified() {
+    // Regression for the missing `mesh_env.py`/`rollout.py` edits: the dsh
+    // harness computes a write's result diff against the pre-write file, so
+    // the bridge delivers a real before/after ToolDiff even when the whole
+    // lifecycle coalesces into one poll batch (the tracker baseline captured
+    // from raw_input then equals the post-write content and
+    // `finish_recording` sees "no change"). An overwrite of a tracked file
+    // must NOT be recorded as Created and must not be dropped either — the
+    // diff's old text (verified against the payload and the disk) lands the
+    // modification.
+    let dir = tempfile::tempdir().unwrap();
+    let file_path = dir.path().join("admesh").join("envs").join("mesh_env.py");
+    let before = [
+        "from __future__ import annotations",
+        "",
+        "import numpy as np",
+        "",
+        "class MeshSimplificationEnv:",
+        "    pass",
+        "",
+    ]
+    .join("\n");
+    let after = [
+        "from __future__ import annotations",
+        "",
+        "import numpy as np",
+        "",
+        "from admesh.simplification.fast_qem import DynamicQEM",
+        "",
+        "class MeshSimplificationEnv:",
+        "    engine: DynamicQEM",
+        "",
+    ]
+    .join("\n");
+    fs::create_dir_all(file_path.parent().unwrap()).unwrap();
+    // The write already landed before the app processes the coalesced batch.
+    fs::write(&file_path, &after).unwrap();
+
+    let mut app = test_app(&dir);
+    let raw_input = serde_json::json!({
+        "content": after,
+        "file_path": file_path.display().to_string(),
+    })
+    .to_string();
+
+    let result = app.apply_runtime_events_with_file_tracking(vec![
+        ClientEvent::ToolStarted {
+            id: "call-write-env".into(),
+            parent_id: None,
+            name: "write".into(),
+            kind: "edit".into(),
+            summary: "write admesh/envs/mesh_env.py".into(),
+            is_subagent: false,
+            raw_input: Some(raw_input),
+        },
+        ClientEvent::ToolDiff {
+            id: "call-write-env".into(),
+            path: file_path.display().to_string(),
+            old_text: Some(before.clone()),
+            new_text: after.clone(),
+        },
+        ClientEvent::ToolCompleted {
+            id: "call-write-env".into(),
+            name: None,
+            outcome: "completed".into(),
+            raw_output: None,
+            terminal_output: None,
+        },
+    ]);
+
+    assert!(result.had_file_changes, "the overwrite must be captured");
+    assert_eq!(app.ui.review_changes.len(), 1, "review_changes");
+    let change = &app.ui.review_changes[0];
+    assert_eq!(change.change_type, FileChangeType::Modified);
+    assert_eq!(change.path, "admesh/envs/mesh_env.py");
+    assert_eq!(change.old_text.as_deref(), Some(before.as_str()));
+    assert_eq!(change.new_text, after);
+    app.session.shutdown();
+}
+
+#[test]
 fn dsh_write_tool_new_file_enters_review_from_raw_input_hints() {
     // dsh harness `write` tool: arguments carry `content` + `file_path` (an
     // absolute path inside the workspace); the result card has NO diff view,

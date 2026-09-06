@@ -393,7 +393,7 @@ describe("ThinkingIndicator", () => {
 
     expect(container.textContent).toContain("已处理 1 次工具调用 · 1m 5s");
     expect(container.textContent).toContain("final answer");
-    expect(container.textContent).not.toContain("intermediate reply");
+    expect(container.textContent).toContain("intermediate reply");
     expect(container.textContent).not.toContain("pnpm test");
 
     fireEvent.click(getByRole("button", { name: "展开已处理上下文" }));
@@ -518,17 +518,19 @@ describe("ThinkingIndicator", () => {
       ],
     });
 
-    const { container, getByRole, unmount } = render(
+    const { container, unmount } = render(
       <ConversationTimeline snapshot={snapshot} onPermissionSelect={() => {}} />,
     );
 
     expect(container.textContent).toContain("已处理 · 1m 30s");
     expect(container.textContent).toContain("final long answer");
-    expect(container.textContent).not.toContain("visible intermediate 10");
-
-    fireEvent.click(getByRole("button", { name: "展开已处理上下文" }));
-
     expect(container.textContent).toContain("visible intermediate 10");
+
+    // Intermediate assistant replies are no longer collapsed, so the
+    // "展开已处理上下文" toggle is not present for this turn.
+    expect(
+      container.querySelector(".timeline-collapse-toggle"),
+    ).toBeNull();
     unmount();
   });
 
@@ -2580,6 +2582,55 @@ describe("ConversationTimeline – window paging trigger", () => {
     expect(container.textContent).not.toContain("run 2-5");
     // …while its final answer stays visible.
     expect(container.textContent).toContain("answer 2");
+  });
+
+  it("expands the initial window when the last turn is mostly hidden tools", () => {
+    const timeline: TimelineItem[] = [];
+    const messages: UiSnapshot["messages"] = [];
+    const tools: ToolInvocation[] = [];
+    messages.push({
+      id: "hidden-tools-user",
+      role: "User",
+      body: "run the experiment",
+      created_at: "2026-05-12T00:00:00Z",
+    });
+    timeline.push({ Message: "hidden-tools-user" });
+    for (let index = 0; index < 120; index += 1) {
+      const toolId = `hidden-tools-${index}`;
+      tools.push(
+        makePermissionTool({
+          id: toolId,
+          call_id: toolId,
+          kind: "execute",
+          name: `run ${index}`,
+          summary: `run ${index}`,
+          status: "Succeeded",
+          permission_options: [],
+        }),
+      );
+      timeline.push({ Tool: toolId });
+    }
+    messages.push({
+      id: "hidden-tools-assistant",
+      role: "Assistant",
+      body: "experiment finished",
+      created_at: "2026-05-12T00:02:00Z",
+    });
+    timeline.push({ Message: "hidden-tools-assistant" });
+
+    const snapshot = makeSnapshot({
+      session: { ...makeSnapshot().session, status: "Idle" },
+      timeline,
+      messages,
+      tools,
+    });
+
+    const { container } = render(
+      <ConversationTimeline snapshot={snapshot} onPermissionSelect={() => {}} />,
+    );
+
+    expect(container.textContent).toContain("run the experiment");
+    expect(container.textContent).toContain("experiment finished");
   });
 
   it("renders a turn-nav anchor on collapsed-turn summaries", () => {

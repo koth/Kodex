@@ -96,20 +96,41 @@ impl Application {
         let _ = self.store.replace_change_set(&summary, &[]);
     }
 
-    pub(in crate::application) fn persist_agent_conversation_change_set_from_turns(&self) {
+    pub(in crate::application) fn persist_agent_conversation_change_set_from_turns(&mut self) {
         let change_set_id = format!("agent-conversation:{}", self.ui.session.id);
         let session_id = self.ui.session.id.to_string();
-        let mut turn_summaries = self
+        let turn_summaries = self
             .store
             .list_change_sets_with_legacy(&session_id, Some(ChangeSetSource::AgentTurn))
             .unwrap_or_default();
-        turn_summaries.retain(|summary| {
-            summary.message_id.is_some()
-                && matches!(
-                    summary.status,
-                    ChangeSetStatus::Complete | ChangeSetStatus::LegacyIncomplete
-                )
-        });
+        let turn_summaries: Vec<_> = turn_summaries
+            .into_iter()
+            .filter(|summary| {
+                summary.message_id.is_some()
+                    && matches!(
+                        summary.status,
+                        ChangeSetStatus::Complete | ChangeSetStatus::LegacyIncomplete
+                    )
+            })
+            .collect();
+        let mut signature: u64 = 17;
+        for summary in &turn_summaries {
+            for byte in summary.id.bytes() {
+                signature = (signature << 5)
+                    .wrapping_sub(signature)
+                    .wrapping_add(byte as u64);
+            }
+            signature = signature
+                .wrapping_mul(31)
+                .wrapping_add(summary.message_id.map_or(0, |id| id.as_u128() as u64));
+            signature = signature
+                .wrapping_mul(31)
+                .wrapping_add(summary.updated_at.parse::<u64>().unwrap_or_default());
+        }
+        if self.conversation_change_set_signature == signature {
+            return;
+        }
+        let mut turn_summaries = turn_summaries;
         let message_order = self
             .ui
             .timeline
@@ -135,21 +156,40 @@ impl Application {
                 .then(a.id.cmp(&b.id))
         });
 
+        let mut cache = std::mem::take(&mut self.conversation_change_set_turn_cache);
+        cache.retain(|turn_id, _| {
+            turn_summaries
+                .iter()
+                .any(|summary| summary.id.as_str() == turn_id.as_str())
+        });
         let mut aggregate = HashMap::<String, FileChangeRecord>::new();
         for summary in turn_summaries {
-            let files = self
-                .store
-                .list_change_set_files_with_legacy(&summary.id)
-                .unwrap_or_default();
-            for file in files {
-                let Some(record) = self
-                    .store
-                    .load_change_set_file_diff_with_legacy(&summary.id, &file.path)
-                    .ok()
-                    .flatten()
-                else {
-                    continue;
-                };
+            let cached = cache.get(&summary.id).filter(|(cached_updated_at, _)| {
+                cached_updated_at.as_str() == summary.updated_at.as_str()
+            });
+            let turn_records: Vec<FileChangeRecord> = match cached {
+                Some((_, records)) => records.clone(),
+                None => {
+                    let files = self
+                        .store
+                        .list_change_set_files_with_legacy(&summary.id)
+                        .unwrap_or_default();
+                    files
+                        .iter()
+                        .filter_map(|file| {
+                            self.store
+                                .load_change_set_file_diff_with_legacy(&summary.id, &file.path)
+                                .ok()
+                                .flatten()
+                        })
+                        .collect()
+                }
+            };
+            cache.insert(
+                summary.id.clone(),
+                (summary.updated_at.clone(), turn_records.clone()),
+            );
+            for record in turn_records {
                 let path = normalize_tracked_path(&record.path);
                 if let Some(existing) = aggregate.get_mut(&path) {
                     existing.new_text = record.new_text.clone();
@@ -209,6 +249,8 @@ impl Application {
             ChangeSetStatus::Complete,
         );
         let _ = self.store.replace_change_set(&summary, &records);
+        self.conversation_change_set_signature = signature;
+        self.conversation_change_set_turn_cache = cache;
     }
 
     pub(in crate::application) fn persist_current_turn_file_changes(&mut self) -> bool {

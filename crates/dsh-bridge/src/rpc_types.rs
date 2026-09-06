@@ -60,6 +60,7 @@ pub struct ServerRequest {
     /// Wire tag — always the literal `"server-request"`.
     #[serde(rename = "type")]
     pub type_tag: String,
+    #[serde(default)]
     pub rpcId: RpcId,
     pub method: String,
     pub payload: Value,
@@ -87,23 +88,38 @@ impl ClientResponse {
 }
 
 /// Business success/failure result. The error arm is held as opaque JSON so an
-/// unknown error `code` does not break deserialization.
-///
-/// The `Err` arm is tried FIRST: with `value` defaulted on `Ok`, an untagged
-/// match ordered Ok-first would swallow error envelopes (`{"ok":false,
-/// "error":…}` parses fine as `Ok` with the default `value`). Err-first keeps
-/// error parsing authoritative while still accepting the typert void result
-/// (`{"ok":true}` with no `value` field — e.g. `commands/execute` for an
-/// unresolvable command line), which deserializes as `Ok` with `Value::Null`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(untagged)]
+/// unknown error `code` does not break deserialization. Manual serde keeps
+/// error parsing authoritative while accepting the typert void result
+/// (`{"ok":true}` with no `value` field).
+#[derive(Debug, Clone)]
 pub enum RpcResult<T> {
     Err { ok: bool, error: RpcError },
-    Ok {
-        ok: bool,
-        #[serde(default)]
-        value: T,
-    },
+    Ok { ok: bool, value: T },
+}
+
+impl<'de, T> Deserialize<'de> for RpcResult<T>
+where
+    T: serde::de::DeserializeOwned,
+{
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let raw = Value::deserialize(deserializer)?;
+        let ok = raw.get("ok").and_then(Value::as_bool).unwrap_or(false);
+        if raw.get("error").is_some_and(|value| !value.is_null()) {
+            let error =
+                serde_json::from_value(raw["error"].clone()).map_err(serde::de::Error::custom)?;
+            return Ok(Self::Err { ok, error });
+        }
+        let value = match raw.get("value") {
+            Some(value) => {
+                serde_json::from_value(value.clone()).map_err(serde::de::Error::custom)?
+            }
+            None => serde_json::from_value(Value::Null).map_err(serde::de::Error::custom)?,
+        };
+        Ok(Self::Ok { ok, value })
+    }
 }
 
 impl<T> RpcResult<T> {
@@ -122,6 +138,30 @@ impl<T> RpcResult<T> {
         match self {
             RpcResult::Ok { .. } => None,
             RpcResult::Err { error, .. } => Some(error),
+        }
+    }
+}
+
+impl<T: Serialize> Serialize for RpcResult<T> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        match self {
+            Self::Err { ok, error } => {
+                use serde::ser::SerializeStruct;
+                let mut state = serializer.serialize_struct("RpcResult", 2)?;
+                state.serialize_field("ok", ok)?;
+                state.serialize_field("error", error)?;
+                state.end()
+            }
+            Self::Ok { ok, value } => {
+                use serde::ser::SerializeStruct;
+                let mut state = serializer.serialize_struct("RpcResult", 2)?;
+                state.serialize_field("ok", ok)?;
+                state.serialize_field("value", value)?;
+                state.end()
+            }
         }
     }
 }
@@ -149,7 +189,9 @@ pub fn rpc_error_code(err: &anyhow::Error) -> Option<String> {
     let msg = format!("{err}");
     msg.split(": ")
         .next()
-        .filter(|code| !code.is_empty() && code.chars().all(|c| c.is_ascii_alphanumeric() || c == '-'))
+        .filter(|code| {
+            !code.is_empty() && code.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+        })
         .map(|code| code.to_string())
 }
 
@@ -260,6 +302,8 @@ pub struct AgentPresetSelectValue {
 /// (steering input into an active turn).
 #[derive(Debug, Clone, Serialize)]
 pub struct SessionPromptPayload {
+    #[serde(rename = "requestId")]
+    pub request_id: SessionId,
     #[serde(rename = "sessionId")]
     pub session_id: SessionId,
     pub mode: PromptMode,
@@ -331,10 +375,12 @@ pub struct SessionHistoryPayload {
 /// (each `{ event, view? }`); `has_more` indicates an older page exists.
 #[derive(Debug, Clone, Deserialize)]
 pub struct SessionHistoryValue {
-    #[serde(default)]
+    #[serde(default, rename = "records")]
     pub events: Vec<HistoryEntryRaw>,
     #[serde(default, rename = "hasMore")]
     pub has_more: bool,
+    #[serde(default)]
+    pub projections: Option<Value>,
 }
 
 /// One history entry, held as opaque JSON so the mapping layer can narrow it.
@@ -348,8 +394,35 @@ pub struct HistoryEntryRaw {
 /// `session.models` request.
 #[derive(Debug, Clone, Serialize)]
 pub struct SessionModelsPayload {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub args: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct SessionAddress {
+    pub kind: &'static str,
     #[serde(rename = "sessionId")]
     pub session_id: SessionId,
+}
+
+impl SessionAddress {
+    pub fn session(session_id: SessionId) -> Self {
+        Self {
+            kind: "session",
+            session_id,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct SessionPageRequest {
+    pub address: SessionAddress,
+    #[serde(rename = "throughSeq")]
+    pub through_seq: i64,
+    #[serde(skip_serializing_if = "Option::is_none", rename = "beforeSeq")]
+    pub before_seq: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none", rename = "maxMessages")]
+    pub max_messages: Option<u32>,
 }
 
 /// `session.selectModel` request.

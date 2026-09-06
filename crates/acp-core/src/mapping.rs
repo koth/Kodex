@@ -101,6 +101,12 @@ pub(crate) fn is_session_state_update(update: &SessionUpdate) -> bool {
         SessionUpdate::AvailableCommandsUpdate(_)
             | SessionUpdate::ConfigOptionUpdate(_)
             | SessionUpdate::CurrentModeUpdate(_)
+            // Tool completion can arrive after the turn's StopReason — the
+            // agent processes the tool result asynchronously and sends the
+            // final `ToolCallUpdate` in a later `session/update`. Filtering
+            // it out in `state_only` mode leaves the tool card stuck in
+            // "running" forever.
+            | SessionUpdate::ToolCallUpdate(_)
     )
 }
 
