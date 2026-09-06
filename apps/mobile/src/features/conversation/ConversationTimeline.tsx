@@ -166,8 +166,10 @@ const EmptyTimeline = (
   <EmptyState glyph={"\u2728"} title="还没有消息" hint="在下方输入需求,让智能体开始工作。" />
 );
 
-// Message bubble: user messages align right with the accent tint; assistant
-// messages align left on a raised surface. Steer messages are dimmed.
+// Message bubble: user messages align right in an accent-tinted bubble;
+// assistant messages render boxless, full width on the timeline background
+// (matching the desktop `.msg-assistant`, which has no border/fill). Steer
+// messages are dimmed.
 // Memoized: patch merges preserve object identity for untouched messages, so
 // a snapshot emit re-renders only the rows that actually changed instead of
 // re-parsing every mounted markdown body (which oscillated row heights and
@@ -196,18 +198,21 @@ const MessageBubble = memo(function MessageBubble({ message }: { message: ChatMe
     <View style={[timelineStyles.bubbleWrap, isUser ? { alignItems: "flex-end" } : { alignItems: "flex-start" }]}>
       {images.length > 0 ? <UserImageStrip images={images} /> : null}
       {text.trim().length > 0 ? (
-        <View
-          style={[
-            timelineStyles.bubble,
-            isUser ? timelineStyles.bubbleUser : timelineStyles.bubbleAssistant,
-            isSteer && { opacity: 0.6 },
-          ]}
-        >
-          {!isUser ? (
-            <Text style={timelineStyles.roleLabel}>智能体</Text>
-          ) : null}
-          <MarkdownBody body={text} />
-        </View>
+        isUser ? (
+          <View style={[timelineStyles.bubble, timelineStyles.bubbleUser, isSteer && { opacity: 0.6 }]}>
+            <MarkdownBody body={text} />
+          </View>
+        ) : (
+          // Assistant replies render boxless straight on the timeline
+          // background — same as the desktop `.msg-assistant` (plain app-bg,
+          // no border). A boxed surface per reply just stacks visual noise
+          // against the tool cards and reads cluttered on a phone. No role
+          // label either: user bubbles right-align in accent tint, so the
+          // sides alone already tell who said what.
+          <View style={[timelineStyles.assistantBody, isSteer && { opacity: 0.6 }]}>
+            <MarkdownBody body={text} />
+          </View>
+        )
       ) : null}
     </View>
   );
@@ -259,8 +264,10 @@ const timelineStyles = StyleSheet.create({
   bubbleWrap: { width: "100%" },
   bubble: { maxWidth: "88%", borderRadius: radius.lg, paddingHorizontal: spacing.md, paddingVertical: spacing.sm + 2, marginTop: spacing.xs },
   bubbleUser: { backgroundColor: colors.accentDim, borderBottomRightRadius: radius.sm, borderWidth: 1, borderColor: "rgba(91,140,255,0.25)" },
-  bubbleAssistant: { backgroundColor: colors.surface, borderBottomLeftRadius: radius.sm, borderWidth: 1, borderColor: colors.border },
-  roleLabel: { color: colors.accent, fontSize: 10, fontWeight: "700", textTransform: "uppercase", letterSpacing: 0.6, marginBottom: 4 },
+  // Assistant replies: NO box. Full-width plain container on the timeline bg —
+  // the markdown palette (MarkdownBody) is already tuned for the app bg, and
+  // tool cards above/below stay flush-aligned with the reply text.
+  assistantBody: { alignSelf: "stretch", marginTop: spacing.xs },
   // Attached-image thumbnails: square center-crop previews (cover = the
   // shorter edge fills, the longer edge is cropped to its middle), mirroring
   // the desktop `.msg-user-image` object-fit: cover.

@@ -330,12 +330,12 @@ impl HttpClient {
         session_id: &str,
         line: &str,
     ) -> anyhow::Result<Option<crate::rpc_types::CommandsExecuteValue>> {
+        // Bare wire fields; `remote_payload` adds the single `{ "args": … }`
+        // envelope (see CommandsExecutePayload for the double-wrap hazard).
         let payload = crate::rpc_types::CommandsExecutePayload {
-            args: crate::rpc_types::CommandsExecuteArgs {
-                agent_id: session_id.to_string(),
-                line: line.to_string(),
-                images: Vec::new(),
-            },
+            agent_id: session_id.to_string(),
+            line: line.to_string(),
+            images: Vec::new(),
         };
         self.call_bounded(
             "commands/execute",
@@ -697,6 +697,57 @@ pub fn follow_item_to_frames(
 mod tests {
     use super::*;
     use tokio_tungstenite::tungstenite::Message;
+
+    #[test]
+    fn remote_payload_commands_execute_wraps_bare_fields_once() {
+        // Regression: `commands/execute` payloads carry the descriptor's
+        // wire fields bare, so the default branch must wrap them into exactly
+        // one `args` object. The bug this guards against was a payload with
+        // its own `args` field double-wrapping into `{ "args": { "args": … } }`,
+        // which the typert gateway rejects with `arguments-invalid`
+        // ("missing agentId, line, images; unexpected args") — /compact then
+        // failed silently for the user (fire-and-forget logs the RPC error).
+        let payload = serde_json::json!({
+            "agentId": "session-1",
+            "line": "/compact",
+            "images": [],
+        });
+        let wire = remote_payload("commands/execute", payload);
+        assert_eq!(wire["args"]["agentId"], "session-1");
+        assert_eq!(wire["args"]["line"], "/compact");
+        assert_eq!(wire["args"]["images"], serde_json::json!([]));
+        assert_eq!(
+            wire.as_object().unwrap().len(),
+            1,
+            "wire envelope must contain only `args`, got {wire}"
+        );
+        assert!(
+            wire["args"].get("args").is_none(),
+            "double-wrapped args: {wire}"
+        );
+    }
+
+    #[test]
+    fn remote_payload_agent_presets_select_wraps_bare_fields_once() {
+        // agentPresets/select also rides the default branch: bare fields,
+        // single wrap.
+        let payload = serde_json::json!({ "id": "standard", "selected": [] });
+        let wire = remote_payload("agentPresets/select", payload);
+        assert_eq!(wire["args"]["id"], "standard");
+        assert_eq!(wire.as_object().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn remote_payload_legacy_endpoints_keep_their_request_key() {
+        // Dotted-legacy endpoints nest under their own request key.
+        let payload = serde_json::json!({ "cwd": "/tmp" });
+        let wire = remote_payload("session/create", payload);
+        assert_eq!(wire["args"]["request"]["cwd"], "/tmp");
+        // No-argument endpoints must send an EMPTY args object — an `args`
+        // key inside would be rejected by the gateway's exact-args check.
+        let wire = remote_payload("session/modelCatalog", serde_json::json!({}));
+        assert_eq!(wire["args"], serde_json::json!({}));
+    }
 
     fn remote_item(value: Value) -> Message {
         Message::Text(

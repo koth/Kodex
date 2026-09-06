@@ -30,7 +30,8 @@ mod transport;
 pub use host::SessionSink;
 pub use host::{HarnessHost, HarnessHostRegistry, HarnessHostRegistryHandle};
 pub use process::{
-    DshChild, SpawnDshWebConfig, kill_child, resolve_dsh_launch, resolve_npm_launch, spawn_dsh_web,
+    DshChild, SpawnDshWebConfig, kill_child, reap_orphaned_dsh_web, resolve_dsh_launch,
+    resolve_npm_launch, spawn_dsh_web,
 };
 pub use rpc_types::{
     ClientResponse, PromptContentPart, PromptMode, SessionCreatePayload, SessionPromptPayload,

@@ -11,12 +11,15 @@
 //! session targeting the same spawned endpoint reuses the same `dsh web`
 //! process (one process, one SSE pair). The spawned child is attached to the
 //! registry's `HarnessHost`; when the last sharing session exits, the host
-//! teardown kills the child.
+//! teardown kills the child. A crash or force-quit runs no destructors, so
+//! orphaned children from previous runs are reclaimed by
+//! [`DshBringup::reap_orphaned_hosts`] (startup hook + spawn branch).
 
 use crate::AppPaths;
 use crate::settings::{build_dsh_settings_config, dsh_provider_keys, ensure_dsh_proxy_routing};
 use dsh_bridge::{
-    DshChild, HarnessHost, HarnessHostRegistry, SpawnDshWebConfig, spawn_dsh_web, write_settings,
+    DshChild, HarnessHost, HarnessHostRegistry, SpawnDshWebConfig, reap_orphaned_dsh_web,
+    spawn_dsh_web, write_settings,
 };
 use std::sync::{Arc, Mutex, OnceLock};
 
@@ -116,6 +119,14 @@ impl DshBringup {
         write_settings(&paths.dsh_settings_path(), &config)
             .map_err(|e| format!("failed to write dsh settings.yaml: {e}"))?;
 
+        // 1.1 Reclaim `dsh web` processes orphaned by a previous crashed run
+        //     BEFORE spawning the replacement: a crash/force-quit runs no
+        //     destructors, so the old child (parent dead, DSH_HOME = Kodex's
+        //     home) is a pure leak. The fresh child is spawned after this and
+        //     can never be a candidate.
+        let home = paths.dsh_dir().display().to_string();
+        reap_orphaned_dsh_web(&home);
+
         // 1.5 Seed ~/.kodex/dsh/AGENTS.md (the dsh user-global instruction
         //     file) when missing, so file edits go through the dedicated file
         //     tools and stay observable as structured diffs.
@@ -124,7 +135,7 @@ impl DshBringup {
         // 2. Spawn `dsh web --port 0` and wait for the readiness line.
         let provider_keys = dsh_provider_keys(paths);
         let spawn_config = SpawnDshWebConfig {
-            dsh_home: paths.dsh_dir().display().to_string(),
+            dsh_home: home,
             provider_keys,
             extra_env: vec![
                 ("DSH_TELEMETRY_DISABLED".to_string(), "1".to_string()),
@@ -162,6 +173,39 @@ impl DshBringup {
             if let Some(host) = managed.take() {
                 host.host.teardown();
             }
+        }
+    }
+
+    /// Reclaim `dsh web` processes orphaned by a previous crashed run. Safe
+    /// to call at any time: hosts of live Kodex instances keep their live
+    /// parent, and user-launched servers carry another `DSH_HOME`, so both
+    /// are left alone (see `reap_orphaned_dsh_web`). Called from the desktop
+    /// shell's startup hook so leftovers are freed even before any session
+    /// needs a harness host, and again from `ensure_harness_endpoint`'s
+    /// spawn branch.
+    pub fn reap_orphaned_hosts(&self) {
+        let paths = match AppPaths::resolve() {
+            Ok(paths) => paths,
+            Err(err) => {
+                tracing::warn!(
+                    target: "dsh_bringup",
+                    error = %err,
+                    "orphan reap skipped: AppPaths resolve failed"
+                );
+                return;
+            }
+        };
+        let home = paths.dsh_dir().display().to_string();
+        let reaped = reap_orphaned_dsh_web(&home);
+        if !reaped.is_empty() {
+            // `eprintln` is invisible for a GUI-launched app (stderr goes
+            // nowhere); tracing lands in ~/.kodex/logs/app.log where the
+            // per-pid reap lines from `reap_orphaned_dsh_web` also live.
+            tracing::info!(
+                target: "dsh_bringup",
+                pids = ?reaped,
+                "reaped orphaned dsh web process(es) from previous runs"
+            );
         }
     }
 }

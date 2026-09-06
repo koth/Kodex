@@ -5,8 +5,13 @@
 //! the OS pick a free loopback port (`--port 0`), discovers the bound port
 //! from the readiness line dsh prints on stdout, and shares it across
 //! sessions via the `HarnessHostRegistry`. A Kodex-spawned process is killed
-//! only when the last sharing session exits (stdin EOF grace then kill); an
-//! externally-managed endpoint is never killed by Kodex.
+//! when the last sharing session exits (SIGTERM grace then SIGKILL on Unix);
+//! an externally-managed endpoint is never killed by Kodex. Two backstops
+//! cover the paths where teardown never runs: a tiny exit-watchdog process
+//! polls the Kodex pid and kills the server within seconds of any abrupt
+//! Kodex death (force-quit, SIGKILL, panic), and [`reap_orphaned_dsh_web`]
+//! reclaims at the next bring-up whatever outlived even the watchdog
+//! (watchdog killed together with Kodex, or an uninterruptible server).
 //!
 //! The dsh web profile prints `dsh web: http://127.0.0.1:<port>` to stdout
 //! the moment the server is listening (`packages/bundle/web-app/src/index.ts`).
@@ -95,14 +100,40 @@ pub fn kill_child_reaped(child: DshChild) -> std::io::Result<bool> {
     let mut reaped = false;
     if let Ok(mut guard) = child.inner.lock() {
         if let Some(mut proc) = guard.take() {
-            // Closing stdin signals a graceful shutdown to the Node process;
-            // dsh's process-shutdown controller disposes the cordis tree.
-            let _ = proc.stdin.take();
-            // Then kill if still alive. Poll `try_wait` briefly instead of the
-            // blocking `wait()`: the latter requires a tokio runtime context
-            // and can hang when called from a plain thread. The kill-on-drop
-            // job (when enabled) reaps the whole tree on `DshChild` drop, so
-            // an unsettled direct child is not a leak.
+            // Graceful first, force second. The child's stdin is `Stdio::null`
+            // (nothing reads it) and the `dsh web` command does not bind the
+            // CLI's stdin-EOF shutdown (only the ACP stdio command does), so
+            // "close stdin" cannot be the grace leg. On Unix send SIGTERM,
+            // give the node process a moment to settle, then SIGKILL the
+            // survivor. A hard kill is the last resort, not the plan.
+            #[cfg(unix)]
+            if let Some(pid) = proc.id() {
+                let _ = unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM) };
+                for _ in 0..40 {
+                    match proc.try_wait() {
+                        Ok(Some(_)) => {
+                            reaped = true;
+                            break;
+                        }
+                        Ok(None) => std::thread::sleep(Duration::from_millis(25)),
+                        Err(_) => break,
+                    }
+                }
+                if !reaped {
+                    tracing::warn!(
+                        target: "dsh-bridge::spawn",
+                        pid,
+                        "dsh web ignored SIGTERM for 1s; escalating to SIGKILL"
+                    );
+                }
+            }
+            // `start_kill()` (SIGKILL on Unix, TerminateProcess on Windows) is
+            // the immediate kill on Windows and the escalation on Unix. Poll
+            // `try_wait` briefly instead of the blocking `wait()`: the latter
+            // requires a tokio runtime context and can hang when called from
+            // a plain thread. The kill-on-drop job (when enabled) reaps the
+            // whole tree on `DshChild` drop, so an unsettled direct child is
+            // not a leak.
             let _ = proc.start_kill();
             for _ in 0..40 {
                 match proc.try_wait() {
@@ -210,6 +241,290 @@ pub(crate) fn kill_port_owner(port: u16) {
 
 #[cfg(not(windows))]
 pub(crate) fn kill_port_owner(_port: u16) {}
+
+/// Self-terminating watchdog: a tiny `sh` child that polls the Kodex process
+/// every few seconds and SIGTERM→SIGKILLs the `dsh web` pid the moment Kodex
+/// disappears. Normal quits already kill `dsh web` via [`kill_child_reaped`];
+/// this is the belt for every path that skips teardown — force-quit, SIGKILL,
+/// panic — so the server can never outlive Kodex by more than one poll
+/// interval. The watchdog also exits on its own when the `dsh web` pid dies
+/// (nothing left to guard), so a clean quit leaves no stray watchdog behind.
+///
+/// The caller drops the returned handle on purpose: the watchdog is
+/// intentionally untracked (teardown must not wait for it — it self-exits
+/// within one poll interval), and tokio's orphan queue reaps it when it
+/// exits. Returns the handle (tests hold it to observe the exit); a spawn
+/// failure degrades to the next-launch orphan reap and is only a warning.
+#[cfg(unix)]
+fn spawn_exit_watchdog(parent_pid: u32, dsh_pid: u32) -> Option<Child> {
+    // $1 = parent (Kodex) pid, $2 = dsh web pid.
+    // - Parent alive + dsh alive → keep watching.
+    // - dsh dead → exit (clean quit already handled the kill).
+    // - Parent dead → SIGTERM, bounded grace, SIGKILL, exit.
+    // The liveness re-check before SIGTERM keeps a `dsh web` that died
+    // naturally in the same poll window from being signalled needlessly.
+    const SCRIPT: &str = r#"while kill -0 "$1" 2>/dev/null; do
+  kill -0 "$2" 2>/dev/null || exit 0
+  sleep 3
+done
+kill -0 "$2" 2>/dev/null || exit 0
+kill -TERM "$2" 2>/dev/null
+i=0
+while [ "$i" -lt 8 ]; do
+  kill -0 "$2" 2>/dev/null || exit 0
+  sleep 0.5
+  i=$((i + 1))
+done
+kill -KILL "$2" 2>/dev/null
+exit 0
+"#;
+    let mut cmd = Command::new("/bin/sh");
+    cmd.arg("-c")
+        .arg(SCRIPT)
+        .arg("kodex-dsh-watchdog")
+        .arg(parent_pid.to_string())
+        .arg(dsh_pid.to_string())
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    match cmd.spawn() {
+        Ok(child) => {
+            tracing::info!(
+                target: "dsh-bridge::spawn",
+                watchdog_pid = child.id(),
+                parent_pid,
+                dsh_pid,
+                "spawned dsh web exit watchdog"
+            );
+            Some(child)
+        }
+        Err(err) => {
+            tracing::warn!(
+                target: "dsh-bridge::spawn",
+                error = %err,
+                "failed to spawn dsh web exit watchdog; abrupt Kodex death relies on next-launch reap"
+            );
+            None
+        }
+    }
+}
+
+// ---- Orphaned `dsh web` reap (Unix) ----
+//
+// Kodex kills its spawned `dsh web` child on the normal exit paths (window
+// close / ExitRequested → `shutdown_all` → teardown). A crash, `SIGKILL`, or
+// force-quit runs no destructors, so the child outlives the app: its parent
+// dies and the process is reparented to init/launchd. Windows covers that
+// path with the kill-on-close job object (the job handle lives in the owning
+// process, so a dead Kodex closes it and the tree dies with it). Unix has no
+// equivalent, so the next Kodex run reclaims the leftovers: every `dsh web`
+// process whose parent no longer exists AND whose `DSH_HOME` is Kodex's dsh
+// home is terminated. Both checks are required — a live parent means some
+// running Kodex still owns the host (another app instance), and a different
+// `DSH_HOME` means the user launched that server themselves.
+
+/// One parsed `ps` row (`pid ppid command`).
+#[cfg(any(unix, test))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PsRow {
+    pub pid: u32,
+    pub ppid: u32,
+    pub command: String,
+}
+
+/// Parse `ps -o pid=,ppid=,command=` output. Leading whitespace and multiple
+/// spaces between fields are tolerated; malformed rows are skipped.
+#[cfg(any(unix, test))]
+pub(crate) fn parse_ps_rows(output: &str) -> Vec<PsRow> {
+    output
+        .lines()
+        .filter_map(|line| {
+            let mut fields = line.split_whitespace();
+            let pid = fields.next()?.parse::<u32>().ok()?;
+            let ppid = fields.next()?.parse::<u32>().ok()?;
+            let command = fields.collect::<Vec<_>>().join(" ");
+            if command.is_empty() {
+                return None;
+            }
+            Some(PsRow {
+                pid,
+                ppid,
+                command,
+            })
+        })
+        .collect()
+}
+
+/// Whether a `ps` command line looks like a `dsh web` server: some token
+/// whose basename is `dsh` (bare name, npm shim path, or absolute path all
+/// end in `dsh`) followed by the `web` subcommand. Matching the adjacent
+/// subcommand keeps `dsh acp`, `dsh --version`, or an editor running on a
+/// file named `dsh` from matching.
+#[cfg(any(unix, test))]
+pub(crate) fn is_dsh_web_command(command: &str) -> bool {
+    let tokens: Vec<&str> = command.split_whitespace().collect();
+    tokens
+        .windows(2)
+        .any(|pair| is_dsh_token(pair[0]) && pair[1] == "web")
+}
+
+#[cfg(any(unix, test))]
+fn is_dsh_token(token: &str) -> bool {
+    match token.rsplit('/').next() {
+        Some(basename) => basename == "dsh",
+        None => false,
+    }
+}
+
+/// Orphaned = the parent is gone: reparented to init/launchd (`ppid == 1`) or
+/// pointing at a pid that is not in the live table at all (parent exited but
+/// the platform still reports the dead pid).
+#[cfg(any(unix, test))]
+fn is_orphaned(row: &PsRow, live_pids: &std::collections::HashSet<u32>) -> bool {
+    row.ppid == 1 || !live_pids.contains(&row.ppid)
+}
+
+/// Whether an environment listing declares `DSH_HOME=<expected>`. Accepts
+/// both shapes the platforms return: macOS `ps eww -p <pid> -o command=`
+/// output (space-separated `KEY=VALUE` pairs prefixed to the command line)
+/// and Linux `/proc/<pid>/environ` (NUL-separated `KEY=VALUE` records).
+#[cfg(any(unix, test))]
+pub(crate) fn env_declares_dsh_home(env_text: &str, expected: &str) -> bool {
+    let wanted = format!("DSH_HOME={expected}");
+    env_text
+        .split(['\0', ' ', '\n'])
+        .any(|record| record == wanted)
+}
+
+/// Reclaim `dsh web` processes orphaned by previous (crashed) Kodex runs.
+/// Returns the pids that were terminated. Safety rules: a live parent means
+/// the host belongs to a running Kodex and is left alone, and `DSH_HOME` must
+/// match Kodex's dsh home so user-launched servers on other homes survive.
+/// Processes whose environment cannot be read are left alone too — a
+/// misidentified kill is worse than a surviving orphan.
+#[cfg(unix)]
+pub fn reap_orphaned_dsh_web(dsh_home: &str) -> Vec<u32> {
+    // `-w -w` (both BSD ps and procps) lifts the command column truncation
+    // for piped output; the `dsh web` match needs the full argument vector.
+    let ps_args: &[&str] = if cfg!(target_os = "macos") {
+        &["-ww", "-axo", "pid=,ppid=,command="]
+    } else {
+        &["-e", "-w", "-w", "-o", "pid=,ppid=,command="]
+    };
+    let output = match std::process::Command::new("ps").args(ps_args).output() {
+        Ok(out) => String::from_utf8_lossy(&out.stdout).into_owned(),
+        Err(err) => {
+            tracing::warn!(
+                target: "dsh-bridge::spawn",
+                error = %err,
+                "orphan reap skipped: `ps` listing failed"
+            );
+            return Vec::new();
+        }
+    };
+    let rows = parse_ps_rows(&output);
+    let live_pids: std::collections::HashSet<u32> = rows.iter().map(|row| row.pid).collect();
+    let candidates: Vec<u32> = rows
+        .iter()
+        .filter(|row| is_dsh_web_command(&row.command) && is_orphaned(row, &live_pids))
+        .map(|row| row.pid)
+        .collect();
+
+    let mut reaped = Vec::new();
+    for pid in candidates {
+        if !process_env_declares_dsh_home(pid, dsh_home) {
+            continue;
+        }
+        if terminate_non_child(pid) {
+            reaped.push(pid);
+            tracing::info!(
+                target: "dsh-bridge::spawn",
+                pid,
+                "reaped orphaned dsh web process from a previous run"
+            );
+        } else {
+            tracing::warn!(
+                target: "dsh-bridge::spawn",
+                pid,
+                "orphaned dsh web process survived SIGTERM+SIGKILL"
+            );
+        }
+    }
+    reaped
+}
+
+/// Windows: the kill-on-close job object already reaps the spawned tree when
+/// the owning Kodex process dies, so there is nothing to scan for.
+#[cfg(not(unix))]
+pub fn reap_orphaned_dsh_web(_dsh_home: &str) -> Vec<u32> {
+    Vec::new()
+}
+
+/// Read a non-child process's environment and check `DSH_HOME`. Best-effort:
+/// `false` on any failure so the caller leaves the process alone.
+#[cfg(unix)]
+fn process_env_declares_dsh_home(pid: u32, expected: &str) -> bool {
+    if cfg!(target_os = "macos") {
+        let out = std::process::Command::new("ps")
+            .args(["eww", "-p"])
+            .arg(pid.to_string())
+            .arg("-o")
+            .arg("command=")
+            .output();
+        match out {
+            Ok(o) if o.status.success() => {
+                env_declares_dsh_home(&String::from_utf8_lossy(&o.stdout), expected)
+            }
+            _ => false,
+        }
+    } else {
+        match std::fs::read(format!("/proc/{pid}/environ")) {
+            Ok(raw) => env_declares_dsh_home(&String::from_utf8_lossy(&raw), expected),
+            Err(_) => false,
+        }
+    }
+}
+
+/// Terminate a non-child process: SIGTERM, bounded wait, then SIGKILL.
+/// Returns `true` when the process is gone.
+#[cfg(unix)]
+fn terminate_non_child(pid: u32) -> bool {
+    let rc = unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM) };
+    if rc != 0 {
+        // ESRCH: already gone (nothing to do, but not a failure);
+        // EPERM: not ours — never escalate.
+        return rc == -1 && last_errno_is(libc::ESRCH);
+    }
+    for _ in 0..80 {
+        if !pid_alive(pid) {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    let _ = unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL) };
+    for _ in 0..80 {
+        if !pid_alive(pid) {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    false
+}
+
+/// `kill(pid, 0)` liveness probe: 0 = alive; EPERM = alive (another user's);
+/// ESRCH = gone.
+#[cfg(unix)]
+fn pid_alive(pid: u32) -> bool {
+    let rc = unsafe { libc::kill(pid as libc::pid_t, 0) };
+    rc == 0 || (rc == -1 && last_errno_is(libc::EPERM))
+}
+
+/// The errno of the immediately preceding libc call (macOS and glibc store it
+/// in different TLS slots; `std::io::Error::last_os_error` abstracts that).
+#[cfg(unix)]
+fn last_errno_is(expected: i32) -> bool {
+    std::io::Error::last_os_error().raw_os_error() == Some(expected)
+}
 
 /// Configuration for spawning a Kodex-managed `dsh web` process.
 pub struct SpawnDshWebConfig {
@@ -385,6 +700,24 @@ async fn spawn_with_args(
 
     // The stderr drain can keep running; it ends when the child exits.
     let _ = stderr_task;
+
+    // Audit trail: tie the ps-visible pid to the endpoint so quit-time kills
+    // and startup reaps can be matched against this line in app.log.
+    if let Some(pid) = child.id() {
+        tracing::info!(
+            target: "dsh-bridge::spawn",
+            pid,
+            endpoint = %endpoint,
+            "dsh web spawned"
+        );
+        // Unix only: parent-death watchdog so an abruptly-killed Kodex
+        // (force-quit, SIGKILL, panic) cannot leave the server running.
+        // Windows is covered by the kill-on-close job object below. The
+        // handle is dropped immediately: the watchdog self-exits when either
+        // side dies and tokio reaps the orphan.
+        #[cfg(unix)]
+        drop(spawn_exit_watchdog(std::process::id(), pid));
+    }
 
     let mut child = DshChild::new(child);
     #[cfg(windows)]
@@ -982,6 +1315,93 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn exit_watchdog_kills_the_dsh_pid_when_the_parent_dies() {
+        // Two `sleep` stand-ins: one as the "Kodex parent", one as the
+        // "dsh web" server. SIGKILLing the parent (force-quit/crash) must
+        // make the watchdog terminate the server within one poll interval
+        // (3s) plus the SIGTERM grace (4s). `try_wait` — not `kill -0` —
+        // decides liveness: a killed-but-unreaped zombie still answers
+        // `kill -0`, and the victim is this test's own child.
+        let spawn_sleeper = || {
+            Command::new("sleep")
+                .arg("60")
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .expect("spawn sleeper")
+        };
+        let mut parent = spawn_sleeper();
+        let mut victim = spawn_sleeper();
+        let parent_pid = parent.id().unwrap();
+        let victim_pid = victim.id().unwrap();
+        assert!(spawn_exit_watchdog(parent_pid, victim_pid).is_some());
+
+        let _ = unsafe { libc::kill(parent_pid as libc::pid_t, libc::SIGKILL) };
+        let _ = parent.wait().await;
+
+        let mut victim_dead = false;
+        for _ in 0..200 {
+            match victim.try_wait() {
+                Ok(Some(_)) => {
+                    victim_dead = true;
+                    break;
+                }
+                _ => std::thread::sleep(Duration::from_millis(50)),
+            }
+        }
+        // Best-effort cleanup if the watchdog failed.
+        let _ = unsafe { libc::kill(victim_pid as libc::pid_t, libc::SIGKILL) };
+        let _ = victim.wait().await;
+        assert!(
+            victim_dead,
+            "exit watchdog did not kill the dsh pid within 10s of parent death"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn exit_watchdog_exits_when_the_dsh_pid_dies_first() {
+        // Clean-quit path: the server dies while Kodex lives on. The watchdog
+        // must notice and exit by itself instead of lingering (or, worse,
+        // signalling a reused pid later).
+        let mut victim = Command::new("sleep")
+            .arg("60")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn victim");
+        let victim_pid = victim.id().unwrap();
+        // The test process itself is the "parent" and stays alive.
+        let mut watchdog = spawn_exit_watchdog(std::process::id(), victim_pid)
+            .expect("watchdog spawn");
+
+        let _ = unsafe { libc::kill(victim_pid as libc::pid_t, libc::SIGKILL) };
+        let _ = victim.wait().await;
+
+        // The watchdog polls every 3s; allow 8s for it to notice and exit.
+        // `try_wait` — not `kill -0` — decides: an exited-but-unreaped
+        // zombie still answers `kill -0`, and the watchdog is this test's
+        // own child.
+        let mut watchdog_gone = false;
+        for _ in 0..160 {
+            match watchdog.try_wait() {
+                Ok(Some(_)) => {
+                    watchdog_gone = true;
+                    break;
+                }
+                _ => std::thread::sleep(Duration::from_millis(50)),
+            }
+        }
+        assert!(
+            watchdog_gone,
+            "exit watchdog lingered after the dsh pid died"
+        );
+    }
+
     #[tokio::test]
     async fn spawn_dsh_web_fails_fast_without_a_dsh_binary() {
         // 11.5: with no resolvable `dsh` binary, spawn fails fast with a
@@ -1036,5 +1456,249 @@ mod tests {
         .unwrap();
         assert_eq!(endpoint, "http://127.0.0.1:41237");
         let _ = child.kill().await;
+    }
+
+    // ---- orphan reap ----
+
+    #[test]
+    fn parse_ps_rows_tolerates_field_padding_and_skips_malformed() {
+        let raw = "  123  456 node /opt/homebrew/bin/dsh web --port 0 --no-open\n\
+                   7    1 /bin/sleep 60\n\
+                   not-a-pid 9 whatever\n\
+                   10 11\n";
+        let rows = parse_ps_rows(raw);
+        assert_eq!(
+            rows,
+            vec![
+                PsRow {
+                    pid: 123,
+                    ppid: 456,
+                    command: "node /opt/homebrew/bin/dsh web --port 0 --no-open".into()
+                },
+                PsRow {
+                    pid: 7,
+                    ppid: 1,
+                    command: "/bin/sleep 60".into()
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn is_dsh_web_command_matches_only_the_server_invocation() {
+        // Kodex spawns `dsh web` via a shell wrapper, so the argv may carry an
+        // absolute path (script shim), a bare `dsh`, or a node-prefixed line.
+        for line in [
+            "node /opt/homebrew/bin/dsh web --port 0 --no-open",
+            "/opt/homebrew/bin/dsh web --port 0 --no-open",
+            "dsh web",
+            "/bin/sh -c /opt/homebrew/bin/dsh web --port 0",
+        ] {
+            assert!(is_dsh_web_command(line), "should match: {line}");
+        }
+        // The bigram (`dsh`, `web`) is deliberately a loose candidate filter:
+        // a non-dsh argv that happens to contain the adjacent pair (e.g.
+        // `node server.js dsh web`) cannot be told apart from a node-launched
+        // dsh by argv alone. The real guards are the orphan check (dead
+        // parent) and the DSH_HOME environment match, tested separately.
+        for line in [
+            "dsh acp",
+            "dsh --version",
+            "dshweb serve",
+            "sleep 60",
+            "/opt/homebrew/bin/dshx web",
+            "/opt/homebrew/bin/dsh website",
+        ] {
+            assert!(!is_dsh_web_command(line), "should NOT match: {line}");
+        }
+    }
+
+    #[test]
+    fn orphan_rules_flag_dead_parents_only() {
+        let live: std::collections::HashSet<u32> = [1u32, 100, 200, 300].into_iter().collect();
+        // Live parent -> not an orphan.
+        assert!(!is_orphaned(
+            &PsRow {
+                pid: 300,
+                ppid: 100,
+                command: "dsh web".into()
+            },
+            &live
+        ));
+        // Reparented to init after the parent died.
+        assert!(is_orphaned(
+            &PsRow {
+                pid: 301,
+                ppid: 1,
+                command: "dsh web".into()
+            },
+            &live
+        ));
+        // Parent pid no longer in the live table (exited, still reported).
+        assert!(is_orphaned(
+            &PsRow {
+                pid: 302,
+                ppid: 9999,
+                command: "dsh web".into()
+            },
+            &live
+        ));
+    }
+
+    #[test]
+    fn env_declares_dsh_home_matches_both_platform_shapes() {
+        let home = "/Users/dev/.kodex/dsh";
+        // macOS `ps eww -o command=`: space-separated KEY=VALUE pairs
+        // prefixed to the command line.
+        let mac = "DSH_HOME=/Users/dev/.kodex/dsh PATH=/usr/bin node /opt/homebrew/bin/dsh web --port 0 --no-open";
+        assert!(env_declares_dsh_home(mac, home));
+        // Linux /proc/<pid>/environ: NUL-separated records.
+        let linux = "PATH=/usr/bin\0DSH_HOME=/Users/dev/.kodex/dsh\0TERM=xterm\0";
+        assert!(env_declares_dsh_home(linux, home));
+        // Any other home (a user-launched server) must NOT match.
+        assert!(!env_declares_dsh_home(
+            "DSH_HOME=/Users/dev/.dsh node dsh web",
+            home
+        ));
+        assert!(!env_declares_dsh_home("", home));
+    }
+
+    /// End-to-end reap against REAL orphaned fake `dsh web` processes.
+    /// Spawns each fake via a shell that exits immediately (reparenting the
+    /// child to init — exactly what a crashed Kodex leaves behind), then
+    /// verifies: 1. a reap targeting a DIFFERENT DSH_HOME leaves the orphans
+    /// alone (user-launched servers on other homes survive); 2. a reap
+    /// targeting the orphan's own DSH_HOME terminates exactly that one.
+    ///
+    /// The fake `dsh` script uses a `#!/usr/bin/env node` interpreter because
+    /// the reap's env check reads `DSH_HOME` from the target's environment,
+    /// and macOS hides the environment of platform binaries (SIP) — only
+    /// user-installed binaries like `node` expose it to `ps eww`. The real
+    /// kodex-spawned `dsh web` is a `node` process, so this is the same shape
+    /// the production reap sees. Every poll is bounded — the test can fail
+    /// fast, never hang.
+    #[cfg(unix)]
+    #[test]
+    fn reap_kills_only_kodex_home_orphans() {
+        // Skip (not fail) on machines without node: the fake's env must be
+        // ps-visible, which requires a non-platform interpreter.
+        if std::process::Command::new("node")
+            .arg("--version")
+            .output()
+            .is_err()
+        {
+            eprintln!("skipping: no `node` on PATH for the reap live test");
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        // Two script dirs, both with a `dsh` script: distinct command lines
+        // (one per dir) let the test tell the two orphans apart.
+        let make_fake = |name: &str| {
+            let fake_dir = dir.path().join(name);
+            std::fs::create_dir_all(&fake_dir).unwrap();
+            let script = fake_dir.join("dsh");
+            std::fs::write(
+                &script,
+                "#!/usr/bin/env node\nsetInterval(() => {}, 1000);\n",
+            )
+            .unwrap();
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755))
+                    .unwrap();
+            }
+            (fake_dir, script.display().to_string())
+        };
+        let (dir_a, line_a) = make_fake("a");
+        let (dir_b, line_b) = make_fake("b");
+        // Kodex's dsh home (dir_a) vs a "user" home (dir_b): the env must
+        // differ so the reap's DSH_HOME guard is what separates them.
+        let home_a = dir_a.display().to_string();
+        let home_b = dir_b.display().to_string();
+
+        let spawn_orphan = |line: &str, home: &str| {
+            std::process::Command::new("/bin/sh")
+                .arg("-c")
+                .arg(format!("'{line}' web &"))
+                .env("DSH_HOME", home)
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .unwrap();
+        };
+        spawn_orphan(&line_a, &home_a);
+        spawn_orphan(&line_b, &home_b);
+
+        // Wait (bounded) until both fakes appear as orphans in the table.
+        let find_orphan = |line: &str| -> Option<u32> {
+            let rows = list_ps_rows_for_test();
+            let live: std::collections::HashSet<u32> = rows.iter().map(|r| r.pid).collect();
+            rows.iter()
+                .find(|r| r.command.contains(line) && is_orphaned(r, &live))
+                .map(|r| r.pid)
+        };
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let (orphan_a, orphan_b) = loop {
+            if let (Some(a), Some(b)) = (find_orphan(&line_a), find_orphan(&line_b)) {
+                break (a, b);
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "fake dsh web orphans never appeared in the process table"
+            );
+            std::thread::sleep(Duration::from_millis(50));
+        };
+
+        // 1. Reaping a foreign home must leave BOTH orphans alone.
+        let foreign_home = dir.path().join("home-c").display().to_string();
+        let reaped = reap_orphaned_dsh_web(&foreign_home);
+        assert!(
+            !reaped.contains(&orphan_a) && !reaped.contains(&orphan_b),
+            "reap with a foreign home killed orphans: {reaped:?}"
+        );
+
+        // 2. Reaping home_a terminates home_a's orphan and leaves home_b's
+        //    (a "user" server on another home) running.
+        let reaped = reap_orphaned_dsh_web(&home_a);
+        assert!(
+            reaped.contains(&orphan_a),
+            "home_a orphan not reaped: {reaped:?}"
+        );
+        assert!(
+            !reaped.contains(&orphan_b),
+            "home_b orphan must survive: {reaped:?}"
+        );
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while pid_alive(orphan_a) && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        assert!(!pid_alive(orphan_a), "orphan survived the reap");
+        assert!(pid_alive(orphan_b), "home_b orphan was killed by the home_a reap");
+
+        // Cleanup: home_b's fake is deliberately still running; remove it so
+        // the test leaves nothing behind.
+        let _ = unsafe { libc::kill(orphan_b as libc::pid_t, libc::SIGKILL) };
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        while pid_alive(orphan_b) && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        assert!(!pid_alive(orphan_b), "test cleanup failed");
+    }
+
+    /// `ps` listing for tests — the same invocation `reap_orphaned_dsh_web`
+    /// uses, so the live test observes the table exactly as the reap does.
+    #[cfg(unix)]
+    fn list_ps_rows_for_test() -> Vec<PsRow> {
+        let ps_args: &[&str] = if cfg!(target_os = "macos") {
+            &["-ww", "-axo", "pid=,ppid=,command="]
+        } else {
+            &["-e", "-w", "-w", "-o", "pid=,ppid=,command="]
+        };
+        let out = std::process::Command::new("ps")
+            .args(ps_args)
+            .output()
+            .expect("ps listing for reap test");
+        parse_ps_rows(&String::from_utf8_lossy(&out.stdout))
     }
 }

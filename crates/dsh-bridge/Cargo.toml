@@ -26,3 +26,9 @@ windows-sys = { workspace = true, features = ["Win32_Foundation", "Win32_System_
 tempfile.workspace = true
 tokio-tungstenite = { version = "0.27", features = ["rustls-tls-native-roots"] }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time", "sync", "test-util"] }
+
+# SIGTERM/SIGKILL for the Unix graceful-then-force child kill and the orphan
+# reap (dsh web children have no stdin-EOF shutdown for the `web` command, so
+# reaping must target processes the app can no longer `wait` on).
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"

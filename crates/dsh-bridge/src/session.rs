@@ -481,8 +481,16 @@ pub fn run_harness_session(
                 // (`compaction/start` → `compaction/end`, plus the paired
                 // `command/done` result mapped in `map_session_event`); the
                 // reply only acknowledges the dispatch.
+                //
+                // Success paths need no extra event (the mux carries the
+                // notices). The failure paths DO: the command never ran, so
+                // no `command/*` events will ever arrive — without this the
+                // user's /compact silently does nothing (only a backend log
+                // line), which is how the double-wrapped-payload regression
+                // shipped unnoticed.
                 let compact_client = client.clone();
                 let compact_session_id = session_id.clone();
+                let compact_tx_events = tx_events.clone();
                 host.runtime().spawn(async move {
                     let start = Instant::now();
                     let result = compact_client
@@ -494,12 +502,18 @@ pub fn run_harness_session(
                         .await;
                     let elapsed_ms = start.elapsed().as_millis() as u64;
                     match &result {
-                        Ok(None) => tracing::warn!(
-                            target: "dsh-bridge::session",
-                            elapsed_ms,
-                            session_id = %compact_session_id,
-                            "manual compaction: /compact command not registered (agent preset has no compaction seam)",
-                        ),
+                        Ok(None) => {
+                            tracing::warn!(
+                                target: "dsh-bridge::session",
+                                elapsed_ms,
+                                session_id = %compact_session_id,
+                                "manual compaction: /compact command not registered (agent preset has no compaction seam)",
+                            );
+                            emit_compaction_failure(
+                                &compact_tx_events,
+                                "当前智能体预设未注册 /compact 命令，无法压缩上下文".to_string(),
+                            );
+                        }
                         Ok(Some(execution)) => match &execution.result {
                             crate::rpc_types::CommandsExecuteResult::Success { .. } => {
                                 tracing::info!(
@@ -519,6 +533,10 @@ pub fn run_harness_session(
                                     error = %text,
                                     "manual compaction failed",
                                 );
+                                emit_compaction_failure(
+                                    &compact_tx_events,
+                                    format!("上下文压缩未完成：{text}"),
+                                );
                             }
                         },
                         Err(err) => {
@@ -528,6 +546,10 @@ pub fn run_harness_session(
                                 session_id = %compact_session_id,
                                 error = %err,
                                 "commands/execute failed",
+                            );
+                            emit_compaction_failure(
+                                &compact_tx_events,
+                                format!("上下文压缩请求失败：{err}"),
                             );
                         }
                     }
@@ -1065,6 +1087,15 @@ fn compact_slash_commands() -> Vec<workspace_model::AvailableCommand> {
 /// `agentPreset` before the composer is ready.
 fn compact_command_should_be_published(session_preset: Option<&str>) -> bool {
     session_preset != Some("minimal")
+}
+
+/// Surface a manual-compaction failure to the UI as a standalone system
+/// message. The fire-and-forget ForceCompact dispatch only logs otherwise —
+/// when the RPC itself fails no `command/*` events ever arrive, and the
+/// user's `/compact` would silently do nothing (exactly how the
+/// double-wrapped-payload regression went unnoticed).
+fn emit_compaction_failure(tx_events: &mpsc::Sender<ClientEvent>, message: String) {
+    let _ = tx_events.send(ClientEvent::ContextCompacted { message });
 }
 
 /// Emit both config controls (Model + agent-preset Mode) in one update.

@@ -516,15 +516,14 @@ pub struct AskUserQuestionAnswerItemWire {
 // validates the args shape against the generated descriptor and rejects
 // anything else with `arguments-invalid`.
 
-/// `commands/execute` request payload: exactly one `args` object whose fields
-/// are the descriptor's wire names (`agentId`, `line`, `images`).
+/// `commands/execute` request payload: the descriptor's named wire fields
+/// themselves. `remote_payload` wraps this into the single `{ "args": … }`
+/// envelope the gateway validates — carrying an `args` field here would
+/// double-wrap into `{ "args": { "args": … } }`, which the typert gateway
+/// rejects with `arguments-invalid` (observed live against dsh 0.1.2-rc.1:
+/// `missing "agentId", "line", "images"; unexpected "args"`).
 #[derive(Debug, Clone, Serialize)]
 pub struct CommandsExecutePayload {
-    pub args: CommandsExecuteArgs,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct CommandsExecuteArgs {
     /// Wire name for the descriptor's `agent` lookup parameter: the session id.
     #[serde(rename = "agentId")]
     pub agent_id: String,
@@ -650,20 +649,21 @@ mod tests {
 
     #[test]
     fn commands_execute_payload_wire_shape() {
-        // The typert gateway requires the payload to be exactly one `args`
-        // object whose fields are the descriptor wire names.
+        // The payload carries the descriptor's wire fields BARE — the single
+        // `{ "args": … }` envelope is added by `remote_payload` (transport).
+        // A payload with its own `args` field would double-wrap and the
+        // gateway would reject it: missing "agentId", "line", "images";
+        // unexpected "args" (seen live on dsh 0.1.2-rc.1).
         let payload = crate::rpc_types::CommandsExecutePayload {
-            args: crate::rpc_types::CommandsExecuteArgs {
-                agent_id: "s-1".into(),
-                line: "/compact".into(),
-                images: Vec::new(),
-            },
+            agent_id: "s-1".into(),
+            line: "/compact".into(),
+            images: Vec::new(),
         };
         let json = serde_json::to_value(&payload).unwrap();
-        assert_eq!(json["args"]["agentId"], "s-1");
-        assert_eq!(json["args"]["line"], "/compact");
-        assert_eq!(json["args"]["images"], serde_json::json!([]));
-        assert_eq!(json.as_object().unwrap().len(), 1);
+        assert_eq!(json["agentId"], "s-1");
+        assert_eq!(json["line"], "/compact");
+        assert_eq!(json["images"], serde_json::json!([]));
+        assert_eq!(json.as_object().unwrap().len(), 3);
     }
 
     #[test]

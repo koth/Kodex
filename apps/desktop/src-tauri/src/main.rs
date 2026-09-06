@@ -112,6 +112,12 @@ fn main() {
                 // Tauri setup closure (and the UI) is not blocked on the
                 // child process + TCP probe.
                 try_start_codebuddy_proxy_at_launch(app.handle().clone());
+                // Reclaim `dsh web` processes orphaned by a previous crashed
+                // run (a crash/force-quit kills Kodex before teardown runs).
+                // Off the setup thread: the reap scans the process table.
+                tauri::async_runtime::spawn(async move {
+                    app_core::dsh_bringup().reap_orphaned_hosts();
+                });
                 app_core::startup_perf::mark("desktop/setup_end", "");
                 Ok(())
             }

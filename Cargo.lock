@@ -1078,6 +1078,7 @@ dependencies = [
  "dashmap",
  "dirs-next",
  "futures",
+ "libc",
  "reqwest",
  "serde",
  "serde_json",

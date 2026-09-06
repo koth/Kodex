@@ -920,24 +920,59 @@ impl HarnessHost {
     }
 
     /// Tear down the host: stop SSE loops, dispose runtime, kill spawned child.
-    /// Called when the last session drops its refcount.
+    /// Called when the last session drops its refcount. Abrupt Kodex death
+    /// that never reaches this (force-quit, SIGKILL, panic) is backstopped by
+    /// the per-spawn exit watchdog and, as the last resort, the next-launch
+    /// orphan reap — see `process.rs`.
     pub fn teardown(&self) {
         if self.torn_down.swap(true, Ordering::AcqRel) {
             return;
         }
         self.stop.notify_waiters();
-        // Kill a Kodex-spawned process (stdin EOF grace then terminate); never
-        // kill an external endpoint.
+        // Kill a Kodex-spawned process (SIGTERM grace then SIGKILL on Unix);
+        // never kill an external endpoint.
         if self.spawned.load(Ordering::Acquire) {
+            tracing::info!(
+                target: "dsh-bridge::host",
+                endpoint = %self.endpoint,
+                "teardown: killing spawned dsh web child"
+            );
             let direct_reaped = if let Ok(mut guard) = self.child.lock() {
                 if let Some(child) = guard.take() {
                     crate::process::kill_child_reaped(child).unwrap_or(false)
                 } else {
+                    tracing::warn!(
+                        target: "dsh-bridge::host",
+                        endpoint = %self.endpoint,
+                        "teardown: spawned host had no child handle to kill"
+                    );
                     false
                 }
             } else {
                 false
             };
+            // Outcome audit: without this the intent line above is the last
+            // word, and a child that survived SIGTERM+SIGKILL (or a missing
+            // handle) leaves no trace that the quit path failed.
+            if direct_reaped {
+                tracing::info!(
+                    target: "dsh-bridge::host",
+                    endpoint = %self.endpoint,
+                    "teardown: spawned dsh web child terminated"
+                );
+            } else if cfg!(windows) {
+                tracing::warn!(
+                    target: "dsh-bridge::host",
+                    endpoint = %self.endpoint,
+                    "teardown: spawned dsh web child not reaped; trying port-kill fallback"
+                );
+            } else {
+                tracing::warn!(
+                    target: "dsh-bridge::host",
+                    endpoint = %self.endpoint,
+                    "teardown: spawned dsh web child not reaped; no port-kill fallback on this platform"
+                );
+            }
             // Fallback for the shim case: when the `dsh` launcher (`cmd.exe`
             // /volta) has already exited, the long-lived `node` is orphaned and
             // `kill_child` (which only reaps the direct child) is a no-op. If
